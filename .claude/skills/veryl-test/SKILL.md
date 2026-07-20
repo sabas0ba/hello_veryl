@@ -7,6 +7,7 @@ description: Verylプロジェクトのテスト・ビルド実行手順と既�
 
 - `veryl test` : 全テスト実行。exit code 0/1で成否判定
 - `veryl test -t <substr>` : テスト名の部分一致フィルタ
+- `veryl test <files...>` : 解析対象ファイルを限定（編集途中で構文エラーのあるファイルを除外して実行できる。依存ファイルは列挙する）
 - `veryl test --wave` : 波形ダンプ
 - `veryl test --backend <interpret|cranelift|cc>` : 組込みシミュレータのバックエンド選択。挙動不審時は interpret と比較する
 - `veryl build` : トランスパイル（SystemVerilog生成）
@@ -29,3 +30,4 @@ description: Verylプロジェクトのテスト・ビルド実行手順と既�
 - 比較演算子はSVと異なり小なり `<:`，大なり `>:`（`<` `>` はビット幅指定に予約）
 - `for` のループ変数に型指定は書けない（`for i in 0..10 {`）
 - `inst` のポート接続は名前渡し。`leds[0]` のような式を渡す場合はポート名の明示が必要（`o_led: leds[0]`）
+- VSCodeのVeryl言語サーバはファイル分割・リネーム後にシンボルを二重登録し，大量の「"XXX" is duplicated」を出すことがある。`veryl check` が通るのにIDEだけエラーの場合はウィンドウリロードで解消する
