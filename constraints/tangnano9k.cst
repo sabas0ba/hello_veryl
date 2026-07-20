@@ -1,8 +1,10 @@
 // Tang Nano 9K (GW1NR-LV9QN88PC6/I5)
-// Pin assignments per Sipeed official example (TangNano-9K-example/led)
-// i_clk : 27 MHz onboard oscillator
-// i_rst : S1 button, active-low (matches Veryl default reset: async active-low)
-// leds  : 6 onboard LEDs, active-low
+// Pin assignments per Sipeed official examples (TangNano-9K-example/led, /uart)
+// i_clk   : 27 MHz onboard oscillator
+// i_rst   : S1 button, active-low (matches Veryl default reset: async active-low)
+// leds    : 6 onboard LEDs, active-low
+// uart_tx : FPGA TX -> BL702 -> PC (USB-CDC serial)
+// uart_rx : PC -> BL702 -> FPGA RX
 
 IO_LOC  "i_clk" 52;
 IO_PORT "i_clk" IO_TYPE=LVCMOS33 PULL_MODE=UP;
@@ -22,3 +24,8 @@ IO_LOC  "leds[4]" 15;
 IO_PORT "leds[4]" PULL_MODE=UP DRIVE=8;
 IO_LOC  "leds[5]" 16;
 IO_PORT "leds[5]" PULL_MODE=UP DRIVE=8;
+
+IO_LOC  "uart_tx" 17;
+IO_PORT "uart_tx" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+IO_LOC  "uart_rx" 18;
+IO_PORT "uart_rx" IO_TYPE=LVCMOS33 PULL_MODE=UP;

@@ -2,14 +2,33 @@ module Top #(
     param OscFreq: u32 = 27_000_000,
     param NumLeds: u32 = 6         ,
 ) (
-    i_clk: input  clock         ,
-    i_rst: input  reset         ,
-    leds : output logic<NumLeds>,
+    i_clk  : input  clock         ,
+    i_rst  : input  reset         ,
+    leds   : output logic<NumLeds>,
+    uart_tx: output logic         ,
+    uart_rx: input  logic         ,
 ) {
+    // UART Loopback Test: 受信バイトをそのまま送り返す
+    // RX(source)がdata/valid，TX(sink)がreadyを駆動するため1本のstream_ifで直結できる
+    inst echo_stream: stream_if;
+
+    inst uart: Uart #(
+        InClkFreq: OscFreq,
+        BaudRate : 115200 ,
+    ) (
+        i_clk    : i_clk      ,
+        i_rst    : i_rst      ,
+        uart_tx  : uart_tx    ,
+        uart_rx  : uart_rx    ,
+        tx_stream: echo_stream,
+        rx_stream: echo_stream,
+    );
+
+    // LED Blink Test
     for i in 0..NumLeds :g_led {
         inst blink: Blink #(
             InClkFreq: OscFreq,
-            BlinkFreq: i + 1  ,
+            BlinkFreq: i + 1,
         ) (
             i_clk: i_clk  ,
             i_rst: i_rst  ,

@@ -1,0 +1,172 @@
+{
+    // README「手順」の各操作を VSCode タスクとして実行する
+    // (ターミナル > タスクの実行，または Ctrl+Shift+B でビルド)
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Veryl: test (シミュレーション)",
+            "type": "shell",
+            "command": "veryl",
+            "args": ["test"],
+            "group": {
+                "kind": "test",
+                "isDefault": true
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "FPGA: 1. 書き込みツール準備 (初回のみ)",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/scripts/setup-toolchain.ps1"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "FPGA: 3. ビルド (コンテナ合成)",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/scripts/build-container.ps1"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "FPGA: 4. 書き込み (SRAM, 揮発)",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/scripts/flash.ps1"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "FPGA: 4. 書き込み (内蔵フラッシュ, 永続)",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/scripts/flash.ps1",
+                "-Flash"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "FPGA: デバイス検出 (JTAG IDCODE)",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/scripts/detect.ps1"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "FPGA: ビルド (Windowsネイティブ, SAC無効環境用)",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/scripts/build.ps1"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "UART: 対話ターミナル (Escで終了)",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/scripts/uart-term.ps1",
+                "-BaudRate",
+                "${input:uartBaud}"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "UART: 受信Hexダンプ (バイト数選択)",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/scripts/uart-term.ps1",
+                "-Hex",
+                "-BaudRate",
+                "${input:uartBaud}",
+                "-MaxBytes",
+                "${input:uartMaxBytes}"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "UART: 送信して応答表示",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/scripts/uart-send.ps1",
+                "-BaudRate",
+                "${input:uartBaud}",
+                "-Data",
+                "${input:uartData}"
+            ],
+            "problemMatcher": []
+        }
+    ],
+    "inputs": [
+        {
+            "id": "uartData",
+            "type": "promptString",
+            "description": "UART TX へ送る文字列（LF が付加されます）"
+        },
+        {
+            "id": "uartBaud",
+            "type": "pickString",
+            "description": "ボーレート",
+            "options": ["115200", "9600", "38400", "921600"],
+            "default": "115200"
+        },
+        {
+            "id": "uartMaxBytes",
+            "type": "pickString",
+            "description": "受信バイト数（0 = 無制限，Escで終了）",
+            "options": ["256", "1024", "4096", "0"],
+            "default": "256"
+        }
+    ]
+}
