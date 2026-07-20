@@ -402,3 +402,311 @@ module test_uart_tx_9600 {
         $finish();
     }
 }
+
+#[test(test_uart_rx_115200)]
+module test_uart_rx_115200 {
+    const InClkFreq: u32 = 27_000_000;
+    const BaudRate : u32 = 115200;
+    const CycPerBit: u32 = (InClkFreq + BaudRate / 2) / BaudRate;
+    const HalfCyc  : u32 = CycPerBit / 2;
+    const MaxWait  : u32 = CycPerBit * 30;
+    const GapCyc   : u32 = CycPerBit * 3;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    inst tx_st: stream_if;
+    inst rx_st: stream_if;
+
+    var _txd: logic;
+    var rxd : logic;
+
+    inst dut: Uart #(
+        InClkFreq: InClkFreq,
+        BaudRate : BaudRate ,
+    ) (
+        i_clk    : clk  ,
+        i_rst    : rst  ,
+        uart_tx  : _txd ,
+        uart_rx  : rxd  ,
+        tx_stream: tx_st,
+        rx_stream: rx_st,
+    );
+
+    var bytes: logic<8> [6];
+
+    initial {
+        bytes[0] = 8'h55; // 単発
+        bytes[1] = 8'ha3; // 連続 x3
+        bytes[2] = 8'h00;
+        bytes[3] = 8'hff;
+        bytes[4] = 8'h0f; // 間欠 x2
+        bytes[5] = 8'hf0;
+
+        tx_st.valid = 0;
+        tx_st.data  = 0;
+        rx_st.ready = 1; // 常時ready (validは1サイクルで完了する)
+        rxd         = 1; // line idle
+        rst.assert();
+        clk.next(4); // 2FF同期のフラッシュ
+        $assert(rx_st.valid == 1'b0);
+
+        // ---- 単発 ----
+        rxd = 0; // start bit
+        clk.next(CycPerBit);
+        for i in 0..8 {
+            rxd = bytes[0][i];
+            clk.next(CycPerBit);
+        }
+        rxd = 1; // stop bit
+        for _w in 0..MaxWait {
+            if rx_st.valid == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        $assert(rx_st.valid == 1'b1, "single: valid");
+        $assert(rx_st.data == bytes[0], "single: data");
+        clk.next(1); // handshake
+        $assert(rx_st.valid == 1'b0, "single: valid deassert");
+        clk.next(HalfCyc); // stop bit残り相当
+
+        // ---- 連続 (stop bit完了直後に次のstart) ----
+        for n in 1..4 {
+            rxd = 0; // start bit
+            clk.next(CycPerBit);
+            for i in 0..8 {
+                rxd = bytes[n][i];
+                clk.next(CycPerBit);
+            }
+            rxd = 1; // stop bit
+            for _w in 0..MaxWait {
+                if rx_st.valid == 1'b1 {
+                    break;
+                }
+                clk.next(1);
+            }
+            $assert(rx_st.valid == 1'b1, "burst %0d: valid", n);
+            $assert(rx_st.data == bytes[n], "burst %0d: data", n);
+            clk.next(1); // handshake
+            $assert(rx_st.valid == 1'b0, "burst %0d: valid deassert", n);
+            clk.next(HalfCyc); // stop bit残り相当
+        }
+
+        // ---- 間欠 (フレーム間にアイドルを挟む) ----
+        for n in 4..6 {
+            clk.next(GapCyc);
+            $assert(rx_st.valid == 1'b0, "gap %0d: idle", n);
+
+            rxd = 0; // start bit
+            clk.next(CycPerBit);
+            for i in 0..8 {
+                rxd = bytes[n][i];
+                clk.next(CycPerBit);
+            }
+            rxd = 1; // stop bit
+            for _w in 0..MaxWait {
+                if rx_st.valid == 1'b1 {
+                    break;
+                }
+                clk.next(1);
+            }
+            $assert(rx_st.valid == 1'b1, "gap %0d: valid", n);
+            $assert(rx_st.data == bytes[n], "gap %0d: data", n);
+            clk.next(1); // handshake
+            $assert(rx_st.valid == 1'b0, "gap %0d: valid deassert", n);
+            clk.next(HalfCyc); // stop bit残り相当
+        }
+
+        $finish();
+    }
+}
+
+#[test(test_uart_rx_9600)]
+module test_uart_rx_9600 {
+    const InClkFreq: u32 = 27_000_000;
+    const BaudRate : u32 = 9600;
+    const CycPerBit: u32 = (InClkFreq + BaudRate / 2) / BaudRate;
+    const HalfCyc  : u32 = CycPerBit / 2;
+    const MaxWait  : u32 = CycPerBit * 30;
+    const GapCyc   : u32 = CycPerBit * 3;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    inst tx_st: stream_if;
+    inst rx_st: stream_if;
+
+    var _txd: logic;
+    var rxd : logic;
+
+    inst dut: Uart #(
+        InClkFreq: InClkFreq,
+        BaudRate : BaudRate ,
+    ) (
+        i_clk    : clk  ,
+        i_rst    : rst  ,
+        uart_tx  : _txd ,
+        uart_rx  : rxd  ,
+        tx_stream: tx_st,
+        rx_stream: rx_st,
+    );
+
+    var bytes: logic<8> [6];
+
+    initial {
+        bytes[0] = 8'h55; // 単発
+        bytes[1] = 8'ha3; // 連続 x3
+        bytes[2] = 8'h00;
+        bytes[3] = 8'hff;
+        bytes[4] = 8'h0f; // 間欠 x2
+        bytes[5] = 8'hf0;
+
+        tx_st.valid = 0;
+        tx_st.data  = 0;
+        rx_st.ready = 1; // 常時ready (validは1サイクルで完了する)
+        rxd         = 1; // line idle
+        rst.assert();
+        clk.next(4); // 2FF同期のフラッシュ
+        $assert(rx_st.valid == 1'b0);
+
+        // ---- 単発 ----
+        rxd = 0; // start bit
+        clk.next(CycPerBit);
+        for i in 0..8 {
+            rxd = bytes[0][i];
+            clk.next(CycPerBit);
+        }
+        rxd = 1; // stop bit
+        for _w in 0..MaxWait {
+            if rx_st.valid == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        $assert(rx_st.valid == 1'b1, "single: valid");
+        $assert(rx_st.data == bytes[0], "single: data");
+        clk.next(1); // handshake
+        $assert(rx_st.valid == 1'b0, "single: valid deassert");
+        clk.next(HalfCyc); // stop bit残り相当
+
+        // ---- 連続 (stop bit完了直後に次のstart) ----
+        for n in 1..4 {
+            rxd = 0; // start bit
+            clk.next(CycPerBit);
+            for i in 0..8 {
+                rxd = bytes[n][i];
+                clk.next(CycPerBit);
+            }
+            rxd = 1; // stop bit
+            for _w in 0..MaxWait {
+                if rx_st.valid == 1'b1 {
+                    break;
+                }
+                clk.next(1);
+            }
+            $assert(rx_st.valid == 1'b1, "burst %0d: valid", n);
+            $assert(rx_st.data == bytes[n], "burst %0d: data", n);
+            clk.next(1); // handshake
+            $assert(rx_st.valid == 1'b0, "burst %0d: valid deassert", n);
+            clk.next(HalfCyc); // stop bit残り相当
+        }
+
+        // ---- 間欠 (フレーム間にアイドルを挟む) ----
+        for n in 4..6 {
+            clk.next(GapCyc);
+            $assert(rx_st.valid == 1'b0, "gap %0d: idle", n);
+
+            rxd = 0; // start bit
+            clk.next(CycPerBit);
+            for i in 0..8 {
+                rxd = bytes[n][i];
+                clk.next(CycPerBit);
+            }
+            rxd = 1; // stop bit
+            for _w in 0..MaxWait {
+                if rx_st.valid == 1'b1 {
+                    break;
+                }
+                clk.next(1);
+            }
+            $assert(rx_st.valid == 1'b1, "gap %0d: valid", n);
+            $assert(rx_st.data == bytes[n], "gap %0d: data", n);
+            clk.next(1); // handshake
+            $assert(rx_st.valid == 1'b0, "gap %0d: valid deassert", n);
+            clk.next(HalfCyc); // stop bit残り相当
+        }
+
+        $finish();
+    }
+}
+
+#[test(test_uart_loopback)]
+module test_uart_loopback {
+    const InClkFreq: u32 = 27_000_000;
+    const BaudRate : u32 = 115200;
+    const CycPerBit: u32 = (InClkFreq + BaudRate / 2) / BaudRate;
+    const MaxWait  : u32 = CycPerBit * 30;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    inst tx_st: stream_if;
+    inst rx_st: stream_if;
+
+    var line: logic; // uart_tx -> uart_rx 直結
+
+    inst dut: Uart #(
+        InClkFreq: InClkFreq,
+        BaudRate : BaudRate ,
+    ) (
+        i_clk    : clk  ,
+        i_rst    : rst  ,
+        uart_tx  : line ,
+        uart_rx  : line ,
+        tx_stream: tx_st,
+        rx_stream: rx_st,
+    );
+
+    var bytes: logic<8> [6];
+
+    initial {
+        bytes[0] = 8'h55;
+        bytes[1] = 8'ha3;
+        bytes[2] = 8'h00;
+        bytes[3] = 8'hff;
+        bytes[4] = 8'h0f;
+        bytes[5] = 8'hf0;
+
+        tx_st.valid = 0;
+        tx_st.data  = 0;
+        rx_st.ready = 1;
+        rst.assert();
+
+        // tx_streamへ投入したバイトがrx_streamから返ることを確認
+        for n in 0..6 {
+            tx_st.data  = bytes[n];
+            tx_st.valid = 1;
+            for _w in 0..MaxWait {
+                if tx_st.ready == 1'b1 {
+                    break;
+                }
+                clk.next(1);
+            }
+            clk.next(1); // accept edge
+            tx_st.valid = 0;
+
+            for _w in 0..MaxWait {
+                if rx_st.valid == 1'b1 {
+                    break;
+                }
+                clk.next(1);
+            }
+            $assert(rx_st.valid == 1'b1, "loopback %0d: valid", n);
+            $assert(rx_st.data == bytes[n], "loopback %0d: data", n);
+            clk.next(1); // handshake
+        }
+
+        $finish();
+    }
+}
