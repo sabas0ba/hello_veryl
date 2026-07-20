@@ -2,14 +2,49 @@ module Top #(
     param OscFreq: u32 = 27_000_000,
     param NumLeds: u32 = 6         ,
 ) (
-    i_clk: input  clock         ,
-    i_rst: input  reset         ,
-    leds : output logic<NumLeds>,
+    i_clk  : input  clock         ,
+    i_rst  : input  reset         ,
+    leds   : output logic<NumLeds>,
+    uart_tx: output logic         ,
+    uart_rx: input  logic         ,
 ) {
+    // UART TX Test
+    inst uart_tx_stream: stream_if;
+    inst uart_rx_stream: stream_if;
+    inst uart: Uart #(
+        InClkFreq: OscFreq,
+        BaudRate : 115200 ,
+    ) (
+        i_clk    : i_clk         ,
+        i_rst    : i_rst         ,
+        uart_tx  : uart_tx       ,
+        uart_rx  : uart_rx       ,
+        tx_stream: uart_tx_stream,
+        rx_stream: uart_rx_stream,
+    );
+    // 1文字ずつincrementalで送るテスト
+    always_ff (i_clk, i_rst) {
+        if_reset {
+            uart_tx_stream.valid = false;
+            uart_tx_stream.data  = 0;
+        } else {
+            if !uart_tx_stream.valid {
+                uart_tx_stream.valid = true;
+            } else if uart_tx_stream.ready {
+                // ready & valid
+                uart_tx_stream.valid = false;
+                uart_tx_stream.data  = uart_tx_stream.data + 1;
+            }
+        }
+    }
+    // RXは無効のまま待機
+    assign uart_rx_stream.ready = false;
+
+    // LED Blink Test
     for i in 0..NumLeds :g_led {
         inst blink: Blink #(
             InClkFreq: OscFreq,
-            BlinkFreq: i + 1  ,
+            BlinkFreq: i + 1,
         ) (
             i_clk: i_clk  ,
             i_rst: i_rst  ,
