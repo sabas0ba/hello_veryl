@@ -1,0 +1,24 @@
+module Blink #(
+    param InClkFreq: u32 = 27_000_000,
+    param BlinkFreq: u32 = 1         ,
+) (
+    i_clk: input  clock,
+    i_rst: input  reset,
+    o_led: output logic,
+) {
+    const InvCount    : u32                 = InClkFreq / BlinkFreq;
+    const CounterWidth: u32                 = $clog2(InvCount);
+    var   counter     : logic<CounterWidth>;
+
+    always_ff (i_clk, i_rst) {
+        if_reset {
+            counter = 0;
+            o_led   = 0;
+        } else if counter <: InvCount {
+            counter = counter + 1;
+        } else {
+            counter = 0;
+            o_led   = ~o_led;
+        }
+    }
+}
