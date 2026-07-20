@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(veryl test*)",
+      "Bash(veryl build*)",
+      "Bash(veryl check*)",
+      "Bash(veryl fmt*)",
+      "PowerShell(veryl test*)",
+      "PowerShell(veryl build*)",
+      "PowerShell(veryl check*)",
+      "PowerShell(veryl fmt*)"
+    ]
+  }
+}
