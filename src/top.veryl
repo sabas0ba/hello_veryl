@@ -1,0 +1,19 @@
+module Top #(
+    param OscFreq: u32 = 27_000_000,
+    param NumLeds: u32 = 6         ,
+) (
+    i_clk: input  clock         ,
+    i_rst: input  reset         ,
+    leds : output logic<NumLeds>,
+) {
+    for i in 0..NumLeds :g_led {
+        inst blink: Blink #(
+            InClkFreq: OscFreq,
+            BlinkFreq: i + 1  ,
+        ) (
+            i_clk: i_clk  ,
+            i_rst: i_rst  ,
+            o_led: leds[i],
+        );
+    }
+}

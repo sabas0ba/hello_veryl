@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  veryl:
+    runs-on: ubuntu-latest
+    container:
+      # veryllang/veryl:0.20.2 (Debian trixie, multi-arch index digest)
+      image: veryllang/veryl@sha256:147ca873b012cb0c0ba00f5a19f7f2f58a7fdd6400c5f823bb78bf23f2100ac9
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Build and test
+        run: bash ./scripts/ci.sh
