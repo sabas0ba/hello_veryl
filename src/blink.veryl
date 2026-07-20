@@ -23,11 +23,12 @@ module Blink #(
     }
 }
 
-#[test(test_blink)]
-module test_blink {
-    const InClkFreq: u32 = 10;
-    const BlinkFreq: u32 = 1;
-    const InvCount : u32 = InClkFreq / (BlinkFreq * 2);
+#[test(test_blink_small)]
+module test_blink_small {
+    const InClkFreq : u32 = 4;
+    const BlinkFreq : u32 = 1;
+    const InvCount  : u32 = InClkFreq / (BlinkFreq * 2);
+    const InvCountM1: u32 = InvCount - 1;
 
     inst clk: $tb::clock_gen;
     inst rst: $tb::reset_gen ( clk );
@@ -45,13 +46,98 @@ module test_blink {
 
     initial {
         rst.assert();
-        $assert   (led == 1'b0);
+        $assert (led == 1'b0);
 
-        clk.next(InvCount);
+        clk.next(InvCountM1);
+        $assert (led == 1'b0);
+
+        clk.next(1);
         $assert (led == 1'b1);
 
         clk.next(InvCount);
         $assert (led == 1'b0);
+
+        clk.next(InvCount);
+        $assert (led == 1'b1);
+
+        $finish();
+    }
+}
+
+#[test(test_blink_large)]
+module test_blink_large {
+    const InClkFreq : u32 = 200_000;
+    const BlinkFreq : u32 = 1;
+    const InvCount  : u32 = InClkFreq / (BlinkFreq * 2);
+    const InvCountM1: u32 = InvCount - 1;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    var led: logic;
+
+    inst dut: Blink #(
+        InClkFreq: InClkFreq,
+        BlinkFreq: BlinkFreq,
+    ) (
+        i_clk: clk,
+        i_rst: rst,
+        o_led: led,
+    );
+
+    initial {
+        rst.assert();
+        $assert (led == 1'b0);
+
+        clk.next(InvCountM1);
+        $assert (led == 1'b0);
+
+        clk.next(1);
+        $assert (led == 1'b1);
+
+        clk.next(InvCount);
+        $assert (led == 1'b0);
+
+        clk.next(InvCount);
+        $assert (led == 1'b1);
+
+        $finish();
+    }
+}
+
+#[test(test_blink_actual)]
+module test_blink_actual {
+    const InClkFreq : u32 = 27_000_000;
+    const BlinkFreq : u32 = 1;
+    const InvCount  : u32 = InClkFreq / (BlinkFreq * 2);
+    const InvCountM1: u32 = InvCount - 1;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    var led: logic;
+
+    inst dut: Blink (
+        i_clk: clk,
+        i_rst: rst,
+        o_led: led,
+    );
+
+    initial {
+        rst.assert();
+        $assert (led == 1'b0);
+
+        clk.next(InvCountM1);
+        $assert (led == 1'b0);
+
+        clk.next(1);
+        $assert (led == 1'b1);
+
+        clk.next(InvCount);
+        $assert (led == 1'b0);
+
+        clk.next(InvCount);
+        $assert (led == 1'b1);
 
         $finish();
     }
