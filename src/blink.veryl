@@ -6,7 +6,7 @@ module Blink #(
     i_rst: input  reset,
     o_led: output logic,
 ) {
-    const InvCount    : u32                 = InClkFreq / BlinkFreq;
+    const InvCount    : u32                 = InClkFreq / (BlinkFreq * 2);
     const CounterWidth: u32                 = $clog2(InvCount);
     var   counter     : logic<CounterWidth>;
 
@@ -14,11 +14,45 @@ module Blink #(
         if_reset {
             counter = 0;
             o_led   = 0;
-        } else if counter <: InvCount {
+        } else if counter <: InvCount - 1 {
             counter = counter + 1;
         } else {
             counter = 0;
             o_led   = ~o_led;
         }
+    }
+}
+
+#[test(test_blink)]
+module test_blink {
+    const InClkFreq: u32 = 10;
+    const BlinkFreq: u32 = 1;
+    const InvCount : u32 = InClkFreq / (BlinkFreq * 2);
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    var led: logic;
+
+    inst dut: Blink #(
+        InClkFreq: InClkFreq,
+        BlinkFreq: BlinkFreq,
+    ) (
+        i_clk: clk,
+        i_rst: rst,
+        o_led: led,
+    );
+
+    initial {
+        rst.assert();
+        $assert   (led == 1'b0);
+
+        clk.next(InvCount);
+        $assert (led == 1'b1);
+
+        clk.next(InvCount);
+        $assert (led == 1'b0);
+
+        $finish();
     }
 }
