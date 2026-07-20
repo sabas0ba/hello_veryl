@@ -1,0 +1,101 @@
+{
+    // README「手順」の各操作を VSCode タスクとして実行する
+    // (ターミナル > タスクの実行，または Ctrl+Shift+B でビルド)
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Veryl: test (シミュレーション)",
+            "type": "shell",
+            "command": "veryl",
+            "args": ["test"],
+            "group": {
+                "kind": "test",
+                "isDefault": true
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "FPGA: 1. 書き込みツール準備 (初回のみ)",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/scripts/setup-toolchain.ps1"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "FPGA: 3. ビルド (コンテナ合成)",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/scripts/build-container.ps1"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "FPGA: 4. 書き込み (SRAM, 揮発)",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/scripts/flash.ps1"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "FPGA: 4. 書き込み (内蔵フラッシュ, 永続)",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/scripts/flash.ps1",
+                "-Flash"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "FPGA: デバイス検出 (JTAG IDCODE)",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/scripts/detect.ps1"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "FPGA: ビルド (Windowsネイティブ, SAC無効環境用)",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/scripts/build.ps1"
+            ],
+            "problemMatcher": []
+        }
+    ]
+}
