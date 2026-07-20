@@ -4,5 +4,9 @@
 /dependencies
 *.f
 
+# FPGA toolchain (installed by scripts/setup-toolchain.ps1) and bitstream output
+/tools/
+/build/
+
 # Verilator
 obj_dir/
