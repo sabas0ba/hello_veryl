@@ -46,8 +46,8 @@ module Uart #(
             }
         } else {
             // 送信中 (更にcyc_counter分の周期でデータをシフト)
-            if tx_counter <: DataWidthParity - 1 {
-                if tx_cyc_counter <: CycPerBit {
+            if tx_counter <: DataWidthParity {
+                if tx_cyc_counter <: CycPerBit - 1 {
                     tx_cyc_counter = tx_cyc_counter + 1;
                 } else {
                     // 1文字送信済
@@ -62,4 +62,248 @@ module Uart #(
         }
     }
 
+}
+
+#[test(test_uart_tx_115200)]
+module test_uart_tx_115200 {
+    const InClkFreq: u32 = 27_000_000;
+    const BaudRate : u32 = 115200;
+    const CycPerBit: u32 = (InClkFreq + BaudRate / 2) / BaudRate;
+    const HalfCyc  : u32 = CycPerBit / 2;
+    const MaxWait  : u32 = CycPerBit * 30;
+    const GapCyc   : u32 = CycPerBit * 3;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    inst tx_st: stream_if;
+    inst rx_st: stream_if;
+
+    var txd: logic;
+    var rxd: logic;
+    assign rxd = 1'b1; // RX line idle
+
+    inst dut: Uart #(
+        InClkFreq: InClkFreq,
+        BaudRate : BaudRate ,
+    ) (
+        i_clk    : clk  ,
+        i_rst    : rst  ,
+        uart_tx  : txd  ,
+        uart_rx  : rxd  ,
+        tx_stream: tx_st,
+        rx_stream: rx_st,
+    );
+
+    var bytes: logic<8> [6];
+
+    initial {
+        bytes[0] = 8'h55; // 単発
+        bytes[1] = 8'ha3; // 連続 x3
+        bytes[2] = 8'h00;
+        bytes[3] = 8'hff;
+        bytes[4] = 8'h0f; // 間欠 x2
+        bytes[5] = 8'hf0;
+
+        tx_st.valid = 0;
+        tx_st.data  = 0;
+        rst.assert();
+        $assert(txd == 1'b1); // idle high
+
+        // ---- 単発 ----
+        tx_st.data  = bytes[0];
+        tx_st.valid = 1;
+        for _w in 0..MaxWait {
+            if tx_st.ready == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        clk.next(1); // accept edge
+        tx_st.valid = 0;
+
+        clk.next(HalfCyc);
+        $assert(txd == 1'b0, "single: start bit");
+        for i in 0..8 {
+            clk.next(CycPerBit);
+            $assert(txd == bytes[0][i], "single: data bit %0d", i);
+        }
+        clk.next(CycPerBit);
+        $assert(txd == 1'b1, "single: stop bit");
+
+        // ---- 連続 (validを保持しback-to-back送信) ----
+        tx_st.valid = 1;
+        for n in 1..4 {
+            tx_st.data = bytes[n];
+            for _w in 0..MaxWait {
+                if tx_st.ready == 1'b1 {
+                    break;
+                }
+                clk.next(1);
+            }
+            clk.next(1); // accept edge
+            if n == 3 {
+                tx_st.valid = 0;
+            }
+
+            clk.next(HalfCyc);
+            $assert(txd == 1'b0, "burst %0d: start bit", n);
+            for i in 0..8 {
+                clk.next(CycPerBit);
+                $assert(txd == bytes[n][i], "burst %0d: data bit %0d", n, i);
+            }
+            clk.next(CycPerBit);
+            $assert(txd == 1'b1, "burst %0d: stop bit", n);
+        }
+
+        // ---- 間欠 (フレーム間にアイドルを挟む) ----
+        for n in 4..6 {
+            clk.next(GapCyc);
+            $assert(txd == 1'b1, "gap %0d: idle", n);
+
+            tx_st.data  = bytes[n];
+            tx_st.valid = 1;
+            for _w in 0..MaxWait {
+                if tx_st.ready == 1'b1 {
+                    break;
+                }
+                clk.next(1);
+            }
+            clk.next(1); // accept edge
+            tx_st.valid = 0;
+
+            clk.next(HalfCyc);
+            $assert(txd == 1'b0, "gap %0d: start bit", n);
+            for i in 0..8 {
+                clk.next(CycPerBit);
+                $assert(txd == bytes[n][i], "gap %0d: data bit %0d", n, i);
+            }
+            clk.next(CycPerBit);
+            $assert(txd == 1'b1, "gap %0d: stop bit", n);
+        }
+
+        $finish();
+    }
+}
+
+#[test(test_uart_tx_9600)]
+module test_uart_tx_9600 {
+    const InClkFreq: u32 = 27_000_000;
+    const BaudRate : u32 = 9600;
+    const CycPerBit: u32 = (InClkFreq + BaudRate / 2) / BaudRate;
+    const HalfCyc  : u32 = CycPerBit / 2;
+    const MaxWait  : u32 = CycPerBit * 30;
+    const GapCyc   : u32 = CycPerBit * 3;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    inst tx_st: stream_if;
+    inst rx_st: stream_if;
+
+    var txd: logic;
+    var rxd: logic;
+    assign rxd = 1'b1; // RX line idle
+
+    inst dut: Uart #(
+        InClkFreq: InClkFreq,
+        BaudRate : BaudRate ,
+    ) (
+        i_clk    : clk  ,
+        i_rst    : rst  ,
+        uart_tx  : txd  ,
+        uart_rx  : rxd  ,
+        tx_stream: tx_st,
+        rx_stream: rx_st,
+    );
+
+    var bytes: logic<8> [6];
+
+    initial {
+        bytes[0] = 8'h55; // 単発
+        bytes[1] = 8'ha3; // 連続 x3
+        bytes[2] = 8'h00;
+        bytes[3] = 8'hff;
+        bytes[4] = 8'h0f; // 間欠 x2
+        bytes[5] = 8'hf0;
+
+        tx_st.valid = 0;
+        tx_st.data  = 0;
+        rst.assert();
+        $assert(txd == 1'b1); // idle high
+
+        // ---- 単発 ----
+        tx_st.data  = bytes[0];
+        tx_st.valid = 1;
+        for _w in 0..MaxWait {
+            if tx_st.ready == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        clk.next(1); // accept edge
+        tx_st.valid = 0;
+
+        clk.next(HalfCyc);
+        $assert(txd == 1'b0, "single: start bit");
+        for i in 0..8 {
+            clk.next(CycPerBit);
+            $assert(txd == bytes[0][i], "single: data bit %0d", i);
+        }
+        clk.next(CycPerBit);
+        $assert(txd == 1'b1, "single: stop bit");
+
+        // ---- 連続 (validを保持しback-to-back送信) ----
+        tx_st.valid = 1;
+        for n in 1..4 {
+            tx_st.data = bytes[n];
+            for _w in 0..MaxWait {
+                if tx_st.ready == 1'b1 {
+                    break;
+                }
+                clk.next(1);
+            }
+            clk.next(1); // accept edge
+            if n == 3 {
+                tx_st.valid = 0;
+            }
+
+            clk.next(HalfCyc);
+            $assert(txd == 1'b0, "burst %0d: start bit", n);
+            for i in 0..8 {
+                clk.next(CycPerBit);
+                $assert(txd == bytes[n][i], "burst %0d: data bit %0d", n, i);
+            }
+            clk.next(CycPerBit);
+            $assert(txd == 1'b1, "burst %0d: stop bit", n);
+        }
+
+        // ---- 間欠 (フレーム間にアイドルを挟む) ----
+        for n in 4..6 {
+            clk.next(GapCyc);
+            $assert(txd == 1'b1, "gap %0d: idle", n);
+
+            tx_st.data  = bytes[n];
+            tx_st.valid = 1;
+            for _w in 0..MaxWait {
+                if tx_st.ready == 1'b1 {
+                    break;
+                }
+                clk.next(1);
+            }
+            clk.next(1); // accept edge
+            tx_st.valid = 0;
+
+            clk.next(HalfCyc);
+            $assert(txd == 1'b0, "gap %0d: start bit", n);
+            for i in 0..8 {
+                clk.next(CycPerBit);
+                $assert(txd == bytes[n][i], "gap %0d: data bit %0d", n, i);
+            }
+            clk.next(CycPerBit);
+            $assert(txd == 1'b1, "gap %0d: stop bit", n);
+        }
+
+        $finish();
+    }
 }
