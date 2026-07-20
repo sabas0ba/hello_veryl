@@ -96,6 +96,77 @@
                 "${workspaceFolder}/scripts/build.ps1"
             ],
             "problemMatcher": []
+        },
+        {
+            "label": "UART: 対話ターミナル (Escで終了)",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/scripts/uart-term.ps1",
+                "-BaudRate",
+                "${input:uartBaud}"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "UART: 受信Hexダンプ (バイト数選択)",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/scripts/uart-term.ps1",
+                "-Hex",
+                "-BaudRate",
+                "${input:uartBaud}",
+                "-MaxBytes",
+                "${input:uartMaxBytes}"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "UART: 送信して応答表示",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/scripts/uart-send.ps1",
+                "-BaudRate",
+                "${input:uartBaud}",
+                "-Data",
+                "${input:uartData}"
+            ],
+            "problemMatcher": []
+        }
+    ],
+    "inputs": [
+        {
+            "id": "uartData",
+            "type": "promptString",
+            "description": "UART TX へ送る文字列（LF が付加されます）"
+        },
+        {
+            "id": "uartBaud",
+            "type": "pickString",
+            "description": "ボーレート",
+            "options": ["115200", "9600", "38400", "921600"],
+            "default": "115200"
+        },
+        {
+            "id": "uartMaxBytes",
+            "type": "pickString",
+            "description": "受信バイト数（0 = 無制限，Escで終了）",
+            "options": ["256", "1024", "4096", "0"],
+            "default": "256"
         }
     ]
 }
