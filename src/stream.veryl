@@ -1,0 +1,19 @@
+interface stream_if #(
+    param BitWidth: u32 = 8,
+) {
+    var data : logic<BitWidth>;
+    var valid: logic          ;
+    var ready: logic          ;
+
+    modport source {
+        data : output,
+        valid: output,
+        ready: input ,
+    }
+
+    modport sink {
+        data : input ,
+        valid: input ,
+        ready: output,
+    }
+}

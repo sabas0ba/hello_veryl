@@ -1,0 +1,65 @@
+module Uart #(
+    param InClkFreq: u32 = 27_000_000,
+    param BaudRate : u32 = 115200    ,
+) (
+    // Clock/Reset
+    i_clk: input clock,
+    i_rst: input reset,
+    // UART TX/RX pin
+    uart_tx: output logic,
+    uart_rx: input  logic,
+    // TX/RX Data
+    tx_stream: modport stream_if::sink  ,
+    rx_stream: modport stream_if::source,
+) {
+    // 四捨五入付きで，1bitあたりのサイクル数算出
+    const CycPerBit      : u32 = (InClkFreq + BaudRate / 2) / BaudRate;
+    const HalfCycPerBit  : u32 = CycPerBit / 2;
+    const CycCounterWidth: u32 = $clog2(CycPerBit);
+    // データ数
+    const DataWidthParity : u32 = 1 + 8 + 1; // [MSB] stop bit + data bit + start bit [LSB]
+    const DataCounterWidth: u32 = $clog2(DataWidthParity);
+
+    var is_sending    : lbool                  ;
+    var tx_cyc_counter: logic<CycCounterWidth> ;
+    var tx_counter    : logic<DataCounterWidth>;
+    var tx_data       : logic<DataWidthParity> ;
+    assign uart_tx = tx_data[lsb];
+
+    always_ff (i_clk, i_rst) {
+        if_reset {
+            is_sending      = false;
+            tx_cyc_counter  = 0;
+            tx_counter      = 0;
+            tx_stream.ready = false;
+            tx_data         = '1;
+        } else if !is_sending {
+            // ready & validで送信データFetch
+            if !tx_stream.ready {
+                tx_stream.ready = true;
+            } else if tx_stream.valid {
+                tx_stream.ready = false;
+                is_sending      = true;
+                tx_cyc_counter  = 0;
+                tx_counter      = 0;
+                tx_data         = {1'b1, tx_stream.data, 1'b0};
+            }
+        } else {
+            // 送信中 (更にcyc_counter分の周期でデータをシフト)
+            if tx_counter <: DataWidthParity - 1 {
+                if tx_cyc_counter <: CycPerBit {
+                    tx_cyc_counter = tx_cyc_counter + 1;
+                } else {
+                    // 1文字送信済
+                    tx_cyc_counter = 0;
+                    tx_counter     = tx_counter + 1;
+                    tx_data        = {1'b1, tx_data[msb:lsb + 1]}; // popout LSB
+                }
+            } else {
+                // 全部終わり
+                is_sending = false;
+            }
+        }
+    }
+
+}
