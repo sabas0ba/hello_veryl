@@ -69,6 +69,8 @@ module Uart #(
         idle,
         wait_d0,
         recv_data,
+        wait_stop,
+        wait_line_idle,
         push_to_stream,
     }
     var rx_state      : RxState                    ;
@@ -76,6 +78,16 @@ module Uart #(
     var rx_counter    : logic  <RxDataCounterWidth>;
     var rx_data       : logic  <RxDataWidth>       ;
     assign rx_stream.data = rx_data;
+
+    // 2FFシンクロナイザ．非同期入力uart_rxをFSMで直接参照しない
+    var rx_sync: logic<2>;
+    always_ff (i_clk, i_rst) {
+        if_reset {
+            rx_sync = '1; // reset直後の偽start検出防止 (idle=High)
+        } else {
+            rx_sync = {rx_sync[lsb], uart_rx};
+        }
+    }
 
     always_ff (i_clk, i_rst) {
         if_reset {
@@ -85,8 +97,8 @@ module Uart #(
             rx_data         = 0;
             rx_stream.valid = false;
         } else if rx_state == RxState::idle {
-            // uart_rx から start bitが創出されるまで待機
-            if uart_rx == 1'b0 {
+            // uart_rx から start bitが検出されるまで待機
+            if rx_sync[msb] == 1'b0 {
                 rx_state       = RxState::wait_d0;
                 rx_cyc_counter = 0;
             }
@@ -94,26 +106,47 @@ module Uart #(
             // Start bit検出 ~ 1/2周期経過待機してから転送ロジック開始
             if rx_cyc_counter <: HalfCycPerBit - 1 {
                 rx_cyc_counter = rx_cyc_counter + 1;
-            } else {
+            } else if rx_sync[msb] == 1'b0 {
+                // start bit中央でまだLow → フレーム確定
                 rx_state       = RxState::recv_data;
                 rx_cyc_counter = 0;
                 rx_counter     = 0;
                 rx_data        = 0;
+            } else {
+                // start bit幅未満のグリッチだったので破棄
+                rx_state = RxState::idle;
             }
         } else if rx_state == RxState::recv_data {
-            // 周期ごとにデータ受信．Startbitは除去済なのでデータだけあればよい
-            if rx_counter <: RxDataWidth {
-                if rx_cyc_counter <: CycPerBit - 1 {
-                    rx_cyc_counter = rx_cyc_counter + 1;
-                } else {
-                    rx_data        = {uart_rx, rx_data[msb:lsb + 1]}; // push to MSB
-                    rx_cyc_counter = 0;
-                    rx_counter     = rx_counter + 1;
-                }
+            // start中央から1周期ごとにD0..D7を中央サンプル
+            if rx_cyc_counter <: CycPerBit - 1 {
+                rx_cyc_counter = rx_cyc_counter + 1;
             } else {
+                rx_data        = {rx_sync[msb], rx_data[msb:lsb + 1]}; // push to MSB
+                rx_cyc_counter = 0;
+                if rx_counter == RxDataWidth - 1 {
+                    // 8bit目のサンプル完了 (0..7で数えるためカウンタ幅は$clog2(8)のままでよい)
+                    rx_state = RxState::wait_stop;
+                } else {
+                    rx_counter = rx_counter + 1;
+                }
+            }
+        } else if rx_state == RxState::wait_stop {
+            // stop bit中央で1を確認 (framingチェック)．確認後は残り半分を待たずに
+            // 遷移し，送信側クロックが速い場合の次フレームstartエッジに備える
+            if rx_cyc_counter <: CycPerBit - 1 {
+                rx_cyc_counter = rx_cyc_counter + 1;
+            } else if rx_sync[msb] == 1'b1 {
                 // データ準備OK
                 rx_state        = RxState::push_to_stream;
                 rx_stream.valid = true;
+            } else {
+                // framing error: このバイトを破棄し，ラインがidleへ戻るのを待つ
+                rx_state = RxState::wait_line_idle;
+            }
+        } else if rx_state == RxState::wait_line_idle {
+            // break等でLowが続く間は再同期しない
+            if rx_sync[msb] == 1'b1 {
+                rx_state = RxState::idle;
             }
         } else if rx_state == RxState::push_to_stream {
             // ready & validで完了 (validはすでに立ててある)
