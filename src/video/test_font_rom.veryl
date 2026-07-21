@@ -1,0 +1,65 @@
+// FontRom (生成物) の検証．font/font8x16.txt の既知グリフと照合する
+#[test(test_font_rom)]
+module test_font_rom {
+    inst clk: $tb::clock_gen;
+
+    var code: logic<7>;
+    var row : logic<4>;
+    var line: logic<8>;
+
+    inst dut: FontRom (
+        i_clk : clk ,
+        i_code: code,
+        i_row : row ,
+        o_line: line,
+    );
+
+    initial {
+        // space (0x20): 全行0
+        code = 7'h20;
+        for r in 0..16 {
+            row = r;
+            clk.next(1);
+            $assert(line == 8'h00, "space row %0d", r);
+        }
+
+        // '!' (0x21): row3-9とrow11-12が ...#.... (bit3), row10は空
+        code = 7'h21;
+        row  = 3;
+        clk.next(1);
+        $assert(line == 8'h08, "'!' row3");
+        row = 10;
+        clk.next(1);
+        $assert(line == 8'h00, "'!' row10");
+        row = 12;
+        clk.next(1);
+        $assert(line == 8'h08, "'!' row12");
+
+        // 'A' (0x41): row3=...#.... row8=#.....#. row9=#######. row15=空
+        code = 7'h41;
+        row  = 3;
+        clk.next(1);
+        $assert(line == 8'h08, "'A' row3");
+        row = 8;
+        clk.next(1);
+        $assert(line == 8'h41, "'A' row8");
+        row = 9;
+        clk.next(1);
+        $assert(line == 8'h7f, "'A' row9");
+        row = 15;
+        clk.next(1);
+        $assert(line == 8'h00, "'A' row15");
+
+        // 未定義コード (0x00, 0x7f): 全0
+        code = 7'h00;
+        row  = 0;
+        clk.next(1);
+        $assert(line == 8'h00, "undef 0x00");
+        code = 7'h7f;
+        row  = 5;
+        clk.next(1);
+        $assert(line == 8'h00, "undef 0x7f");
+
+        $finish();
+    }
+}
