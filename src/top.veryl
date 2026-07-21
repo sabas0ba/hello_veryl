@@ -32,40 +32,49 @@ module Top #(
         rx_stream: echo_stream,
     );
 
-    // LCD: 時間で流れるRGBグラデーションパターン
-    // R=x+frame (横方向へ流れる), G=y (縦グラデ), B=frame (全面で明滅)
-    var lcd_pos_x    : logic<10>;
-    var lcd_pos_y    : logic<9> ;
-    var lcd_frame    : logic    ;
-    var frame_counter: logic<8> ;
-
-    always_ff (i_clk, i_rst) {
-        if_reset {
-            frame_counter = 0;
-        } else if lcd_frame {
-            frame_counter = frame_counter + 1;
-        }
-    }
-
-    let grad_r: logic<8> = lcd_pos_x[7:0] + frame_counter;
-    let grad_g: logic<8> = lcd_pos_y[7:0];
-    let grad_b: logic<8> = frame_counter;
+    // LCD: UART TXへ流れるバイト列を傍受してテキスト表示 (白文字/黒背景)
+    var vt_de    : logic    ;
+    var vt_hsync : logic    ;
+    var vt_vsync : logic    ;
+    var vt_pos_x : logic<10>;
+    var vt_pos_y : logic<9> ;
+    var _vt_frame: logic    ;
+    var px       : logic    ;
 
     inst video_timing: VideoTiming (
         i_clk           ,
         i_rst           ,
-        de   : lcd_de   ,
-        hsync: lcd_hsync,
-        vsync: lcd_vsync,
-        frame: lcd_frame,
-        pos_x: lcd_pos_x,
-        pos_y: lcd_pos_y,
+        de   : vt_de    ,
+        hsync: vt_hsync ,
+        vsync: vt_vsync ,
+        frame: _vt_frame,
+        pos_x: vt_pos_x ,
+        pos_y: vt_pos_y ,
     );
 
-    // 画素合成: 8bit/chのパターンをde区間のみRGB565へ丸めて出力
-    assign lcd_r = if lcd_de ? grad_r[7:3] : 0;
-    assign lcd_g = if lcd_de ? grad_g[7:2] : 0;
-    assign lcd_b = if lcd_de ? grad_b[7:3] : 0;
+    // handshake成立サイクルを傍受 (エコー動作には影響しない)
+    let snoop_valid: logic = echo_stream.valid && echo_stream.ready;
+
+    inst console: TextConsole (
+        i_clk                         ,
+        i_rst                         ,
+        i_char_valid: snoop_valid     ,
+        i_char      : echo_stream.data,
+        i_de        : vt_de           ,
+        i_hsync     : vt_hsync        ,
+        i_vsync     : vt_vsync        ,
+        i_pos_x     : vt_pos_x        ,
+        i_pos_y     : vt_pos_y        ,
+        o_de        : lcd_de          ,
+        o_hsync     : lcd_hsync       ,
+        o_vsync     : lcd_vsync       ,
+        o_pixel     : px              ,
+    );
+
+    // 画素合成: 文字前景=白
+    assign lcd_r = if px ? 5'h1f : 0;
+    assign lcd_g = if px ? 6'h3f : 0;
+    assign lcd_b = if px ? 5'h1f : 0;
 
     // パネルはDCLK立上りでデータをラッチするため，反転出力でデータ遷移と
     // サンプリングエッジを半周期ずらす
