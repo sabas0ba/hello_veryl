@@ -19,10 +19,11 @@ RUN curl -fL --proto '=https' --tlsv1.2 \
  && rm /tmp/oss-cad-suite.tgz
 
 # unzip extracts the veryl archive; gcc/libc6-dev enable veryl test's
-# default cc simulator backend (kept after the OSS CAD Suite layer so its
-# cached download survives package changes here)
+# default cc simulator backend; git backs the SCM view in the DevContainer
+# window (kept after the OSS CAD Suite layer so its cached download
+# survives package changes here)
 RUN apt-get update \
- && apt-get install -y --no-install-recommends unzip gcc libc6-dev \
+ && apt-get install -y --no-install-recommends unzip gcc libc6-dev git \
  && rm -rf /var/lib/apt/lists/*
 
 # Veryl v0.20.2 (SHA-256 cross-checked with the GitHub Releases API
