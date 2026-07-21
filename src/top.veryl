@@ -7,6 +7,14 @@ module Top #(
     leds   : output logic<NumLeds>,
     uart_tx: output logic         ,
     uart_rx: input  logic         ,
+    // LCD (5inch 800x480 RGB565, DEモード)
+    lcd_clk  : output logic   ,
+    lcd_de   : output logic   ,
+    lcd_hsync: output logic   ,
+    lcd_vsync: output logic   ,
+    lcd_r    : output logic<5>,
+    lcd_g    : output logic<6>,
+    lcd_b    : output logic<5>,
 ) {
     // UART Loopback Test: 受信バイトをそのまま送り返す
     // RX(source)がdata/valid，TX(sink)がreadyを駆動するため1本のstream_ifで直結できる
@@ -23,6 +31,54 @@ module Top #(
         tx_stream: echo_stream,
         rx_stream: echo_stream,
     );
+
+    // LCD: UART TXへ流れるバイト列を傍受してテキスト表示 (白文字/黒背景)
+    var vt_de    : logic    ;
+    var vt_hsync : logic    ;
+    var vt_vsync : logic    ;
+    var vt_pos_x : logic<10>;
+    var vt_pos_y : logic<9> ;
+    var _vt_frame: logic    ;
+    var px       : logic    ;
+
+    inst video_timing: VideoTiming (
+        i_clk           ,
+        i_rst           ,
+        de   : vt_de    ,
+        hsync: vt_hsync ,
+        vsync: vt_vsync ,
+        frame: _vt_frame,
+        pos_x: vt_pos_x ,
+        pos_y: vt_pos_y ,
+    );
+
+    // handshake成立サイクルを傍受 (エコー動作には影響しない)
+    let snoop_valid: logic = echo_stream.valid && echo_stream.ready;
+
+    inst console: TextConsole (
+        i_clk                         ,
+        i_rst                         ,
+        i_char_valid: snoop_valid     ,
+        i_char      : echo_stream.data,
+        i_de        : vt_de           ,
+        i_hsync     : vt_hsync        ,
+        i_vsync     : vt_vsync        ,
+        i_pos_x     : vt_pos_x        ,
+        i_pos_y     : vt_pos_y        ,
+        o_de        : lcd_de          ,
+        o_hsync     : lcd_hsync       ,
+        o_vsync     : lcd_vsync       ,
+        o_pixel     : px              ,
+    );
+
+    // 画素合成: 文字前景=白
+    assign lcd_r = if px ? 5'h1f : 0;
+    assign lcd_g = if px ? 6'h3f : 0;
+    assign lcd_b = if px ? 5'h1f : 0;
+
+    // パネルはDCLK立上りでデータをラッチするため，反転出力でデータ遷移と
+    // サンプリングエッジを半周期ずらす
+    assign lcd_clk = ~i_clk;
 
     // LED Blink Test
     for i in 0..NumLeds :g_led {

@@ -3,6 +3,10 @@ name: veryl-test
 description: Verylプロジェクトのテスト・ビルド実行手順と既知の注意点。veryl test / veryl build / veryl check を実行するタスクで必ず参照する。
 ---
 
+# 規約
+
+- **コード変更後・コミット前に `.\scripts\veryl.ps1 fmt` を必ず実行する**．CIは `veryl fmt --check` で整形崩れを検出して失敗する
+
 # コマンド
 
 - `veryl test` : 全テスト実行。exit code 0/1で成否判定
@@ -15,7 +19,7 @@ description: Verylプロジェクトのテスト・ビルド実行手順と既�
 
 出力の扱い: INFO/ERROR等のログはstderr，`$display` の出力はstdoutに出る。stderrを捨てるとテスト成否のログが見えなくなるため，フィルタする場合は注意する。
 
-環境note: 本環境にはCコンパイラがなく，`--backend cc`（デフォルト）はCranelift JITへ自動フォールバックする（WARNが出るが動作に支障なし）。
+環境note: ホストの veryl は Smart App Control でブロックされるため，全コマンドは `.\scripts\veryl.ps1 <args>` で podman コンテナ内実行する（例: `.\scripts\veryl.ps1 test -t uart`）。コンテナには gcc があり，デフォルトの `--backend cc` がそのまま動作する。
 
 # ネイティブテストの書き方
 
@@ -28,6 +32,7 @@ description: Verylプロジェクトのテスト・ビルド実行手順と既�
 
 - **`clk.next(式)` は進行しない**: `clk.next(InvCount - 1)` のような算術式を引数に渡すと0サイクル進行になる（interpret/cranelift両バックエンドで再現）。必ず `const InvCountM1: u32 = InvCount - 1;` のようにconstへ束縛してから渡すこと
 - 比較演算子はSVと異なり小なり `<:`，大なり `>:`（`<` `>` はビット幅指定に予約）
+- 三項演算子は `cond ? a : b` ではなく **`if cond ? a : b`**（if式）。case式 `case x { 0: a, default: b, }` / switch式も使える
 - `for` のループ変数に型指定は書けない（`for i in 0..10 {`）
 - `inst` のポート接続は名前渡し。`leds[0]` のような式を渡す場合はポート名の明示が必要（`o_led: leds[0]`）
 - VSCodeのVeryl言語サーバはファイル分割・リネーム後にシンボルを二重登録し，大量の「"XXX" is duplicated」を出すことがある。`veryl check` が通るのにIDEだけエラーの場合はウィンドウリロードで解消する

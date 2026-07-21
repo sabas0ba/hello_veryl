@@ -71,13 +71,13 @@ module Uart #(
         recv_data,
         wait_stop,
         wait_line_idle,
-        push_to_stream,
     }
     var rx_state      : RxState                    ;
     var rx_cyc_counter: logic  <CycCounterWidth>   ;
     var rx_counter    : logic  <RxDataCounterWidth>;
     var rx_data       : logic  <RxDataWidth>       ;
-    assign rx_stream.data = rx_data;
+    var rx_hold       : logic  <RxDataWidth>       ; // stream供給用の保持レジスタ
+    assign rx_stream.data = rx_hold;
 
     // 2FFシンクロナイザ．非同期入力uart_rxをFSMで直接参照しない
     var rx_sync: logic<2>;
@@ -89,70 +89,76 @@ module Uart #(
         }
     }
 
+    // RXはノンブロッキング: 受信完了時に即validを立ててidleへ戻り，受信ペースを
+    // 常に維持する (consumer待ちでブロックすると，送信側クロックがTX消費より
+    // わずかに速い場合に待ちが蓄積しフレーミングスリップを起こす)．
+    // 未消費のまま次バイトが完了した場合は旧バイトを上書きする (クリーンな欠落)
     always_ff (i_clk, i_rst) {
         if_reset {
             rx_state        = RxState::idle;
             rx_cyc_counter  = 0;
             rx_counter      = 0;
             rx_data         = 0;
+            rx_hold         = 0;
             rx_stream.valid = false;
-        } else if rx_state == RxState::idle {
-            // uart_rx から start bitが検出されるまで待機
-            if rx_sync[msb] == 1'b0 {
-                rx_state       = RxState::wait_d0;
-                rx_cyc_counter = 0;
-            }
-        } else if rx_state == RxState::wait_d0 {
-            // Start bit検出 ~ 1/2周期経過待機してから転送ロジック開始
-            if rx_cyc_counter <: HalfCycPerBit - 1 {
-                rx_cyc_counter = rx_cyc_counter + 1;
-            } else if rx_sync[msb] == 1'b0 {
-                // start bit中央でまだLow → フレーム確定
-                rx_state       = RxState::recv_data;
-                rx_cyc_counter = 0;
-                rx_counter     = 0;
-                rx_data        = 0;
-            } else {
-                // start bit幅未満のグリッチだったので破棄
-                rx_state = RxState::idle;
-            }
-        } else if rx_state == RxState::recv_data {
-            // start中央から1周期ごとにD0..D7を中央サンプル
-            if rx_cyc_counter <: CycPerBit - 1 {
-                rx_cyc_counter = rx_cyc_counter + 1;
-            } else {
-                rx_data        = {rx_sync[msb], rx_data[msb:lsb + 1]}; // push to MSB
-                rx_cyc_counter = 0;
-                if rx_counter == RxDataWidth - 1 {
-                    // 8bit目のサンプル完了 (0..7で数えるためカウンタ幅は$clog2(8)のままでよい)
-                    rx_state = RxState::wait_stop;
-                } else {
-                    rx_counter = rx_counter + 1;
-                }
-            }
-        } else if rx_state == RxState::wait_stop {
-            // stop bit中央で1を確認 (framingチェック)．確認後は残り半分を待たずに
-            // 遷移し，送信側クロックが速い場合の次フレームstartエッジに備える
-            if rx_cyc_counter <: CycPerBit - 1 {
-                rx_cyc_counter = rx_cyc_counter + 1;
-            } else if rx_sync[msb] == 1'b1 {
-                // データ準備OK
-                rx_state        = RxState::push_to_stream;
-                rx_stream.valid = true;
-            } else {
-                // framing error: このバイトを破棄し，ラインがidleへ戻るのを待つ
-                rx_state = RxState::wait_line_idle;
-            }
-        } else if rx_state == RxState::wait_line_idle {
-            // break等でLowが続く間は再同期しない
-            if rx_sync[msb] == 1'b1 {
-                rx_state = RxState::idle;
-            }
-        } else if rx_state == RxState::push_to_stream {
-            // ready & validで完了 (validはすでに立ててある)
-            if rx_stream.ready {
+        } else {
+            // handshake成立でvalidを落とす (後続の受信完了代入が優先される)
+            if rx_stream.valid && rx_stream.ready {
                 rx_stream.valid = false;
-                rx_state        = RxState::idle;
+            }
+            if rx_state == RxState::idle {
+                // uart_rx から start bitが検出されるまで待機
+                if rx_sync[msb] == 1'b0 {
+                    rx_state       = RxState::wait_d0;
+                    rx_cyc_counter = 0;
+                }
+            } else if rx_state == RxState::wait_d0 {
+                // Start bit検出 ~ 1/2周期経過待機してから転送ロジック開始
+                if rx_cyc_counter <: HalfCycPerBit - 1 {
+                    rx_cyc_counter = rx_cyc_counter + 1;
+                } else if rx_sync[msb] == 1'b0 {
+                    // start bit中央でまだLow → フレーム確定
+                    rx_state       = RxState::recv_data;
+                    rx_cyc_counter = 0;
+                    rx_counter     = 0;
+                    rx_data        = 0;
+                } else {
+                    // start bit幅未満のグリッチだったので破棄
+                    rx_state = RxState::idle;
+                }
+            } else if rx_state == RxState::recv_data {
+                // start中央から1周期ごとにD0..D7を中央サンプル
+                if rx_cyc_counter <: CycPerBit - 1 {
+                    rx_cyc_counter = rx_cyc_counter + 1;
+                } else {
+                    rx_data        = {rx_sync[msb], rx_data[msb:lsb + 1]}; // push to MSB
+                    rx_cyc_counter = 0;
+                    if rx_counter == RxDataWidth - 1 {
+                        // 8bit目のサンプル完了 (0..7で数えるためカウンタ幅は$clog2(8)のままでよい)
+                        rx_state = RxState::wait_stop;
+                    } else {
+                        rx_counter = rx_counter + 1;
+                    }
+                }
+            } else if rx_state == RxState::wait_stop {
+                // stop bit中央で1を確認 (framingチェック)．確認後は残り半分を待たずに
+                // idleへ戻り，送信側クロックが速い場合の次フレームstartエッジに備える
+                if rx_cyc_counter <: CycPerBit - 1 {
+                    rx_cyc_counter = rx_cyc_counter + 1;
+                } else if rx_sync[msb] == 1'b1 {
+                    // データ準備OK: 保持レジスタへ渡して即再受信可能にする
+                    rx_hold         = rx_data;
+                    rx_stream.valid = true;
+                    rx_state        = RxState::idle;
+                } else {
+                    // framing error: このバイトを破棄し，ラインがidleへ戻るのを待つ
+                    rx_state = RxState::wait_line_idle;
+                }
+            } else if rx_state == RxState::wait_line_idle {
+                // break等でLowが続く間は再同期しない
+                if rx_sync[msb] == 1'b1 {
+                    rx_state = RxState::idle;
+                }
             }
         }
     }
@@ -202,6 +208,7 @@ module test_uart_tx_115200 {
 
         tx_st.valid = 0;
         tx_st.data  = 0;
+        rx_st.ready = 0; // TXテストではRX側streamを使用しない
         rst.assert ();
         $assert    (txd == 1'b1); // idle high
 
@@ -324,6 +331,7 @@ module test_uart_tx_9600 {
 
         tx_st.valid = 0;
         tx_st.data  = 0;
+        rx_st.ready = 0; // TXテストではRX側streamを使用しない
         rst.assert ();
         $assert    (txd == 1'b1); // idle high
 
@@ -447,15 +455,15 @@ module test_uart_rx_115200 {
         tx_st.data  = 0;
         rx_st.ready = 1; // 常時ready (validは1サイクルで完了する)
         rxd         = 1; // line idle
-        rst.assert();
-        clk.next(4); // 2FF同期のフラッシュ
-        $assert(rx_st.valid == 1'b0);
+        rst.assert ();
+        clk.next   (4); // 2FF同期のフラッシュ
+        $assert    (rx_st.valid == 1'b0);
 
         // ---- 単発 ----
-        rxd = 0; // start bit
+        rxd      = 0; // start bit
         clk.next(CycPerBit);
         for i in 0..8 {
-            rxd = bytes[0][i];
+            rxd      = bytes[0][i];
             clk.next(CycPerBit);
         }
         rxd = 1; // stop bit
@@ -465,18 +473,18 @@ module test_uart_rx_115200 {
             }
             clk.next(1);
         }
-        $assert(rx_st.valid == 1'b1, "single: valid");
-        $assert(rx_st.data == bytes[0], "single: data");
+        $assert (rx_st.valid == 1'b1, "single: valid");
+        $assert (rx_st.data == bytes[0], "single: data");
         clk.next(1); // handshake
-        $assert(rx_st.valid == 1'b0, "single: valid deassert");
+        $assert (rx_st.valid == 1'b0, "single: valid deassert");
         clk.next(HalfCyc); // stop bit残り相当
 
         // ---- 連続 (stop bit完了直後に次のstart) ----
         for n in 1..4 {
-            rxd = 0; // start bit
+            rxd      = 0; // start bit
             clk.next(CycPerBit);
             for i in 0..8 {
-                rxd = bytes[n][i];
+                rxd      = bytes[n][i];
                 clk.next(CycPerBit);
             }
             rxd = 1; // stop bit
@@ -486,22 +494,22 @@ module test_uart_rx_115200 {
                 }
                 clk.next(1);
             }
-            $assert(rx_st.valid == 1'b1, "burst %0d: valid", n);
-            $assert(rx_st.data == bytes[n], "burst %0d: data", n);
+            $assert (rx_st.valid == 1'b1, "burst %0d: valid", n);
+            $assert (rx_st.data == bytes[n], "burst %0d: data", n);
             clk.next(1); // handshake
-            $assert(rx_st.valid == 1'b0, "burst %0d: valid deassert", n);
+            $assert (rx_st.valid == 1'b0, "burst %0d: valid deassert", n);
             clk.next(HalfCyc); // stop bit残り相当
         }
 
         // ---- 間欠 (フレーム間にアイドルを挟む) ----
         for n in 4..6 {
             clk.next(GapCyc);
-            $assert(rx_st.valid == 1'b0, "gap %0d: idle", n);
+            $assert (rx_st.valid == 1'b0, "gap %0d: idle", n);
 
-            rxd = 0; // start bit
+            rxd      = 0; // start bit
             clk.next(CycPerBit);
             for i in 0..8 {
-                rxd = bytes[n][i];
+                rxd      = bytes[n][i];
                 clk.next(CycPerBit);
             }
             rxd = 1; // stop bit
@@ -511,10 +519,10 @@ module test_uart_rx_115200 {
                 }
                 clk.next(1);
             }
-            $assert(rx_st.valid == 1'b1, "gap %0d: valid", n);
-            $assert(rx_st.data == bytes[n], "gap %0d: data", n);
+            $assert (rx_st.valid == 1'b1, "gap %0d: valid", n);
+            $assert (rx_st.data == bytes[n], "gap %0d: data", n);
             clk.next(1); // handshake
-            $assert(rx_st.valid == 1'b0, "gap %0d: valid deassert", n);
+            $assert (rx_st.valid == 1'b0, "gap %0d: valid deassert", n);
             clk.next(HalfCyc); // stop bit残り相当
         }
 
@@ -566,15 +574,15 @@ module test_uart_rx_9600 {
         tx_st.data  = 0;
         rx_st.ready = 1; // 常時ready (validは1サイクルで完了する)
         rxd         = 1; // line idle
-        rst.assert();
-        clk.next(4); // 2FF同期のフラッシュ
-        $assert(rx_st.valid == 1'b0);
+        rst.assert ();
+        clk.next   (4); // 2FF同期のフラッシュ
+        $assert    (rx_st.valid == 1'b0);
 
         // ---- 単発 ----
-        rxd = 0; // start bit
+        rxd      = 0; // start bit
         clk.next(CycPerBit);
         for i in 0..8 {
-            rxd = bytes[0][i];
+            rxd      = bytes[0][i];
             clk.next(CycPerBit);
         }
         rxd = 1; // stop bit
@@ -584,18 +592,18 @@ module test_uart_rx_9600 {
             }
             clk.next(1);
         }
-        $assert(rx_st.valid == 1'b1, "single: valid");
-        $assert(rx_st.data == bytes[0], "single: data");
+        $assert (rx_st.valid == 1'b1, "single: valid");
+        $assert (rx_st.data == bytes[0], "single: data");
         clk.next(1); // handshake
-        $assert(rx_st.valid == 1'b0, "single: valid deassert");
+        $assert (rx_st.valid == 1'b0, "single: valid deassert");
         clk.next(HalfCyc); // stop bit残り相当
 
         // ---- 連続 (stop bit完了直後に次のstart) ----
         for n in 1..4 {
-            rxd = 0; // start bit
+            rxd      = 0; // start bit
             clk.next(CycPerBit);
             for i in 0..8 {
-                rxd = bytes[n][i];
+                rxd      = bytes[n][i];
                 clk.next(CycPerBit);
             }
             rxd = 1; // stop bit
@@ -605,22 +613,22 @@ module test_uart_rx_9600 {
                 }
                 clk.next(1);
             }
-            $assert(rx_st.valid == 1'b1, "burst %0d: valid", n);
-            $assert(rx_st.data == bytes[n], "burst %0d: data", n);
+            $assert (rx_st.valid == 1'b1, "burst %0d: valid", n);
+            $assert (rx_st.data == bytes[n], "burst %0d: data", n);
             clk.next(1); // handshake
-            $assert(rx_st.valid == 1'b0, "burst %0d: valid deassert", n);
+            $assert (rx_st.valid == 1'b0, "burst %0d: valid deassert", n);
             clk.next(HalfCyc); // stop bit残り相当
         }
 
         // ---- 間欠 (フレーム間にアイドルを挟む) ----
         for n in 4..6 {
             clk.next(GapCyc);
-            $assert(rx_st.valid == 1'b0, "gap %0d: idle", n);
+            $assert (rx_st.valid == 1'b0, "gap %0d: idle", n);
 
-            rxd = 0; // start bit
+            rxd      = 0; // start bit
             clk.next(CycPerBit);
             for i in 0..8 {
-                rxd = bytes[n][i];
+                rxd      = bytes[n][i];
                 clk.next(CycPerBit);
             }
             rxd = 1; // stop bit
@@ -630,10 +638,10 @@ module test_uart_rx_9600 {
                 }
                 clk.next(1);
             }
-            $assert(rx_st.valid == 1'b1, "gap %0d: valid", n);
-            $assert(rx_st.data == bytes[n], "gap %0d: data", n);
+            $assert (rx_st.valid == 1'b1, "gap %0d: valid", n);
+            $assert (rx_st.data == bytes[n], "gap %0d: data", n);
             clk.next(1); // handshake
-            $assert(rx_st.valid == 1'b0, "gap %0d: valid deassert", n);
+            $assert (rx_st.valid == 1'b0, "gap %0d: valid deassert", n);
             clk.next(HalfCyc); // stop bit残り相当
         }
 
@@ -681,7 +689,7 @@ module test_uart_loopback {
         tx_st.valid = 0;
         tx_st.data  = 0;
         rx_st.ready = 1;
-        rst.assert();
+        rst.assert ();
 
         // tx_streamへ投入したバイトがrx_streamから返ることを確認
         for n in 0..6 {
@@ -693,7 +701,7 @@ module test_uart_loopback {
                 }
                 clk.next(1);
             }
-            clk.next(1); // accept edge
+            clk.next   (1); // accept edge
             tx_st.valid = 0;
 
             for _w in 0..MaxWait {
@@ -702,10 +710,95 @@ module test_uart_loopback {
                 }
                 clk.next(1);
             }
-            $assert(rx_st.valid == 1'b1, "loopback %0d: valid", n);
-            $assert(rx_st.data == bytes[n], "loopback %0d: data", n);
+            $assert (rx_st.valid == 1'b1, "loopback %0d: valid", n);
+            $assert (rx_st.data == bytes[n], "loopback %0d: data", n);
             clk.next(1); // handshake
         }
+
+        $finish();
+    }
+}
+
+#[test(test_uart_rx_overrun)]
+module test_uart_rx_overrun {
+    const InClkFreq: u32 = 27_000_000;
+    const BaudRate : u32 = 115200;
+    const CycPerBit: u32 = (InClkFreq + BaudRate / 2) / BaudRate;
+    const MaxWait  : u32 = CycPerBit * 30;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    inst tx_st: stream_if;
+    inst rx_st: stream_if;
+
+    var _txd: logic;
+    var rxd : logic;
+
+    inst dut: Uart #(
+        InClkFreq: InClkFreq,
+        BaudRate : BaudRate ,
+    ) (
+        i_clk    : clk  ,
+        i_rst    : rst  ,
+        uart_tx  : _txd ,
+        uart_rx  : rxd  ,
+        tx_stream: tx_st,
+        rx_stream: rx_st,
+    );
+
+    var bytes: logic<8> [3];
+
+    initial {
+        bytes[0] = 8'h55;
+        bytes[1] = 8'ha3;
+        bytes[2] = 8'h0f;
+
+        tx_st.valid = 0;
+        tx_st.data  = 0;
+        rx_st.ready = 0; // 消費しない (overrunさせる)
+        rxd         = 1;
+        rst.assert ();
+        clk.next   (4);
+
+        // 2バイトをback-to-backで送信 (consumerは受け取らない)
+        for n in 0..2 {
+            rxd      = 0; // start bit
+            clk.next(CycPerBit);
+            for i in 0..8 {
+                rxd      = bytes[n][i];
+                clk.next(CycPerBit);
+            }
+            rxd      = 1; // stop bit
+            clk.next(CycPerBit);
+        }
+
+        // 旧バイトは上書きされ，最新バイトがvalidのまま保持される
+        $assert(rx_st.valid == 1'b1, "overrun: valid held");
+        $assert(rx_st.data == bytes[1], "overrun: latest byte kept");
+
+        // handshakeで消費できる
+        rx_st.ready = 1;
+        clk.next   (1);
+        $assert    (rx_st.valid == 1'b0, "overrun: consumed");
+
+        // 以降のバイトも正常に受信できる (フレームロック維持)
+        rxd      = 0; // start bit
+        clk.next(CycPerBit);
+        for i in 0..8 {
+            rxd      = bytes[2][i];
+            clk.next(CycPerBit);
+        }
+        rxd = 1; // stop bit
+        for _w in 0..MaxWait {
+            if rx_st.valid == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        $assert (rx_st.data == bytes[2], "post-overrun: data");
+        clk.next(1);
+        $assert (rx_st.valid == 1'b0, "post-overrun: consumed");
 
         $finish();
     }

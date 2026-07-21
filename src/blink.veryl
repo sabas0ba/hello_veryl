@@ -46,7 +46,7 @@ module test_blink_small {
 
     initial {
         rst.assert();
-        $assert (led == 1'b0);
+        $assert   (led == 1'b0);
 
         clk.next(InvCountM1);
         $assert (led == 1'b0);
@@ -87,7 +87,7 @@ module test_blink_large {
 
     initial {
         rst.assert();
-        $assert (led == 1'b0);
+        $assert   (led == 1'b0);
 
         clk.next(InvCountM1);
         $assert (led == 1'b0);
@@ -125,7 +125,7 @@ module test_blink_actual {
 
     initial {
         rst.assert();
-        $assert (led == 1'b0);
+        $assert   (led == 1'b0);
 
         clk.next(InvCountM1);
         $assert (led == 1'b0);

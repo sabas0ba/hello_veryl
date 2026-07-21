@@ -1,0 +1,178 @@
+// RGB LCD (DEモード) タイミングジェネレータ
+//
+// デフォルトタイミングは 5inch 800x480 パネル (050QG32-40) のdatasheet
+// "6.4 Timing Characteristics" から導出した pclk=27MHz 用の値:
+//   - HSyncWidth=1 (thpw min), HBackPorch=46 (thb 固定値)
+//   - VSyncWidth=3 (tvpw min), VBackPorch=23 (tvb 固定値)
+//   - FrontPorchはライン長/フレーム長の選択からの逆算 (HTotal=890, VTotal=513)
+//   - 27MHz / (890 * 513) = 59.1Hz refresh
+// sync極性は負 (公式Wiki rgb_screen: "enabled by negative polarity")
+//
+// 本モジュールはタイミングと座標の生成のみを担う．画素合成(色のゲートや
+// フォーマット変換)は利用側で行い，パイプライン段数に応じてde/syncを
+// 遅延させて位相を合わせること
+module VideoTiming #(
+    param Width      : u32 = 800,
+    param Height     : u32 = 480,
+    param HFrontPorch: u32 = 43 ,
+    param HSyncWidth : u32 = 1  ,
+    param HBackPorch : u32 = 46 ,
+    param VFrontPorch: u32 = 7  ,
+    param VSyncWidth : u32 = 3  ,
+    param VBackPorch : u32 = 23 ,
+) (
+    i_clk: input clock,
+    i_rst: input reset,
+    // LCD用タイミング (sync系は負極性)
+    de   : output logic,
+    hsync: output logic,
+    vsync: output logic,
+    // pos_x/pos_yはde==1の期間のみ有効
+    frame: output logic                , // Vブランキング先頭の1クロックパルス
+    pos_x: output logic<$clog2(Width)> ,
+    pos_y: output logic<$clog2(Height)>,
+) {
+    const HTotal    : u32 = Width + HFrontPorch + HSyncWidth + HBackPorch;
+    const VTotal    : u32 = Height + VFrontPorch + VSyncWidth + VBackPorch;
+    const HSyncStart: u32 = Width + HFrontPorch;
+    const HSyncEnd  : u32 = HSyncStart + HSyncWidth;
+    const VSyncStart: u32 = Height + VFrontPorch;
+    const VSyncEnd  : u32 = VSyncStart + VSyncWidth;
+
+    var h_counter: logic<$clog2(HTotal)>;
+    var v_counter: logic<$clog2(VTotal)>;
+
+    always_ff (i_clk, i_rst) {
+        if_reset {
+            h_counter = 0;
+            v_counter = 0;
+        } else if h_counter <: HTotal - 1 {
+            h_counter = h_counter + 1;
+        } else {
+            h_counter = 0;
+            if v_counter <: VTotal - 1 {
+                v_counter = v_counter + 1;
+            } else {
+                v_counter = 0;
+            }
+        }
+    }
+
+    let h_active: logic = h_counter <: Width;
+    let v_active: logic = v_counter <: Height;
+
+    assign de    = h_active && v_active;
+    assign hsync = ~((h_counter >= HSyncStart) && (h_counter <: HSyncEnd));
+    assign vsync = ~((v_counter >= VSyncStart) && (v_counter <: VSyncEnd));
+
+    // アクティブ領域外では下位切り出しにより不定な値になるため，de==1で修飾して使うこと
+    assign pos_x = h_counter[$clog2(Width) - 1:0];
+    assign pos_y = v_counter[$clog2(Height) - 1:0];
+
+    // フレームカウンタ更新用: アクティブ領域を抜けた直後 (表示中の値変化を避ける)
+    assign frame = (v_counter == Height) && (h_counter == 0);
+}
+
+#[test(test_video_timing)]
+module test_video_timing {
+    const Width      : u32 = 800;
+    const Height     : u32 = 480;
+    const HFrontPorch: u32 = 43;
+    const HSyncWidth : u32 = 1;
+    const HBackPorch : u32 = 46;
+    const VFrontPorch: u32 = 7;
+    const VSyncWidth : u32 = 3;
+    const VBackPorch : u32 = 23;
+    const HTotal     : u32 = Width + HFrontPorch + HSyncWidth + HBackPorch;
+    const VTotal     : u32 = Height + VFrontPorch + VSyncWidth + VBackPorch;
+    const VSyncStart : u32 = Height + VFrontPorch;
+    const VSyncEnd   : u32 = VSyncStart + VSyncWidth;
+
+    // clk.next()引数用 (式を渡すと0サイクル進行になるためconstへ束縛)
+    const WidthM1 : u32 = Width - 1;
+    const HFrontM1: u32 = HFrontPorch - 1;
+    const HBackM1 : u32 = HBackPorch - 1;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    var de   : logic    ;
+    var hsync: logic    ;
+    var vsync: logic    ;
+    var frame: logic    ;
+    var pos_x: logic<10>;
+    var pos_y: logic<9> ;
+
+    inst dut: VideoTiming (
+        i_clk: clk,
+        i_rst: rst,
+        de        ,
+        hsync     ,
+        vsync     ,
+        frame     ,
+        pos_x     ,
+        pos_y     ,
+    );
+
+    initial {
+        rst.assert();
+
+        // 1フレーム + 次フレーム先頭を検証
+        for row in 0..VTotal {
+            var v_act    : logic;
+            var vsync_exp: logic;
+            v_act     = row <: Height;
+            vsync_exp = ~((row >= VSyncStart) && (row <: VSyncEnd));
+
+            // pos 0: アクティブ先頭 (または非表示行の先頭)
+            $assert(de == v_act, "row %0d pos0: de", row);
+            $assert(hsync == 1'b1, "row %0d pos0: hsync", row);
+            $assert(vsync == vsync_exp, "row %0d pos0: vsync", row);
+            $assert(frame == (row == Height), "row %0d pos0: frame", row);
+            if v_act {
+                $assert(pos_x == 0, "row %0d pos0: pos_x", row);
+                $assert(pos_y == row, "row %0d pos0: pos_y", row);
+            }
+
+            // pos Width-1: アクティブ末尾
+            clk.next(WidthM1);
+            $assert (de == v_act, "row %0d act end: de", row);
+            if v_act {
+                $assert(pos_x == WidthM1, "row %0d act end: pos_x", row);
+            }
+
+            // pos Width: front porch先頭
+            clk.next(1);
+            $assert (de == 1'b0, "row %0d fp: de", row);
+            $assert (hsync == 1'b1, "row %0d fp: hsync", row);
+
+            // pos HSyncStart-1: front porch末尾
+            clk.next(HFrontM1);
+            $assert (hsync == 1'b1, "row %0d fp end: hsync", row);
+
+            // pos HSyncStart: hsyncアサート (負極性)
+            clk.next(1);
+            $assert (hsync == 1'b0, "row %0d sync: hsync", row);
+            $assert (vsync == vsync_exp, "row %0d sync: vsync", row);
+            $assert (frame == 1'b0, "row %0d sync: frame", row);
+
+            // pos HSyncEnd: back porch先頭
+            clk.next(HSyncWidth);
+            $assert (hsync == 1'b1, "row %0d bp: hsync", row);
+
+            // pos HTotal-1: 行末
+            clk.next(HBackM1);
+            $assert (de == 1'b0, "row %0d eol: de", row);
+            $assert (hsync == 1'b1, "row %0d eol: hsync", row);
+
+            clk.next(1); // 次行のpos 0 (ループ先頭で検証)
+        }
+
+        // フレーム折り返し: 2フレーム目の先頭画素
+        $assert(de == 1'b1, "frame wrap: de");
+        $assert(pos_x == 0 && pos_y == 0, "frame wrap: pos");
+        $assert(frame == 1'b0, "frame wrap: frame");
+
+        $finish();
+    }
+}
