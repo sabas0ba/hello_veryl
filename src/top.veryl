@@ -52,14 +52,14 @@ module Top #(
     let grad_b: logic<8> = frame_counter;
 
     inst video_timing: VideoTiming (
-        i_clk            ,
-        i_rst            ,
-        de   : lcd_de    ,
-        hsync: lcd_hsync ,
-        vsync: lcd_vsync ,
-        frame: lcd_frame ,
-        pos_x: lcd_pos_x ,
-        pos_y: lcd_pos_y ,
+        i_clk           ,
+        i_rst           ,
+        de   : lcd_de   ,
+        hsync: lcd_hsync,
+        vsync: lcd_vsync,
+        frame: lcd_frame,
+        pos_x: lcd_pos_x,
+        pos_y: lcd_pos_y,
     );
 
     // 画素合成: 8bit/chのパターンをde区間のみRGB565へ丸めて出力

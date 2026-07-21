@@ -96,12 +96,12 @@ module test_video_timing {
     inst clk: $tb::clock_gen;
     inst rst: $tb::reset_gen ( clk );
 
-    var de   : logic;
-    var hsync: logic;
-    var vsync: logic;
-    var frame: logic;
+    var de   : logic    ;
+    var hsync: logic    ;
+    var vsync: logic    ;
+    var frame: logic    ;
     var pos_x: logic<10>;
-    var pos_y: logic<9>;
+    var pos_y: logic<9> ;
 
     inst dut: VideoTiming (
         i_clk: clk,
@@ -136,34 +136,34 @@ module test_video_timing {
 
             // pos Width-1: アクティブ末尾
             clk.next(WidthM1);
-            $assert(de == v_act, "row %0d act end: de", row);
+            $assert (de == v_act, "row %0d act end: de", row);
             if v_act {
                 $assert(pos_x == WidthM1, "row %0d act end: pos_x", row);
             }
 
             // pos Width: front porch先頭
             clk.next(1);
-            $assert(de == 1'b0, "row %0d fp: de", row);
-            $assert(hsync == 1'b1, "row %0d fp: hsync", row);
+            $assert (de == 1'b0, "row %0d fp: de", row);
+            $assert (hsync == 1'b1, "row %0d fp: hsync", row);
 
             // pos HSyncStart-1: front porch末尾
             clk.next(HFrontM1);
-            $assert(hsync == 1'b1, "row %0d fp end: hsync", row);
+            $assert (hsync == 1'b1, "row %0d fp end: hsync", row);
 
             // pos HSyncStart: hsyncアサート (負極性)
             clk.next(1);
-            $assert(hsync == 1'b0, "row %0d sync: hsync", row);
-            $assert(vsync == vsync_exp, "row %0d sync: vsync", row);
-            $assert(frame == 1'b0, "row %0d sync: frame", row);
+            $assert (hsync == 1'b0, "row %0d sync: hsync", row);
+            $assert (vsync == vsync_exp, "row %0d sync: vsync", row);
+            $assert (frame == 1'b0, "row %0d sync: frame", row);
 
             // pos HSyncEnd: back porch先頭
             clk.next(HSyncWidth);
-            $assert(hsync == 1'b1, "row %0d bp: hsync", row);
+            $assert (hsync == 1'b1, "row %0d bp: hsync", row);
 
             // pos HTotal-1: 行末
             clk.next(HBackM1);
-            $assert(de == 1'b0, "row %0d eol: de", row);
-            $assert(hsync == 1'b1, "row %0d eol: hsync", row);
+            $assert (de == 1'b0, "row %0d eol: de", row);
+            $assert (hsync == 1'b1, "row %0d eol: hsync", row);
 
             clk.next(1); // 次行のpos 0 (ループ先頭で検証)
         }

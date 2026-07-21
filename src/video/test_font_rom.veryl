@@ -18,47 +18,47 @@ module test_font_rom {
         // space (0x20): 全行0
         code = 7'h20;
         for r in 0..16 {
-            row = r;
+            row      = r;
             clk.next(1);
-            $assert(line == 8'h00, "space row %0d", r);
+            $assert (line == 8'h00, "space row %0d", r);
         }
 
         // '!' (0x21): row3-9とrow11-12が ...#.... (bit3), row10は空
-        code = 7'h21;
-        row  = 3;
+        code     = 7'h21;
+        row      = 3;
         clk.next(1);
-        $assert(line == 8'h08, "'!' row3");
-        row = 10;
+        $assert (line == 8'h08, "'!' row3");
+        row      = 10;
         clk.next(1);
-        $assert(line == 8'h00, "'!' row10");
-        row = 12;
+        $assert (line == 8'h00, "'!' row10");
+        row      = 12;
         clk.next(1);
-        $assert(line == 8'h08, "'!' row12");
+        $assert (line == 8'h08, "'!' row12");
 
         // 'A' (0x41): row3=...#.... row8=#.....#. row9=#######. row15=空
-        code = 7'h41;
-        row  = 3;
+        code     = 7'h41;
+        row      = 3;
         clk.next(1);
-        $assert(line == 8'h08, "'A' row3");
-        row = 8;
+        $assert (line == 8'h08, "'A' row3");
+        row      = 8;
         clk.next(1);
-        $assert(line == 8'h41, "'A' row8");
-        row = 9;
+        $assert (line == 8'h41, "'A' row8");
+        row      = 9;
         clk.next(1);
-        $assert(line == 8'h7f, "'A' row9");
-        row = 15;
+        $assert (line == 8'h7f, "'A' row9");
+        row      = 15;
         clk.next(1);
-        $assert(line == 8'h00, "'A' row15");
+        $assert (line == 8'h00, "'A' row15");
 
         // 未定義コード (0x00, 0x7f): 全0
-        code = 7'h00;
-        row  = 0;
+        code     = 7'h00;
+        row      = 0;
         clk.next(1);
-        $assert(line == 8'h00, "undef 0x00");
-        code = 7'h7f;
-        row  = 5;
+        $assert (line == 8'h00, "undef 0x00");
+        code     = 7'h7f;
+        row      = 5;
         clk.next(1);
-        $assert(line == 8'h00, "undef 0x7f");
+        $assert (line == 8'h00, "undef 0x7f");
 
         $finish();
     }
