@@ -3,6 +3,10 @@ name: veryl-test
 description: Verylプロジェクトのテスト・ビルド実行手順と既知の注意点。veryl test / veryl build / veryl check を実行するタスクで必ず参照する。
 ---
 
+# 規約
+
+- **コード変更後・コミット前に `.\scripts\veryl.ps1 fmt` を必ず実行する**．CIは `veryl fmt --check` で整形崩れを検出して失敗する
+
 # コマンド
 
 - `veryl test` : 全テスト実行。exit code 0/1で成否判定
