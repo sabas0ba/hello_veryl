@@ -28,6 +28,7 @@ description: Verylプロジェクトのテスト・ビルド実行手順と既�
 
 - **`clk.next(式)` は進行しない**: `clk.next(InvCount - 1)` のような算術式を引数に渡すと0サイクル進行になる（interpret/cranelift両バックエンドで再現）。必ず `const InvCountM1: u32 = InvCount - 1;` のようにconstへ束縛してから渡すこと
 - 比較演算子はSVと異なり小なり `<:`，大なり `>:`（`<` `>` はビット幅指定に予約）
+- 三項演算子は `cond ? a : b` ではなく **`if cond ? a : b`**（if式）。case式 `case x { 0: a, default: b, }` / switch式も使える
 - `for` のループ変数に型指定は書けない（`for i in 0..10 {`）
 - `inst` のポート接続は名前渡し。`leds[0]` のような式を渡す場合はポート名の明示が必要（`o_led: leds[0]`）
 - VSCodeのVeryl言語サーバはファイル分割・リネーム後にシンボルを二重登録し，大量の「"XXX" is duplicated」を出すことがある。`veryl check` が通るのにIDEだけエラーの場合はウィンドウリロードで解消する
