@@ -7,7 +7,11 @@
 //   - FrontPorchはライン長/フレーム長の選択からの逆算 (HTotal=890, VTotal=513)
 //   - 27MHz / (890 * 513) = 59.1Hz refresh
 // sync極性は負 (公式Wiki rgb_screen: "enabled by negative polarity")
-module Vga #(
+//
+// 本モジュールはタイミングと座標の生成のみを担う．画素合成(色のゲートや
+// フォーマット変換)は利用側で行い，パイプライン段数に応じてde/syncを
+// 遅延させて位相を合わせること
+module VideoTiming #(
     param Width      : u32 = 800,
     param Height     : u32 = 480,
     param HFrontPorch: u32 = 43 ,
@@ -16,29 +20,17 @@ module Vga #(
     param VFrontPorch: u32 = 7  ,
     param VSyncWidth : u32 = 3  ,
     param VBackPorch : u32 = 23 ,
-    param BitWidth   : u32 = 8  ,
-    param BitWidthR  : u32 = 5  ,
-    param BitWidthG  : u32 = 6  ,
-    param BitWidthB  : u32 = 5  ,
 ) (
     i_clk: input clock,
     i_rst: input reset,
-    // LCD用信号 (sync系は負極性)
-    de       : output logic           ,
-    hsync    : output logic           ,
-    vsync    : output logic           ,
-    r        : output logic<BitWidthR>,
-    g        : output logic<BitWidthG>,
-    b        : output logic<BitWidthB>,
-    backlight: output logic           ,
-    // データ外部入力用: pos_x/pos_yはde==1の期間のみ有効．
-    // data_in_*は同一サイクルの(pos_x, pos_y)に対する色 (上位bitを使用)
-    frame    : output logic                 , // Vブランキング先頭の1クロックパルス
-    pos_x    : output logic<$clog2(Width)>  ,
-    pos_y    : output logic<$clog2(Height)> ,
-    data_in_r: input  logic<BitWidth>       ,
-    data_in_g: input  logic<BitWidth>       ,
-    data_in_b: input  logic<BitWidth>       ,
+    // LCD用タイミング (sync系は負極性)
+    de   : output logic,
+    hsync: output logic,
+    vsync: output logic,
+    // pos_x/pos_yはde==1の期間のみ有効
+    frame: output logic                , // Vブランキング先頭の1クロックパルス
+    pos_x: output logic<$clog2(Width)> ,
+    pos_y: output logic<$clog2(Height)>,
 ) {
     const HTotal    : u32 = Width + HFrontPorch + HSyncWidth + HBackPorch;
     const VTotal    : u32 = Height + VFrontPorch + VSyncWidth + VBackPorch;
@@ -73,23 +65,16 @@ module Vga #(
     assign hsync = ~((h_counter >= HSyncStart) && (h_counter <: HSyncEnd));
     assign vsync = ~((v_counter >= VSyncStart) && (v_counter <: VSyncEnd));
 
-    assign backlight = 1;
-
     // アクティブ領域外では下位切り出しにより不定な値になるため，de==1で修飾して使うこと
     assign pos_x = h_counter[$clog2(Width) - 1:0];
     assign pos_y = v_counter[$clog2(Height) - 1:0];
 
     // フレームカウンタ更新用: アクティブ領域を抜けた直後 (表示中の値変化を避ける)
     assign frame = (v_counter == Height) && (h_counter == 0);
-
-    // 色は各chの上位bitを採用．ブランキング中は0を出力
-    assign r = if de ? data_in_r[BitWidth - 1:BitWidth - BitWidthR] : 0;
-    assign g = if de ? data_in_g[BitWidth - 1:BitWidth - BitWidthG] : 0;
-    assign b = if de ? data_in_b[BitWidth - 1:BitWidth - BitWidthB] : 0;
 }
 
-#[test(test_vga)]
-module test_vga {
+#[test(test_video_timing)]
+module test_video_timing {
     const Width      : u32 = 800;
     const Height     : u32 = 480;
     const HFrontPorch: u32 = 43;
@@ -111,42 +96,26 @@ module test_vga {
     inst clk: $tb::clock_gen;
     inst rst: $tb::reset_gen ( clk );
 
-    var de       : logic;
-    var hsync    : logic;
-    var vsync    : logic;
-    var backlight: logic;
-    var frame    : logic;
-    var r        : logic<5>;
-    var g        : logic<6>;
-    var b        : logic<5>;
-    var pos_x    : logic<10>;
-    var pos_y    : logic<9>;
+    var de   : logic;
+    var hsync: logic;
+    var vsync: logic;
+    var frame: logic;
+    var pos_x: logic<10>;
+    var pos_y: logic<9>;
 
-    let din_r: logic<8> = 8'ha5; // r期待値: 5'h14
-    let din_g: logic<8> = 8'h5a; // g期待値: 6'h16
-    let din_b: logic<8> = 8'hc3; // b期待値: 5'h18
-
-    inst dut: Vga (
-        i_clk    : clk  ,
-        i_rst    : rst  ,
-        de              ,
-        hsync           ,
-        vsync           ,
-        r               ,
-        g               ,
-        b               ,
-        backlight       ,
-        frame           ,
-        pos_x           ,
-        pos_y           ,
-        data_in_r: din_r,
-        data_in_g: din_g,
-        data_in_b: din_b,
+    inst dut: VideoTiming (
+        i_clk: clk,
+        i_rst: rst,
+        de        ,
+        hsync     ,
+        vsync     ,
+        frame     ,
+        pos_x     ,
+        pos_y     ,
     );
 
     initial {
         rst.assert();
-        $assert(backlight == 1'b1);
 
         // 1フレーム + 次フレーム先頭を検証
         for row in 0..VTotal {
@@ -163,9 +132,6 @@ module test_vga {
             if v_act {
                 $assert(pos_x == 0, "row %0d pos0: pos_x", row);
                 $assert(pos_y == row, "row %0d pos0: pos_y", row);
-                $assert(r == 5'h14 && g == 6'h16 && b == 5'h18, "row %0d pos0: rgb", row);
-            } else {
-                $assert(r == 0 && g == 0 && b == 0, "row %0d pos0: rgb blank", row);
             }
 
             // pos Width-1: アクティブ末尾
@@ -179,7 +145,6 @@ module test_vga {
             clk.next(1);
             $assert(de == 1'b0, "row %0d fp: de", row);
             $assert(hsync == 1'b1, "row %0d fp: hsync", row);
-            $assert(r == 0 && g == 0 && b == 0, "row %0d fp: rgb blank", row);
 
             // pos HSyncStart-1: front porch末尾
             clk.next(HFrontM1);

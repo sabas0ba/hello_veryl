@@ -34,11 +34,10 @@ module Top #(
 
     // LCD: 時間で流れるRGBグラデーションパターン
     // R=x+frame (横方向へ流れる), G=y (縦グラデ), B=frame (全面で明滅)
-    var lcd_pos_x     : logic<10>;
-    var lcd_pos_y     : logic<9> ;
-    var lcd_frame     : logic    ;
-    var frame_counter : logic<8> ;
-    var _lcd_backlight: logic    ;
+    var lcd_pos_x    : logic<10>;
+    var lcd_pos_y    : logic<9> ;
+    var lcd_frame    : logic    ;
+    var frame_counter: logic<8> ;
 
     always_ff (i_clk, i_rst) {
         if_reset {
@@ -52,23 +51,21 @@ module Top #(
     let grad_g: logic<8> = lcd_pos_y[7:0];
     let grad_b: logic<8> = frame_counter;
 
-    inst vga: Vga (
-        i_clk                    ,
-        i_rst                    ,
-        de       : lcd_de        ,
-        hsync    : lcd_hsync     ,
-        vsync    : lcd_vsync     ,
-        r        : lcd_r         ,
-        g        : lcd_g         ,
-        b        : lcd_b         ,
-        backlight: _lcd_backlight,
-        frame    : lcd_frame     ,
-        pos_x    : lcd_pos_x     ,
-        pos_y    : lcd_pos_y     ,
-        data_in_r: grad_r        ,
-        data_in_g: grad_g        ,
-        data_in_b: grad_b        ,
+    inst video_timing: VideoTiming (
+        i_clk            ,
+        i_rst            ,
+        de   : lcd_de    ,
+        hsync: lcd_hsync ,
+        vsync: lcd_vsync ,
+        frame: lcd_frame ,
+        pos_x: lcd_pos_x ,
+        pos_y: lcd_pos_y ,
     );
+
+    // 画素合成: 8bit/chのパターンをde区間のみRGB565へ丸めて出力
+    assign lcd_r = if lcd_de ? grad_r[7:3] : 0;
+    assign lcd_g = if lcd_de ? grad_g[7:2] : 0;
+    assign lcd_b = if lcd_de ? grad_b[7:3] : 0;
 
     // パネルはDCLK立上りでデータをラッチするため，反転出力でデータ遷移と
     // サンプリングエッジを半周期ずらす
