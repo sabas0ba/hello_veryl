@@ -36,5 +36,11 @@ RUN curl -fL --proto '=https' --tlsv1.2 \
  && chmod +x /usr/local/bin/veryl* \
  && rm /tmp/veryl.zip
 
+# The bind-mounted repo is owned by a different uid than root inside the
+# container, so exempt the two known mount points from git's ownership check
+# (/work for the CLI wrappers, /workspaces/* for the DevContainer)
+RUN git config --system --add safe.directory /work \
+ && git config --system --add safe.directory /workspaces/hello_veryl
+
 ENV PATH="/opt/oss-cad-suite/bin:${PATH}"
 WORKDIR /work
