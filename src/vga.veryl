@@ -87,3 +87,127 @@ module Vga #(
     assign g = if de ? data_in_g[BitWidth - 1:BitWidth - BitWidthG] : 0;
     assign b = if de ? data_in_b[BitWidth - 1:BitWidth - BitWidthB] : 0;
 }
+
+#[test(test_vga)]
+module test_vga {
+    const Width      : u32 = 800;
+    const Height     : u32 = 480;
+    const HFrontPorch: u32 = 43;
+    const HSyncWidth : u32 = 1;
+    const HBackPorch : u32 = 46;
+    const VFrontPorch: u32 = 7;
+    const VSyncWidth : u32 = 3;
+    const VBackPorch : u32 = 23;
+    const HTotal     : u32 = Width + HFrontPorch + HSyncWidth + HBackPorch;
+    const VTotal     : u32 = Height + VFrontPorch + VSyncWidth + VBackPorch;
+    const VSyncStart : u32 = Height + VFrontPorch;
+    const VSyncEnd   : u32 = VSyncStart + VSyncWidth;
+
+    // clk.next()引数用 (式を渡すと0サイクル進行になるためconstへ束縛)
+    const WidthM1 : u32 = Width - 1;
+    const HFrontM1: u32 = HFrontPorch - 1;
+    const HBackM1 : u32 = HBackPorch - 1;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    var de       : logic;
+    var hsync    : logic;
+    var vsync    : logic;
+    var backlight: logic;
+    var frame    : logic;
+    var r        : logic<5>;
+    var g        : logic<6>;
+    var b        : logic<5>;
+    var pos_x    : logic<10>;
+    var pos_y    : logic<9>;
+
+    let din_r: logic<8> = 8'ha5; // r期待値: 5'h14
+    let din_g: logic<8> = 8'h5a; // g期待値: 6'h16
+    let din_b: logic<8> = 8'hc3; // b期待値: 5'h18
+
+    inst dut: Vga (
+        i_clk    : clk  ,
+        i_rst    : rst  ,
+        de              ,
+        hsync           ,
+        vsync           ,
+        r               ,
+        g               ,
+        b               ,
+        backlight       ,
+        frame           ,
+        pos_x           ,
+        pos_y           ,
+        data_in_r: din_r,
+        data_in_g: din_g,
+        data_in_b: din_b,
+    );
+
+    initial {
+        rst.assert();
+        $assert(backlight == 1'b1);
+
+        // 1フレーム + 次フレーム先頭を検証
+        for row in 0..VTotal {
+            var v_act    : logic;
+            var vsync_exp: logic;
+            v_act     = row <: Height;
+            vsync_exp = ~((row >= VSyncStart) && (row <: VSyncEnd));
+
+            // pos 0: アクティブ先頭 (または非表示行の先頭)
+            $assert(de == v_act, "row %0d pos0: de", row);
+            $assert(hsync == 1'b1, "row %0d pos0: hsync", row);
+            $assert(vsync == vsync_exp, "row %0d pos0: vsync", row);
+            $assert(frame == (row == Height), "row %0d pos0: frame", row);
+            if v_act {
+                $assert(pos_x == 0, "row %0d pos0: pos_x", row);
+                $assert(pos_y == row, "row %0d pos0: pos_y", row);
+                $assert(r == 5'h14 && g == 6'h16 && b == 5'h18, "row %0d pos0: rgb", row);
+            } else {
+                $assert(r == 0 && g == 0 && b == 0, "row %0d pos0: rgb blank", row);
+            }
+
+            // pos Width-1: アクティブ末尾
+            clk.next(WidthM1);
+            $assert(de == v_act, "row %0d act end: de", row);
+            if v_act {
+                $assert(pos_x == WidthM1, "row %0d act end: pos_x", row);
+            }
+
+            // pos Width: front porch先頭
+            clk.next(1);
+            $assert(de == 1'b0, "row %0d fp: de", row);
+            $assert(hsync == 1'b1, "row %0d fp: hsync", row);
+            $assert(r == 0 && g == 0 && b == 0, "row %0d fp: rgb blank", row);
+
+            // pos HSyncStart-1: front porch末尾
+            clk.next(HFrontM1);
+            $assert(hsync == 1'b1, "row %0d fp end: hsync", row);
+
+            // pos HSyncStart: hsyncアサート (負極性)
+            clk.next(1);
+            $assert(hsync == 1'b0, "row %0d sync: hsync", row);
+            $assert(vsync == vsync_exp, "row %0d sync: vsync", row);
+            $assert(frame == 1'b0, "row %0d sync: frame", row);
+
+            // pos HSyncEnd: back porch先頭
+            clk.next(HSyncWidth);
+            $assert(hsync == 1'b1, "row %0d bp: hsync", row);
+
+            // pos HTotal-1: 行末
+            clk.next(HBackM1);
+            $assert(de == 1'b0, "row %0d eol: de", row);
+            $assert(hsync == 1'b1, "row %0d eol: hsync", row);
+
+            clk.next(1); // 次行のpos 0 (ループ先頭で検証)
+        }
+
+        // フレーム折り返し: 2フレーム目の先頭画素
+        $assert(de == 1'b1, "frame wrap: de");
+        $assert(pos_x == 0 && pos_y == 0, "frame wrap: pos");
+        $assert(frame == 1'b0, "frame wrap: frame");
+
+        $finish();
+    }
+}
