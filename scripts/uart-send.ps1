@@ -1,5 +1,8 @@
 # One-shot UART exchange: writes -Data to TX (LF appended unless -NoNewline),
 # then prints RX until the line stays quiet for -QuietMs. No external packages.
+#   -Hex : dump received bytes as hex (16 bytes/line) instead of decoded text
+#          (ReadExisting decodes as ASCII and folds >0x7F into '?', so use
+#           this to inspect raw bytes)
 #Requires -Version 5.1
 param(
     [Parameter(Mandatory = $true)]
@@ -7,7 +10,8 @@ param(
     [string]$Port,
     [int]$BaudRate = 115200,
     [int]$QuietMs = 500,
-    [switch]$NoNewline
+    [switch]$NoNewline,
+    [switch]$Hex
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -29,20 +33,27 @@ $serial.DiscardInBuffer()
 try {
     if ($NoNewline) { $serial.Write($Data) } else { $serial.Write($Data + "`n") }
 
-    $received = ''
+    $rxBytes = New-Object System.Collections.Generic.List[byte]
     $lastRx = [Diagnostics.Stopwatch]::StartNew()
     while ($lastRx.ElapsedMilliseconds -lt $QuietMs) {
-        if ($serial.BytesToRead -gt 0) {
-            $received += $serial.ReadExisting()
+        while ($serial.BytesToRead -gt 0) {
+            $rxBytes.Add([byte]$serial.ReadByte())
             $lastRx.Restart()
         }
         Start-Sleep -Milliseconds 10
     }
 
-    if ($received.Length -gt 0) {
-        Write-Host $received
-    } else {
+    if ($rxBytes.Count -eq 0) {
         Write-Host "(no response within ${QuietMs}ms)"
+    } elseif ($Hex) {
+        for ($i = 0; $i -lt $rxBytes.Count; $i += 16) {
+            $chunk = $rxBytes[$i..([Math]::Min($i + 15, $rxBytes.Count - 1))]
+            $hexStr = ($chunk | ForEach-Object { '{0:x2}' -f $_ }) -join ' '
+            Write-Host ('{0,4}: {1}' -f $i, $hexStr)
+        }
+        Write-Host "($($rxBytes.Count) bytes)"
+    } else {
+        Write-Host ([Text.Encoding]::ASCII.GetString($rxBytes.ToArray()))
     }
 } finally {
     $serial.Close()
