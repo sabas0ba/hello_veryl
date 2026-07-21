@@ -15,7 +15,7 @@ description: Verylプロジェクトのテスト・ビルド実行手順と既�
 
 出力の扱い: INFO/ERROR等のログはstderr，`$display` の出力はstdoutに出る。stderrを捨てるとテスト成否のログが見えなくなるため，フィルタする場合は注意する。
 
-環境note: 本環境にはCコンパイラがなく，`--backend cc`（デフォルト）はCranelift JITへ自動フォールバックする（WARNが出るが動作に支障なし）。
+環境note: ホストの veryl は Smart App Control でブロックされるため，全コマンドは `.\scripts\veryl.ps1 <args>` で podman コンテナ内実行する（例: `.\scripts\veryl.ps1 test -t uart`）。コンテナには gcc があり，デフォルトの `--backend cc` がそのまま動作する。
 
 # ネイティブテストの書き方
 

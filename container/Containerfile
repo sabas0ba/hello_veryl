@@ -1,8 +1,10 @@
-# FPGA build environment for Tang Nano 9K (yosys / nextpnr-himbaechel / apicula)
-# Base image and toolchain archive are pinned (digest / SHA-256); see README.
+# Build environment for Tang Nano 9K: Veryl toolchain plus
+# yosys / nextpnr-himbaechel / apicula (Smart App Control blocks the
+# Windows-native binaries, so veryl build/test also run in this container).
+# Base image and toolchain archives are pinned (digest / SHA-256); see README.
 FROM docker.io/library/debian:13-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd
 
-# ca-certificates/curl are needed only to fetch the pinned toolchain archive
+# ca-certificates/curl are needed only to fetch the pinned archives
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates curl \
  && rm -rf /var/lib/apt/lists/*
@@ -15,6 +17,23 @@ RUN curl -fL --proto '=https' --tlsv1.2 \
  && echo "ba680b02915bc59da92c64fbbbacd86fd2650f74480503f9d3b6eb47c2ea2a53  /tmp/oss-cad-suite.tgz" | sha256sum -c - \
  && tar -xzf /tmp/oss-cad-suite.tgz -C /opt \
  && rm /tmp/oss-cad-suite.tgz
+
+# unzip extracts the veryl archive; gcc/libc6-dev enable veryl test's
+# default cc simulator backend (kept after the OSS CAD Suite layer so its
+# cached download survives package changes here)
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends unzip gcc libc6-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+# Veryl v0.20.2 (SHA-256 cross-checked with the GitHub Releases API
+# asset digest; same trust-anchor limitation as noted in README)
+RUN curl -fL --proto '=https' --tlsv1.2 \
+      -o /tmp/veryl.zip \
+      https://github.com/veryl-lang/veryl/releases/download/v0.20.2/veryl-x86_64-linux.zip \
+ && echo "217c94e9dccb8dbaec0a0e01ebad15a4d5554428364bfeb48858bbb84071b4c2  /tmp/veryl.zip" | sha256sum -c - \
+ && unzip /tmp/veryl.zip -d /usr/local/bin \
+ && chmod +x /usr/local/bin/veryl* \
+ && rm /tmp/veryl.zip
 
 ENV PATH="/opt/oss-cad-suite/bin:${PATH}"
 WORKDIR /work

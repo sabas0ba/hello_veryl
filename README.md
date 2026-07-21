@@ -24,36 +24,39 @@ Tang Nano 9K (GOWIN GW1NR-LV9QN88PC6/I5) 上で動作させるプロジェクト
 ### テスト（シミュレーション）
 
 ```powershell
-veryl test
+.\scripts\veryl.ps1 test
 ```
+
+veryl はコンテナ内で実行する（`.\scripts\veryl.ps1 <args>` が任意の veryl サブコマンドを
+コンテナへ中継する）．
 
 ## ビルド・書き込みフロー
 
 ```mermaid
 flowchart TB
-    subgraph host["Windows ホスト"]
-        SRC["src/*.veryl"] -- "veryl build" --> SV["target/*.sv"]
-    end
     subgraph pod["podman コンテナ (container/Containerfile)"]
-        SYN["build/top_synth.json"] -- "nextpnr-himbaechel<br>(Apicula chipDB)" --> PNR["build/top_pnr.json"]
+        SRC["src/*.veryl"] -- "veryl build" --> SV["target/*.sv"]
+        SV -- "yosys (yosys-slang / synth_gowin)" --> SYN["build/top_synth.json"]
+        SYN -- "nextpnr-himbaechel<br>(Apicula chipDB)" --> PNR["build/top_pnr.json"]
         PNR -- "gowin_pack" --> FS["build/top.fs"]
     end
-    subgraph flash["Windows ホスト "]
+    subgraph flash["Windows ホスト"]
         BOARD["Tang Nano 9K"]
     end
-    SV -- "yosys (yosys-slang / synth_gowin)" --> SYN
     FS -- "openFPGALoader (JTAG)" --> BOARD
 ```
 
-合成～bitstream 生成は podman コンテナ内で実行する．Windows ネイティブ実行は
-Smart App Control が未署名バイナリ（nextpnr 等）をブロックするため非採用
-（SAC 無効環境向けに `scripts/build.ps1` を残置）．
+Veryl のトランスパイル・テストから合成～bitstream 生成までを podman コンテナ内で
+実行する．Windows ネイティブ実行は Smart App Control が未署名バイナリ
+（veryl，nextpnr 等）をブロックするため非採用（SAC 無効環境向けに
+`scripts/build.ps1` を残置）．
 
 ### 外部依存のバージョン固定
 
 | 対象 | バージョン | ハッシュ | 取得元 |
 |---|---|---|---|
 | コンテナ base image | Debian 13 (slim) | digest `020c0d20b988...76a7bd` | docker.io/library/debian:13-slim |
+| Veryl（コンテナ内） | 0.20.2 | SHA-256 `217c94e9dccb...71b4c2` | https://github.com/veryl-lang/veryl/releases/download/v0.20.2/veryl-x86_64-linux.zip |
 | OSS CAD Suite（コンテナ内） | 2026-07-20 | SHA-256 `ba680b02915b...2ea2a53` | https://github.com/YosysHQ/oss-cad-suite-build/releases/download/2026-07-20/oss-cad-suite-linux-x64-20260720.tgz |
 | OSS CAD Suite（Windows, 書き込み用） | 2026-07-20 | SHA-256 `03ab812dcd2e...fed5893` | https://github.com/YosysHQ/oss-cad-suite-build/releases/download/2026-07-20/oss-cad-suite-windows-x64-20260720.exe |
 
@@ -67,8 +70,7 @@ digest と照合済み．上流に署名はなく digest も配布物と同一�
 | 要件 | 動作確認 | 用途 |
 |---|---|---|
 | Windows 11 + PowerShell 5.1 以降 | — | スクリプト実行 |
-| [Veryl](https://veryl-lang.org/) | 0.20.2 | Veryl → SystemVerilog（ホスト側） |
-| [Podman](https://podman.io/) | 5.8.3 + WSL2 マシン | 合成コンテナの実行 |
+| [Podman](https://podman.io/) | 5.8.3 + WSL2 マシン | ビルドコンテナの実行（veryl 含む，ホストへの veryl 導入は不要） |
 | Windows 版 OSS CAD Suite | 2026-07-20 | 書き込み（`scripts/setup-toolchain.ps1` で導入） |
 | [Zadig](https://zadig.akeo.ie/) | — | JTAG ドライバの WinUSB 化（初回のみ） |
 
@@ -97,7 +99,7 @@ Windows 版 OSS CAD Suite をダウンロード・SHA-256 検証し，`tools/`�
 .\scripts\build-container.ps1
 ```
 
-ホストで `veryl build` 後，コンテナ内で合成～bitstream 生成（初回のみイメージ構築）．
+コンテナ内で `veryl build` から合成～bitstream 生成まで実行する（初回のみイメージ構築）．
 
 #### 4. 書き込み
 
@@ -111,8 +113,8 @@ Windows 版 OSS CAD Suite をダウンロード・SHA-256 検証し，`tools/`�
 ```
 src/           Veryl ソース (top.veryl, blink.veryl)
 constraints/   物理制約 (tangnano9k.cst)
-container/     Containerfile（合成用イメージ定義，pin 済み）
-scripts/       build-container.ps1 / synth_pnr.sh / synth.ys / flash.ps1
+container/     Containerfile（veryl + 合成ツールのイメージ定義，pin 済み）
+scripts/       veryl.ps1 / build-container.ps1 / synth_pnr.sh / synth.ys / flash.ps1
                setup-toolchain.ps1 / build.ps1 (ネイティブ版，SAC 無効環境用)
 target/        Veryl が生成する SystemVerilog（git 管理外）
 build/         合成・配置配線・bitstream 出力（git 管理外）

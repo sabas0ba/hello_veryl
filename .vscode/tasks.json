@@ -4,14 +4,49 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "Veryl: test (シミュレーション)",
+            "label": "Veryl: test (シミュレーション，コンテナ)",
             "type": "shell",
-            "command": "veryl",
-            "args": ["test"],
+            "command": "powershell",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/scripts/veryl.ps1",
+                "test"
+            ],
             "group": {
                 "kind": "test",
                 "isDefault": true
             },
+            "problemMatcher": []
+        },
+        {
+            "label": "Veryl: check (構文・意味チェック，コンテナ)",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/scripts/veryl.ps1",
+                "check"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "Veryl: build (SystemVerilog生成，コンテナ)",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/scripts/veryl.ps1",
+                "build"
+            ],
             "problemMatcher": []
         },
         {
