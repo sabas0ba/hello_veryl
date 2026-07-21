@@ -1,0 +1,89 @@
+// RGB LCD (DEモード) タイミングジェネレータ
+//
+// デフォルトタイミングは 5inch 800x480 パネル (050QG32-40) のdatasheet
+// "6.4 Timing Characteristics" から導出した pclk=27MHz 用の値:
+//   - HSyncWidth=1 (thpw min), HBackPorch=46 (thb 固定値)
+//   - VSyncWidth=3 (tvpw min), VBackPorch=23 (tvb 固定値)
+//   - FrontPorchはライン長/フレーム長の選択からの逆算 (HTotal=890, VTotal=513)
+//   - 27MHz / (890 * 513) = 59.1Hz refresh
+// sync極性は負 (公式Wiki rgb_screen: "enabled by negative polarity")
+module Vga #(
+    param Width      : u32 = 800,
+    param Height     : u32 = 480,
+    param HFrontPorch: u32 = 43 ,
+    param HSyncWidth : u32 = 1  ,
+    param HBackPorch : u32 = 46 ,
+    param VFrontPorch: u32 = 7  ,
+    param VSyncWidth : u32 = 3  ,
+    param VBackPorch : u32 = 23 ,
+    param BitWidth   : u32 = 8  ,
+    param BitWidthR  : u32 = 5  ,
+    param BitWidthG  : u32 = 6  ,
+    param BitWidthB  : u32 = 5  ,
+) (
+    i_clk: input clock,
+    i_rst: input reset,
+    // LCD用信号 (sync系は負極性)
+    de       : output logic           ,
+    hsync    : output logic           ,
+    vsync    : output logic           ,
+    r        : output logic<BitWidthR>,
+    g        : output logic<BitWidthG>,
+    b        : output logic<BitWidthB>,
+    backlight: output logic           ,
+    // データ外部入力用: pos_x/pos_yはde==1の期間のみ有効．
+    // data_in_*は同一サイクルの(pos_x, pos_y)に対する色 (上位bitを使用)
+    frame    : output logic                 , // Vブランキング先頭の1クロックパルス
+    pos_x    : output logic<$clog2(Width)>  ,
+    pos_y    : output logic<$clog2(Height)> ,
+    data_in_r: input  logic<BitWidth>       ,
+    data_in_g: input  logic<BitWidth>       ,
+    data_in_b: input  logic<BitWidth>       ,
+) {
+    const HTotal    : u32 = Width + HFrontPorch + HSyncWidth + HBackPorch;
+    const VTotal    : u32 = Height + VFrontPorch + VSyncWidth + VBackPorch;
+    const HSyncStart: u32 = Width + HFrontPorch;
+    const HSyncEnd  : u32 = HSyncStart + HSyncWidth;
+    const VSyncStart: u32 = Height + VFrontPorch;
+    const VSyncEnd  : u32 = VSyncStart + VSyncWidth;
+
+    var h_counter: logic<$clog2(HTotal)>;
+    var v_counter: logic<$clog2(VTotal)>;
+
+    always_ff (i_clk, i_rst) {
+        if_reset {
+            h_counter = 0;
+            v_counter = 0;
+        } else if h_counter <: HTotal - 1 {
+            h_counter = h_counter + 1;
+        } else {
+            h_counter = 0;
+            if v_counter <: VTotal - 1 {
+                v_counter = v_counter + 1;
+            } else {
+                v_counter = 0;
+            }
+        }
+    }
+
+    let h_active: logic = h_counter <: Width;
+    let v_active: logic = v_counter <: Height;
+
+    assign de    = h_active && v_active;
+    assign hsync = ~((h_counter >= HSyncStart) && (h_counter <: HSyncEnd));
+    assign vsync = ~((v_counter >= VSyncStart) && (v_counter <: VSyncEnd));
+
+    assign backlight = 1;
+
+    // アクティブ領域外では下位切り出しにより不定な値になるため，de==1で修飾して使うこと
+    assign pos_x = h_counter[$clog2(Width) - 1:0];
+    assign pos_y = v_counter[$clog2(Height) - 1:0];
+
+    // フレームカウンタ更新用: アクティブ領域を抜けた直後 (表示中の値変化を避ける)
+    assign frame = (v_counter == Height) && (h_counter == 0);
+
+    // 色は各chの上位bitを採用．ブランキング中は0を出力
+    assign r = if de ? data_in_r[BitWidth - 1:BitWidth - BitWidthR] : 0;
+    assign g = if de ? data_in_g[BitWidth - 1:BitWidth - BitWidthG] : 0;
+    assign b = if de ? data_in_b[BitWidth - 1:BitWidth - BitWidthB] : 0;
+}
