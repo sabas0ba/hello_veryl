@@ -1,0 +1,24 @@
+// RTL design container: runs veryl-ls and the Veryl extension inside the
+// same pinned image used for build/test/synthesis (container/Containerfile).
+// Hardware I/O (flash / UART) stays on the host window; see README.
+// Requires VSCode setting "dev.containers.dockerPath": "podman".
+{
+    "name": "hello_veryl RTL",
+    "build": {
+        "dockerfile": "../container/Containerfile",
+        "context": "../container"
+    },
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                // Pinned to the veryl toolchain version in the Containerfile
+                "veryl-lang.veryl-vscode@0.20.2"
+            ],
+            "settings": {
+                // Use the SHA-256-verified binary from the image instead of
+                // letting the extension resolve a verylup-managed download
+                "veryl-vscode.verylLsBinary.path": "/usr/local/bin/veryl-ls"
+            }
+        }
+    }
+}

@@ -28,7 +28,19 @@ Tang Nano 9K (GOWIN GW1NR-LV9QN88PC6/I5) 上で動作させるプロジェクト
 ```
 
 veryl はコンテナ内で実行する（`.\scripts\veryl.ps1 <args>` が任意の veryl サブコマンドを
-コンテナへ中継する）．
+コンテナへ中継する）．`--wave` を付けると VCD がソースファイルの隣に出力される
+（例: `src/test_blink_small.vcd`．ビューアは未導入）．`--sim verilator` で
+イメージ同梱の Verilator による実行も可能．
+
+### DevContainer（RTL 設計用，任意）
+
+`.devcontainer/devcontainer.json` は `container/Containerfile` と同一イメージを参照し，
+VSCode の Dev Containers 拡張（Microsoft 製）で「Reopen in Container」すると
+Veryl 拡張（0.20.2 固定）と veryl-ls がコンテナ内で動作する（SAC の影響を受けない）．
+
+- podman 利用のため VSCode 設定に `"dev.containers.dockerPath": "podman"` が必要
+- 初回起動時のみ vscode-server 取得のためコンテナにネットワークアクセスが発生する
+- 実機 I/O（書き込み・UART）はホスト側ウィンドウの tasks.json から実行する（二窓運用）
 
 ## ビルド・書き込みフロー
 
@@ -112,6 +124,7 @@ Windows 版 OSS CAD Suite をダウンロード・SHA-256 検証し，`tools/`�
 
 ```
 src/           Veryl ソース (top.veryl, blink.veryl)
+.devcontainer/ RTL 設計用 DevContainer 定義（container/ と同一イメージ）
 constraints/   物理制約 (tangnano9k.cst)
 container/     Containerfile（veryl + 合成ツールのイメージ定義，pin 済み）
 scripts/       veryl.ps1 / build-container.ps1 / synth_pnr.sh / synth.ys / flash.ps1
