@@ -1,0 +1,397 @@
+// テキストコンソール
+//
+// 受信した文字をカーソル位置へ書き込み，VideoTimingの座標に同期して
+// 文字ピクセルを描画する．text RAM (std::ram) + FontRom の2段読み出しに
+// 合わせ，de/syncを2サイクル遅延して出力する．
+//
+// 文字セマンティクス:
+//   - 0x20-0x7E: カーソル位置へ表示しカーソル前進 (右端で折り返し)
+//   - LF (0x0A): 改行 (行頭復帰 + 行送り)
+//   - CR (0x0D): 行頭復帰
+//   - その他: 無視
+// 最下行での行送りはリングバッファ的に1行スクロールする (base_row前進 +
+// 新最下行のクリア)．クリア中(Colsサイクル)の文字入力は無視されるが，
+// UARTのバイト間隔(115200bpsで約2300サイクル)より十分短いため実害はない
+module TextConsole #(
+    param Cols: u32 = 100,
+    param Rows: u32 = 30 ,
+) (
+    i_clk: input clock,
+    i_rst: input reset,
+    // 文字入力 (backpressureなし)
+    i_char_valid: input logic   ,
+    i_char      : input logic<8>,
+    // VideoTimingの出力
+    i_de   : input logic    ,
+    i_hsync: input logic    ,
+    i_vsync: input logic    ,
+    i_pos_x: input logic<10>,
+    i_pos_y: input logic<9> ,
+    // LCDへ (2サイクル遅延で位相整合済み)
+    o_de   : output logic,
+    o_hsync: output logic,
+    o_vsync: output logic,
+    o_pixel: output logic, // 文字前景=1
+) {
+    const CellCount: u32 = Cols * Rows;
+    const AddrW    : u32 = $clog2(CellCount);
+    const ColW     : u32 = $clog2(Cols);
+    const RowW     : u32 = $clog2(Rows);
+
+    // ---- 書き込み系 ----
+    enum WState: logic<2> {
+        init_clear,
+        idle,
+        scroll_clear,
+    }
+
+    var wstate   : WState       ;
+    var cur_col  : logic <ColW> ; // 論理カーソル列
+    var cur_row  : logic <RowW> ; // 論理カーソル行
+    var base_row : logic <RowW> ; // スクロール用リングオフセット
+    var init_cnt : logic <AddrW>;
+    var clear_col: logic <ColW> ;
+
+    let is_printable: logic = (i_char >= 8'h20) && (i_char <= 8'h7e);
+    let is_lf       : logic = i_char == 8'h0a;
+    let is_cr       : logic = i_char == 8'h0d;
+
+    // 論理行 -> 物理行 (mod Rows)
+    var wr_row_sum: logic<RowW + 1>;
+    var wr_phys   : logic<RowW + 1>;
+    always_comb {
+        wr_row_sum = {1'b0, base_row} + {1'b0, cur_row};
+        wr_phys    = if wr_row_sum >= Rows ? wr_row_sum - Rows : wr_row_sum;
+    }
+
+    // text RAM 書き込みポート
+    var wr_en  : logic       ;
+    var wr_addr: logic<AddrW>;
+    var wr_data: logic<8>    ;
+    always_comb {
+        case wstate {
+            WState::init_clear: {
+                wr_en   = 1;
+                wr_addr = init_cnt;
+                wr_data = 8'h00;
+            }
+            WState::scroll_clear: {
+                wr_en   = 1;
+                wr_addr = wr_phys * Cols + {1'b0, clear_col};
+                wr_data = 8'h00;
+            }
+            default: {
+                wr_en   = i_char_valid && is_printable;
+                wr_addr = wr_phys * Cols + {1'b0, cur_col};
+                wr_data = i_char;
+            }
+        }
+    }
+
+    always_ff (i_clk, i_rst) {
+        if_reset {
+            wstate    = WState::init_clear;
+            cur_col   = 0;
+            cur_row   = 0;
+            base_row  = 0;
+            init_cnt  = 0;
+            clear_col = 0;
+        } else if wstate == WState::init_clear {
+            if init_cnt <: CellCount - 1 {
+                init_cnt = init_cnt + 1;
+            } else {
+                wstate = WState::idle;
+            }
+        } else if wstate == WState::scroll_clear {
+            if clear_col <: Cols - 1 {
+                clear_col = clear_col + 1;
+            } else {
+                wstate = WState::idle;
+            }
+        } else if i_char_valid {
+            if is_lf {
+                cur_col = 0;
+                if cur_row <: Rows - 1 {
+                    cur_row = cur_row + 1;
+                } else {
+                    // スクロール: base前進 + 新最下行クリア
+                    base_row  = if base_row <: Rows - 1 ? base_row + 1 : 0;
+                    wstate    = WState::scroll_clear;
+                    clear_col = 0;
+                }
+            } else if is_cr {
+                cur_col = 0;
+            } else if is_printable {
+                if cur_col <: Cols - 1 {
+                    cur_col = cur_col + 1;
+                } else {
+                    // 右端で折り返し (LFと同じ行送り)
+                    cur_col = 0;
+                    if cur_row <: Rows - 1 {
+                        cur_row = cur_row + 1;
+                    } else {
+                        base_row  = if base_row <: Rows - 1 ? base_row + 1 : 0;
+                        wstate    = WState::scroll_clear;
+                        clear_col = 0;
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- 描画系 (2段パイプライン) ----
+    // stage0: 座標 -> セル/グリフ座標分解，text RAM読み出し発行
+    let char_col : logic<7> = i_pos_x[9:3];
+    let char_row : logic<5> = i_pos_y[8:4];
+    let glyph_col: logic<3> = i_pos_x[2:0];
+    let glyph_row: logic<4> = i_pos_y[3:0];
+
+    var rd_row_sum: logic<RowW + 1>;
+    var rd_phys   : logic<RowW + 1>;
+    var rd_addr   : logic<AddrW>   ;
+    always_comb {
+        rd_row_sum = {1'b0, base_row} + {1'b0, char_row[RowW - 1:0]};
+        rd_phys    = if rd_row_sum >= Rows ? rd_row_sum - Rows : rd_row_sum;
+        rd_addr    = rd_phys * Cols + {1'b0, char_col[ColW - 1:0]};
+    }
+
+    var rd_char: logic<8>;
+
+    inst text_ram: $std::ram #(
+        WORD_SIZE : CellCount,
+        DATA_WIDTH: 8        ,
+        BUFFER_OUT: true     ,
+    ) (
+        i_clk          ,
+        i_rst          ,
+        i_clr : 0      ,
+        i_mea : 1      ,
+        i_wea : wr_en  ,
+        i_adra: wr_addr,
+        i_da  : wr_data,
+        i_meb : 1      ,
+        i_adrb: rd_addr,
+        o_qb  : rd_char,
+    );
+
+    // stage1: FontRom読み出し (1サイクル遅れの座標を供給)
+    var glyph_row_d1: logic<4>;
+    var glyph_col_d1: logic<3>;
+    var de_d1       : logic   ;
+    var hsync_d1    : logic   ;
+    var vsync_d1    : logic   ;
+
+    var font_line: logic<8>;
+
+    inst font_rom: FontRom (
+        i_clk               ,
+        i_code: rd_char[6:0],
+        i_row : glyph_row_d1,
+        o_line: font_line   ,
+    );
+
+    // stage2: ピクセル選択
+    var glyph_col_d2: logic<3>;
+    var de_d2       : logic   ;
+    var hsync_d2    : logic   ;
+    var vsync_d2    : logic   ;
+
+    always_ff (i_clk, i_rst) {
+        if_reset {
+            glyph_row_d1 = 0;
+            glyph_col_d1 = 0;
+            de_d1        = 0;
+            hsync_d1     = 1;
+            vsync_d1     = 1;
+            glyph_col_d2 = 0;
+            de_d2        = 0;
+            hsync_d2     = 1;
+            vsync_d2     = 1;
+        } else {
+            glyph_row_d1 = glyph_row;
+            glyph_col_d1 = glyph_col;
+            de_d1        = i_de;
+            hsync_d1     = i_hsync;
+            vsync_d1     = i_vsync;
+            glyph_col_d2 = glyph_col_d1;
+            de_d2        = de_d1;
+            hsync_d2     = hsync_d1;
+            vsync_d2     = vsync_d1;
+        }
+    }
+
+    assign o_de    = de_d2;
+    assign o_hsync = hsync_d2;
+    assign o_vsync = vsync_d2;
+    assign o_pixel = de_d2 && font_line[glyph_col_d2];
+}
+
+#[test(test_console)]
+module test_console {
+    const Cols: u32 = 100;
+    const Rows: u32 = 30;
+
+    // 初期クリア完了待ち + 余裕
+    const InitWait : u32 = Cols * Rows + 10;
+    const ScrollGap: u32 = Cols + 10; // scroll_clear完了待ち
+    const PixLat   : u32 = 2;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    var char_valid: logic    ;
+    var char      : logic<8> ;
+    var de        : logic    ;
+    var hsync     : logic    ;
+    var vsync     : logic    ;
+    var pos_x     : logic<10>;
+    var pos_y     : logic<9> ;
+    var o_de      : logic    ;
+    var o_hsync   : logic    ;
+    var o_vsync   : logic    ;
+    var o_pixel   : logic    ;
+
+    inst dut: TextConsole #(
+        Cols: Cols,
+        Rows: Rows,
+    ) (
+        i_clk       : clk       ,
+        i_rst       : rst       ,
+        i_char_valid: char_valid,
+        i_char      : char      ,
+        i_de        : de        ,
+        i_hsync     : hsync     ,
+        i_vsync     : vsync     ,
+        i_pos_x     : pos_x     ,
+        i_pos_y     : pos_y     ,
+        o_de                    ,
+        o_hsync                 ,
+        o_vsync                 ,
+        o_pixel                 ,
+    );
+
+    initial {
+        char_valid = 0;
+        char       = 0;
+        de         = 1;
+        hsync      = 1;
+        vsync      = 1;
+        pos_x      = 0;
+        pos_y      = 0;
+        rst.assert();
+        clk.next  (InitWait);
+
+        // ---- 'A' を(0,0)へ書き込み，グリフのピクセルを確認 ----
+        char       = 8'h41; // 'A'
+        char_valid = 1;
+        clk.next  (1);
+        char_valid = 0;
+        clk.next  (4);
+
+        pos_x    = 3; // 'A' row3 = ...#.... -> col3が前景
+        pos_y    = 3;
+        clk.next(PixLat);
+        $assert (o_pixel == 1'b1, "'A' (3,3)");
+        pos_x    = 0; // row0は空白行
+        pos_y    = 0;
+        clk.next(PixLat);
+        $assert (o_pixel == 1'b0, "'A' (0,0)");
+        pos_x    = 11; // 隣のセル(未書き込み)は空白
+        pos_y    = 3;
+        clk.next(PixLat);
+        $assert (o_pixel == 1'b0, "blank cell (11,3)");
+
+        // ---- '!' を続けて書き込み (カーソル前進の確認: セル(1,0)) ----
+        char       = 8'h21; // '!'
+        char_valid = 1;
+        clk.next  (1);
+        char_valid = 0;
+        clk.next  (4);
+
+        pos_x    = 11; // セル(1,0)内 col3 ('!' row3の前景)
+        pos_y    = 3;
+        clk.next(PixLat);
+        $assert (o_pixel == 1'b1, "'!' (11,3)");
+        pos_x    = 11;
+        pos_y    = 10; // '!' row10は空白
+        clk.next(PixLat);
+        $assert (o_pixel == 1'b0, "'!' (11,10)");
+
+        // ---- CR + LF: セル(0,1)へ 'A' ----
+        char       = 8'h0d; // CR
+        char_valid = 1;
+        clk.next  (1);
+        char       = 8'h0a; // LF
+        clk.next  (1);
+        char       = 8'h41; // 'A'
+        clk.next  (1);
+        char_valid = 0;
+        clk.next  (4);
+
+        pos_x    = 3;
+        pos_y    = 19; // 行1のグリフrow3 (16 + 3)
+        clk.next(PixLat);
+        $assert (o_pixel == 1'b1, "'A' at row1 (3,19)");
+
+        // ---- スクロール: 最下行まで改行し，さらに1回改行 ----
+        // 現在cur_row=1．LFをRows-2回で最下行(29)へ，さらに1回でスクロール
+        char = 8'h0a;
+        for _n in 0..Rows - 2 {
+            char_valid = 1;
+            clk.next  (1);
+            char_valid = 0;
+            clk.next  (1);
+        }
+        // 最下行で'A'を書いてからスクロール
+        char       = 8'h41;
+        char_valid = 1;
+        clk.next  (1);
+        char       = 8'h0a; // スクロール発生
+        clk.next  (1);
+        char_valid = 0;
+        clk.next  (ScrollGap);
+
+        // スクロール後: 最下行(row29)は空白，1つ上(row28)に'A'が見える
+        pos_x    = 3;
+        pos_y    = 451; // row28のグリフrow3 (28*16 + 3)
+        clk.next(PixLat);
+        $assert (o_pixel == 1'b1, "scrolled 'A' at row28");
+        pos_x    = 3;
+        pos_y    = 467; // row29のグリフrow3 (クリア済み)
+        clk.next(PixLat);
+        $assert (o_pixel == 1'b0, "cleared bottom row");
+        // 先頭行の'A'は1行分上へ消えた… 最初の'A'は論理row0→スクロール後は画面外
+        // ではなくrow-1に相当し不可視．論理row0には旧row1の'A'が来る
+        pos_x    = 3;
+        pos_y    = 3;
+        clk.next(PixLat);
+        $assert (o_pixel == 1'b1, "old row1 'A' now at row0");
+        pos_x    = 11; // 旧row0の'!'は消えている (論理row0=旧row1に'!'はない)
+        pos_y    = 3;
+        clk.next(PixLat);
+        $assert (o_pixel == 1'b0, "old row0 '!' scrolled out");
+
+        // ---- de/syncの2サイクル遅延確認 ----
+        de       = 0;
+        hsync    = 0;
+        clk.next(1);
+        $assert (o_de == 1'b1, "o_de delay 1");
+        $assert (o_hsync == 1'b1, "o_hsync delay 1");
+        clk.next(1);
+        $assert (o_de == 1'b0, "o_de delay 2");
+        $assert (o_hsync == 1'b0, "o_hsync delay 2");
+        de       = 1;
+        hsync    = 1;
+        clk.next(2);
+        $assert (o_de == 1'b1, "o_de restored");
+
+        // de=0区間はピクセルも0
+        de       = 0;
+        pos_x    = 3;
+        pos_y    = 3;
+        clk.next(PixLat);
+        $assert (o_pixel == 1'b0, "pixel gated by de");
+
+        $finish();
+    }
+}
