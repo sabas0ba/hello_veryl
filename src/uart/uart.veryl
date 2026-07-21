@@ -208,6 +208,7 @@ module test_uart_tx_115200 {
 
         tx_st.valid = 0;
         tx_st.data  = 0;
+        rx_st.ready = 0; // TXテストではRX側streamを使用しない
         rst.assert ();
         $assert    (txd == 1'b1); // idle high
 
@@ -330,6 +331,7 @@ module test_uart_tx_9600 {
 
         tx_st.valid = 0;
         tx_st.data  = 0;
+        rx_st.ready = 0; // TXテストではRX側streamを使用しない
         rst.assert ();
         $assert    (txd == 1'b1); // idle high
 
