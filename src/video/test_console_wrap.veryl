@@ -1,0 +1,101 @@
+// 最下行での右端折り返し(wrap起因スクロール)の再現テスト
+// 実機で「100文字で1行を埋めた後の折り返し行が表示されない」症状の切り分け用
+#[test(test_console_wrap)]
+module test_console_wrap {
+    const Cols: u32 = 100;
+    const Rows: u32 = 30;
+
+    const InitWait: u32 = Cols * Rows + 10;
+    const CharGap : u32 = 200; // 実機のUARTバイト間隔(約2340cyc)相当の余裕 (scroll_clear=100cycより十分長い)
+    const PixLat  : u32 = 2;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    var char_valid: logic    ;
+    var char      : logic<8> ;
+    var de        : logic    ;
+    var hsync     : logic    ;
+    var vsync     : logic    ;
+    var pos_x     : logic<10>;
+    var pos_y     : logic<9> ;
+    var o_de      : logic    ;
+    var o_hsync   : logic    ;
+    var o_vsync   : logic    ;
+    var o_pixel   : logic    ;
+
+    inst dut: TextConsole #(
+        Cols: Cols,
+        Rows: Rows,
+    ) (
+        i_clk       : clk       ,
+        i_rst       : rst       ,
+        i_char_valid: char_valid,
+        i_char      : char      ,
+        i_de        : de        ,
+        i_hsync     : hsync     ,
+        i_vsync     : vsync     ,
+        i_pos_x     : pos_x     ,
+        i_pos_y     : pos_y     ,
+        o_de                    ,
+        o_hsync                 ,
+        o_vsync                 ,
+        o_pixel                 ,
+    );
+
+    initial {
+        char_valid = 0;
+        char       = 0;
+        de         = 1;
+        hsync      = 1;
+        vsync      = 1;
+        pos_x      = 0;
+        pos_y      = 0;
+        rst.assert();
+        clk.next  (InitWait);
+
+        // カーソルを最下行(row29)へ: LF x29
+        char = 8'h0a;
+        for _n in 0..Rows - 1 {
+            char_valid = 1;
+            clk.next  (1);
+            char_valid = 0;
+            clk.next  (CharGap);
+        }
+
+        // 'A' x100 で最下行を埋める (100文字目でwrap+スクロール)
+        char = 8'h41;
+        for _n in 0..Cols {
+            char_valid = 1;
+            clk.next  (1);
+            char_valid = 0;
+            clk.next  (CharGap);
+        }
+
+        // 折り返し後の "!" 1文字 (実機の"wrapped"相当)
+        char       = 8'h21;
+        char_valid = 1;
+        clk.next  (1);
+        char_valid = 0;
+        clk.next  (CharGap);
+
+        // 期待: 'A'行はスクロールで1つ上(row28)，'!'は最下行(row29)先頭
+        pos_x    = 3; // 'A' row3 col3
+        pos_y    = 451; // row28 * 16 + 3
+        clk.next(PixLat);
+        $assert (o_pixel == 1'b1, "A line at row28");
+
+        pos_x    = 3; // '!' row3 col3
+        pos_y    = 467; // row29 * 16 + 3
+        clk.next(PixLat);
+        $assert (o_pixel == 1'b1, "wrapped '!' at row29 col0");
+
+        // 最下行の残り(セル1以降)はクリアされている
+        pos_x    = 11; // cell(1,29) col3
+        pos_y    = 467;
+        clk.next(PixLat);
+        $assert (o_pixel == 1'b0, "row29 cell1 cleared");
+
+        $finish();
+    }
+}
