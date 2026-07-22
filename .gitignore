@@ -10,3 +10,6 @@
 
 # Verilator
 obj_dir/
+
+# Datasheets (redistribution restricted)
+docs/datasheets/

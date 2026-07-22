@@ -1,0 +1,192 @@
+# PSRAM コントローラ設計文書
+
+Tang Nano 9K (GW1NR-LV9QN88PC6/I5) の SIP 内蔵 PSRAM（HyperBus，2x32 Mbit）を
+OSS ツールチェーンのみで利用するためのコントローラ設計．
+既存資産とツールチェーン pin を変更せず，サブシステム追加として実装する．
+検証レイヤの定義・運用規則は [verification.md](verification.md)，
+既存デザインは [rtl.md](rtl.md) を参照．
+
+## 方針
+
+- 外部 RTL の引用・流用は行わず，一次資料（データシート・仕様書）から自前実装する
+- 既存 OSS 実装（zf3/psram-tang-nano-9k，Apache-2.0）は到達点の目安
+  （1:1 クロックで最大 83 MHz）としてのみ参照し，コードは参照しない
+- バス IF・CDC は Veryl 標準ライブラリを採用し，自作範囲を
+  HyperBus コントローラ FSM・物理層ラッパ・検証用モデルに限定する
+
+## 一次資料
+
+データシート実体は再配布制限のため git 管理外（`docs/datasheets/`，gitignore 済み）に
+置き，本表で版数・取得元・SHA-256 を記録する．
+
+| 資料 | 用途 | 取得元 | 版数 | SHA-256 |
+| --- | --- | --- | --- | --- |
+| Winbond W955D8MBYA datasheet | HyperBus プロトコル・レイテンシ・CR/IR 定義（内蔵ダイは本品のコピーとされる） | winbond.com | TBD | TBD |
+| Winbond W956x8MBYA datasheet | 同上の 64 Mbit 版（プロトコル同一，補完用） | winbond.com | TBD | TBD |
+| Gowin DS117 (GW1NR Data Sheet) | PSRAM 構成・電気仕様（PSRAM IF は 1.8 V） | cdn.gowinsemi.com.cn/DS117E.pdf | TBD | TBD |
+| Gowin UG289 (Programmable IO) | ODDR/IDDR ポート・パラメータ定義 | cdn.gowinsemi.com.cn/UG289E.pdf | TBD | TBD |
+| Gowin UG286 (Clock) | rPLL 分周比・位相シフト設定 | gowinsemi.com（URL 要確認） | TBD | TBD |
+| UG803 (GW1NR-9 Pinout) | PSRAM マジックポートの正式定義 | gowinsemi.com（URL 要確認） | TBD | TBD |
+
+注: 内蔵ダイの型番は Gowin 非公開であり，W955D8MBYA 相当というのはコミュニティの
+解析結果である．spike の IR0 読み出しで製造者 ID・密度を実機確認する．
+
+## アーキテクチャ
+
+```mermaid
+flowchart LR
+    subgraph d27["27 MHz ドメイン（既存，無変更）"]
+        M["バスマスタ<br>(memtest / 将来: RISC-V)"]
+    end
+    subgraph dmem["clk_mem ドメイン（54 MHz，rPLL 生成）"]
+        CTRL["psram_ctrl<br>HyperBus FSM"]
+        PHY["psram_phy<br>ODDR/IDDR ラッパ"]
+    end
+    M -- "std::axi4_lite_if (32bit)" --> CDC["CDC<br>std::async_handshake x2<br>(要求 / 応答)"]
+    CDC --> CTRL
+    CTRL --> PHY
+    PHY -- "CK / CS# / RWDS / DQ[7:0]" --> RAM["内蔵 PSRAM ch0<br>(32 Mbit HyperBus)"]
+    PLL["rPLL<br>27 MHz → clk_mem, clk_mem_p"] --> CTRL
+    PLL --> PHY
+```
+
+### クロック
+
+| クロック | 周波数 | 生成 | 用途 |
+| --- | --- | --- | --- |
+| i_clk | 27 MHz | オシレータ（既存） | バスマスタ側，CDC の片側 |
+| clk_mem | 54 MHz | rPLL（位相 0°） | コントローラ FSM，DDR レジスタ |
+| clk_mem_p | 54 MHz | rPLL（位相シフト，90° 目安） | CK 出力（データ中央でラッチさせる） |
+
+- 27 MHz 単一ドメイン方針（[rtl.md](rtl.md)）の例外として
+  PSRAM サブシステムを追加する．既存モジュールのドメインは変更しない
+- Veryl のクロックドメイン注釈により両ドメインは型レベルで区別し，
+  交差点は `unsafe (cdc)` ブロック内の `$std::async_handshake` に限定する
+  （交差の網羅性は L0 でコンパイラが保証する）
+- 54 MHz は既存 OSS 実装の到達点 83 MHz に対する安全側の初期値．
+  nextpnr のタイミングモデルの保守性が未知（L3 の限界）のため，
+  動作確認後の引き上げは性能改善として別パッチで行う
+- 位相シフト量は初期値 90° とし，実機で調整する（L4 残余⑤）
+
+### バス IF: std::axi4_lite_if
+
+- `axi4_lite_pkg::<ADDR_W=22, DATA_W_BYTES=4, ID_W=1>`（ch0 の 4 MB 空間）
+- 32 bit データ幅（AXI4-Lite 標準）．コントローラ内部で 16 bit HyperBus
+  アクセス 2 回に分割する．WSTRB[3:0] は 16 bit アクセスの
+  バイトマスク 2 組へ写像し，全マスク 0 の半語はアクセス自体を省略する
+- 単一アウトスタンディング．AW と W は到着順非依存で合流させ，
+  両方揃ってから発行する
+- 応答は常に OKAY（PSRAM はエラー応答を持たない．初期化未完了時の
+  アクセスは ready を落として待たせる）
+
+採用理由: バーストなし単一トランザクションの要件に合致し，
+将来の RISC-V (32 bit) 接続にアダプタなしで繋がる．AXI は Arm が仕様公開する
+ロイヤリティフリー規格であり，stdlib（MIT OR Apache-2.0）はコンパイラ同梱のため
+外部依存も増えない．stdlib API の安定性リスクは
+[CONTRIBUTING.md](../CONTRIBUTING.md) の更新手順で扱う．
+
+### CDC: std::async_handshake
+
+- 要求パス（合成済み内部コマンド: addr / we / wdata / wstrb）と
+  応答パス（rdata）にそれぞれ 1 個使用
+- 単一アウトスタンディング前提のため非同期 FIFO は不要．
+  バースト対応時に `$std::async_fifo` への置換を検討する
+
+### コントローラ仕様（v1）
+
+| 項目 | 決定 | 備考 |
+| --- | --- | --- |
+| 使用チャネル | ch0 のみ | ch1 はポート定義のみ（将来拡張） |
+| レイテンシ | 固定レイテンシモード（常に 2x） | CR0 で設定．RWDS 監視による可変判定を省き FSM を単純化．可変化は性能改善パッチ |
+| バースト | なし（16 bit 単発 x2） | |
+| CK | シングルエンド（デフォルト） | O_psram_ck_n は非駆動固定 |
+| 初期化 | 電源投入後 150 µs 待機 → CR0 書き込み → IR0 読み出しで疎通確認 | 待機は 27 MHz カウンタ，IR0 確認は自己診断を兼ねる |
+
+CA（Command/Address）構造・CR0 ビット割当・タイミングパラメータの詳細は
+データシート取得後に本文書へ追記する（TBD）．
+
+### 物理層（psram_phy）
+
+- Gowin プリミティブ ODDR / IDDR を SystemVerilog ラッパ経由
+  （Veryl の `$sv::` 名前空間）でインスタンス化する
+- Apicula 対応状況（Wiki 2024-11-19 版で確認済み）:
+  ODDR/ODDRC/IDDR/IDDRC/rPLL は対応，IODELAY 系は未対応．
+  本設計は IODELAY を使用しない（位相調整は rPLL の位相シフトで行う）
+- DQ / RWDS の双方向制御はトップの IOBUF（または inout 直記述）で行う
+
+## 検証
+
+レイヤ定義は [verification.md](verification.md) に従う．本節は PSRAM 固有の割当を示す．
+
+### L4 でしか反証できない項目（spike の存在理由）
+
+1. **Apicula のパッドマッピングの正しさ**: マジックポート
+   （`O_psram_ck[1:0]`，`O_psram_ck_n[1:0]`，`IO_psram_rwds[1:0]`，
+   `IO_psram_dq[15:0]`，`O_psram_reset_n[1:0]`，`O_psram_cs_n[1:0]`）の制約が
+   正しいビットストリームになるか．L0-L3 は「ツールが受理したか」までしか見えない
+2. **rPLL の実機挙動**: 設定→実周波数・lock・位相の対応（cells_sim の PLL モデルは
+   理想化されており反証力がない）
+3. **内蔵ダイの正体**: W955D8MBYA 相当説の真偽．IR0 実読が唯一の一次情報であり，
+   L1 モデルの解釈誤り（共通モード誤り）に対する唯一のクロスチェック点
+4. **電源投入実挙動**: 150 µs 待機・CR デフォルト値・リセット系列の現実
+5. **タイミングの現実**: 位相シフト量の適否，54 MHz 動作余裕
+
+### spike の構成（1 実験 1 未知変数の適用）
+
+- **段 1: bit-bang 疎通**（PLL・DDR プリミティブ不使用）— 上記 1・3・4 を潰す
+  - 27 MHz ロジックから CK を FSM で直接生成（27/4 = 6.75 MHz）．
+    CK をデータ遷移に対し 1 サイクル遅らせ，構成的に 90° 相当の関係を作る
+  - 制約: CS# Low 期間上限 tCSM（約 4 µs，リフレッシュ確保）があるため，
+    これより遅い CK は不可．レジスタリード 1 トランザクション
+    （約 17 CK ≈ 2.5 µs @ 6.75 MHz）は規格内
+  - IR0 読み出し結果を UART / LCD へ表示
+- **段 2: rPLL 単体実証** — 上記 2 を潰す
+  - rPLL を手動インスタンス化し，54 MHz でカウンタを回し LED 点滅周期で
+    周波数を目視確認，lock 信号も表示
+- 5（位相）は 1〜4 が既知になった後，phy パッチで単一変数として扱う
+
+### L1: 自作ビヘイビアモデルとテスト
+
+- モデル（すべて Winbond データシート・Gowin UG289 起点で実装，外部コードの引用なし）:
+  ODDR / IDDR（数十行の等価モデル），rPLL（クロック生成のみの簡易モデル），
+  HyperRAM（CA 解釈・レイテンシ・リード/ライト応答・CR/IR）
+- テスト: 初期化シーケンス / 単発リード / 単発ライト / WSTRB 部分書き込み /
+  レイテンシ境界 / CDC 往復
+
+### L1F: formal 適用先（試験導入）
+
+安全性プロパティを sby（BMC + k-induction）で検証する:
+
+- CS# Low 期間 ≤ tCSM（サイクル数上限）
+- CK は CS# Low 中のみ遷移する
+- リードデータフェーズ中に DQ 出力イネーブルが立たない（バス競合なし）
+- レイテンシカウントの正確性
+- AXI4-Lite: valid は ready 前に deassert しない / 要求なき応答の不在 /
+  単一アウトスタンディング不変条件
+- 初期化完了前にメモリアクセスが発行されない
+
+ハーネスは `formal/` 配下の独立 SV + sby 設定（[verification.md](verification.md) 参照）．
+
+## パッチ計画
+
+| # | branch / commit | 内容 |
+| --- | --- | --- |
+| 0a | `docs: reorganize documents into readme, design, and contributing` | 文書再編（README / docs/ 設計一式 / CONTRIBUTING の 3 分類化） |
+| 0b | `docs: add verification policy document` | verification.md 新設 |
+| 1 | `docs: add PSRAM controller design document` | 本文書 |
+| 2 | `feat: add psram pad access spike` | 段 1（bit-bang IR0 読み出し）+ 段 2（rPLL 単体）の 2 コミット |
+| 3 | `feat: add psram phy layer` | ODDR/IDDR ラッパ + 検証用モデル + 位相調整 |
+| 4 | `feat: add psram controller` | 初期化 / R/W FSM / AXI4-Lite / CDC |
+| 5 | `test: add hyperram behavioral model and controller tests` | HyperRAM モデルとネイティブテスト |
+| 6 | `test: add formal properties for psram controller` | formal ハーネス（試験導入） |
+| 7 | `feat: add psram memtest` | 実機デモ（UART/LCD 報告） |
+
+## 残課題・リスク
+
+| 項目 | 内容 | 対応 |
+| --- | --- | --- |
+| PSRAM マジックポートの制約方法 | 内蔵パッドを nextpnr-himbaechel / .cst でどう指定するか未確認 | spike (#2) で最優先に実証．Apicula の chipDB / examples を事前調査 |
+| nextpnr タイミングモデル | Gowin EDA との保守性差が未知 | 54 MHz の安全側初期値で開始 |
+| sby の同梱確認 | pin 済み OSS CAD Suite 2026-07-20 での同梱未確認 | formal 着手前にコンテナ内 `sby --help` で確認 |
+| 内蔵ダイの仕様差 | W955D8MBYA 相当は非公式情報 | IR0 の実機読み出しで確認し，本文書に結果を記録 |
+| CR0 デフォルト値 | 電源投入時のレイテンシ初期値に依存した初期化順序 | データシート取得後に確定（TBD） |
