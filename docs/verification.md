@@ -38,7 +38,8 @@
   トランスパイル出力（`target/*.sv`）の DUT を包む独立の SV ハーネス
   （`formal/` 配下）+ sby 設定として記述する．生成物には手を入れない
 - sby・SMT ソルバは pin 済み OSS CAD Suite に同梱される（追加依存なし）．
-  同梱確認: コンテナ内で `sby --help`（TBD: 初回使用時に確認し本行を更新）
+  同梱確認済み（2026-07-22，OSS CAD Suite 2026-07-20 コンテナ内）:
+  sby / yosys-smtbmc / boolector / bitwuzla / yices / z3
 
 ## 採用しない手法
 

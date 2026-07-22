@@ -114,6 +114,41 @@ CA（Command/Address）構造・CR0 ビット割当・タイミングパラメ�
   本設計は IODELAY を使用しない（位相調整は rPLL の位相シフトで行う）
 - DQ / RWDS の双方向制御はトップの IOBUF（または inout 直記述）で行う
 
+### パッドマッピング（確認済み 2026-07-22）
+
+pin 済みコンテナ（OSS CAD Suite 2026-07-20，apycula 0.33.dev19+gdfb3c8702）で
+以下を確認した:
+
+- Apicula chipdb `GW1N-9C.msgpack.xz` の `sip_cst['GW1NR-9C']['QFN88P']` に
+  PSRAM マジックポート 26 本すべてが定義されている（下表）
+- **制約方法**: トップモジュールのポート名をマジックポート名と一致させるだけでよい．
+  `.cst` への記載は不要で，nextpnr-himbaechel
+  （`--device 'GW1NR-LV9QN88PC6/I5' --vopt family=GW1N-9C`）が chipdb から
+  自動で該当ダイ IO へ配置する（実証: マジックポートを持つ最小 SV で
+  PnR を実行し，全 26 パッドの配置が sip_cst の定義位置と一致）
+- gowin_pack は sip_cst 該当パッドを IO standard 設定対象から除外して処理する
+  （`is_ram_pin`）．bitstream 生成まで成功
+- 全パッドはダイ左端列（X0）に位置し，UG803 由来の BANK3 系という推定と整合する
+
+| ポート | ダイ IO | ポート | ダイ IO |
+| --- | --- | --- | --- |
+| O_psram_ck[0] | X0Y7/IOBA | O_psram_ck[1] | X0Y22/IOBB |
+| O_psram_ck_n[0] | X0Y6/IOBA | O_psram_ck_n[1] | X0Y22/IOBA |
+| O_psram_cs_n[0] | X0Y5/IOBB | O_psram_cs_n[1] | X0Y21/IOBA |
+| O_psram_reset_n[0] | X0Y1/IOBA | O_psram_reset_n[1] | X0Y17/IOBA |
+| IO_psram_rwds[0] | X0Y16/IOBA | IO_psram_rwds[1] | X0Y26/IOBB |
+| IO_psram_dq[0] | X0Y1/IOBB | IO_psram_dq[8] | X0Y17/IOBB |
+| IO_psram_dq[1] | X0Y2/IOBA | IO_psram_dq[9] | X0Y19/IOBA |
+| IO_psram_dq[2] | X0Y2/IOBB | IO_psram_dq[10] | X0Y19/IOBB |
+| IO_psram_dq[3] | X0Y3/IOBA | IO_psram_dq[11] | X0Y20/IOBA |
+| IO_psram_dq[4] | X0Y8/IOBA | IO_psram_dq[12] | X0Y23/IOBB |
+| IO_psram_dq[5] | X0Y13/IOBA | IO_psram_dq[13] | X0Y24/IOBA |
+| IO_psram_dq[6] | X0Y15/IOBA | IO_psram_dq[14] | X0Y25/IOBA |
+| IO_psram_dq[7] | X0Y16/IOBB | IO_psram_dq[15] | X0Y26/IOBA |
+
+ツールが正しいビットストリームを生成するか（配線・ファンクションの実体）は
+L4 の残余であり，spike 段 1 で確認する．
+
 ## 検証
 
 レイヤ定義は [verification.md](verification.md) に従う．本節は PSRAM 固有の割当を示す．
@@ -185,8 +220,8 @@ CA（Command/Address）構造・CR0 ビット割当・タイミングパラメ�
 
 | 項目 | 内容 | 対応 |
 | --- | --- | --- |
-| PSRAM マジックポートの制約方法 | 内蔵パッドを nextpnr-himbaechel / .cst でどう指定するか未確認 | spike (#2) で最優先に実証．Apicula の chipDB / examples を事前調査 |
+| PSRAM マジックポートの制約方法 | 内蔵パッドを nextpnr-himbaechel / .cst でどう指定するか未確認 | **解決（2026-07-22）**: ポート名一致による自動配置を PnR で実証（「パッドマッピング」節）．実機疎通は spike (#2) で確認 |
 | nextpnr タイミングモデル | Gowin EDA との保守性差が未知 | 54 MHz の安全側初期値で開始 |
-| sby の同梱確認 | pin 済み OSS CAD Suite 2026-07-20 での同梱未確認 | formal 着手前にコンテナ内 `sby --help` で確認 |
+| sby の同梱確認 | pin 済み OSS CAD Suite 2026-07-20 での同梱未確認 | **解決（2026-07-22）**: sby と SMT ソルバ群の同梱を確認（[verification.md](verification.md)） |
 | 内蔵ダイの仕様差 | W955D8MBYA 相当は非公式情報 | IR0 の実機読み出しで確認し，本文書に結果を記録 |
 | CR0 デフォルト値 | 電源投入時のレイテンシ初期値に依存した初期化順序 | データシート取得後に確定（TBD） |
