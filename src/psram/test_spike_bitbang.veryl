@@ -9,7 +9,9 @@
 // - CS# assert から DataStartCycle 番目の CK 立上りで byte A (上位) を出し，
 //   以降 CK エッジ毎に RWDS トグルと共にレジスタ値を繰り返す
 module HyperRamRegReadModel #(
-    param DataStartCycle: u32       = 15      , // CA 3 + 固定 2x レイテンシ (2x6 CK)
+    // 実機確認 (2026-07-22, docs/psram.md「spike 段1 実機結果」): レイテンシは
+    // CA 3 クロック目の立上りを起点に数える → データ開始 = 2 + 2x6 = 14 CK 目
+    param DataStartCycle: u32       = 14      ,
     param Ir0           : logic<16> = 16'h005f,
     param Ir1           : logic<16> = 16'h000f,
     param Cr0           : logic<16> = 16'h8f1f,
@@ -143,7 +145,7 @@ module test_psram_spike_bitbang {
     var exp: logic<8> [43];
 
     initial {
-        // "PSRAM IR0=005F IR1=000F CR0=8F1F L=0C W=1\r\n"
+        // "PSRAM IR0=005F IR1=000F CR0=8F1F L=0B W=1\r\n" (実機出力と同一)
         exp[0]  = 8'h50; // 'P'
         exp[1]  = 8'h53; // 'S'
         exp[2]  = 8'h52; // 'R'
@@ -179,8 +181,8 @@ module test_psram_spike_bitbang {
         exp[32] = 8'h20;
         exp[33] = 8'h4c; // 'L'
         exp[34] = 8'h3d; // '='
-        exp[35] = 8'h30; // L = 0C (2x6 = 12 CK)
-        exp[36] = 8'h43;
+        exp[35] = 8'h30; // L = 0B (CA 3クロック目立上りから 2x6 CK 後 = 実機実測)
+        exp[36] = 8'h42;
         exp[37] = 8'h20;
         exp[38] = 8'h57; // 'W'
         exp[39] = 8'h3d; // '='
