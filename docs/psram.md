@@ -107,8 +107,66 @@ flowchart LR
 | CK | シングルエンド（デフォルト） | O_psram_ck_n は非駆動固定 |
 | 初期化 | 電源投入後 150 µs 待機 → CR0 書き込み → IR0 読み出しで疎通確認 | 待機は 27 MHz カウンタ，IR0 確認は自己診断を兼ねる |
 
-CA（Command/Address）構造・CR0 ビット割当・タイミングパラメータの詳細は
-データシート取得後に本文書へ追記する（TBD）．
+### プロトコル仕様（W955D8MBYA A01-001 より確定）
+
+出典: W955D8MBYA datasheet §7（CA・Read/Write），§9（Register Space），
+§11.2.4・§11.6（タイミング）．W956x8MBYA A01-002 と共通．
+
+**CA（Command/Address）**: CS# アサート後，最初の 3 クロック（6 エッジ，DDR）で
+48 bit の CA を CA0[47:40] から 8 bit ずつ MSB first で転送する（CK 中央整列）．
+
+| CA bit | 名称 | 内容 |
+| --- | --- | --- |
+| 47 | R/W# | 1=Read / 0=Write |
+| 46 | AS | 0=メモリ空間 / 1=レジスタ空間 |
+| 45 | Burst Type | 0=Wrap / 1=リニア（レジスタアクセスは 1） |
+| 44:34 | Reserved | 0 |
+| 33:22 | Row Address | システムワードアドレス A20-A9 |
+| 21:16 | Upper Column | 同 A8-A3 |
+| 15:3 | Reserved | 0 |
+| 2:0 | Lower Column | 同 A2-A0 |
+
+32 Mbit = 2M ワード（A20-A0，16 bit/ワード）= 4 MB/ch．AXI 側 22 bit
+バイトアドレスの [21:1] をワードアドレスへ写像する（ADDR_W=22 と整合）．
+
+**レジスタ空間**（CA[46]=1）: CA0[47:40] は Read=E0h / Write=60h．
+IR0=アドレス 0，IR1=1，CR0 は CA[31:24]=01h・CA[7:0]=00h，CR1 は同 01h．
+
+- レジスタ書き込みはレイテンシ 0（CA 直後に 1 ワード書く．RWDS はホスト非駆動）
+- レジスタ読み出しはメモリ読み出しと同じレイテンシ規則（CR0[7:4] と RWDS）
+
+**ID レジスタ（期待値）**: IR0[3:0]=1111b (Winbond)，IR0[6:4]=101b (32Mb)
+→ IR0=005Fh，IR1[3:0]=1111b (HyperRAM) → IR1=000Fh．
+spike 段 1 の IR0 実読はこの値と照合する．
+
+**CR0**（POR デフォルト 8F1Fh）:
+
+| bit | 名称 | デフォルト | 備考 |
+| --- | --- | --- | --- |
+| 15 | Deep Power Down Enable | 1 (通常動作) | 0 書き込みで DPD へ |
+| 14:12 | Drive Strength | 000 (50Ω) | |
+| 11:8 | Reserved | 1111 | 書き込み時も 1111 とする |
+| 7:4 | Initial Latency | 0001 (6clk @166MHz) | 1110=3clk @83MHz / 1111=4clk @104MHz / 0000=5clk @133MHz |
+| 3 | Fixed Latency Enable | 1 (固定 2x) | 0=可変（RWDS 判定） |
+| 2 | Burst Type | 1 (legacy wrap) | |
+| 1:0 | Burst Length | 11 (32B) | |
+
+POR デフォルトが固定 2x レイテンシのため，**spike 段 1 は CR0 書き込みなしで
+IR0 を読める**（レイテンシ 2x6=12 クロックで固定）．v1 コントローラは
+54 MHz ≤ 83 MHz より CR0[7:4]=1110b（3 クロック，2x で 6）へ設定して
+CR0[3]=1 を維持する（CR0 書き込み値 8FEFh）．
+
+**タイミング（85°C 品）**:
+
+| 項目 | 値 | 備考 |
+| --- | --- | --- |
+| tVCS | 150 µs | 電源投入/リセット後，初回アクセスまでの待機（設計の 150 µs 待機の根拠） |
+| tRP | 200 ns min | RESET# パルス幅 |
+| tCSM | 4 µs max | CS# Low 連続時間上限（リフレッシュ確保） |
+| tRWR | 36 ns min | Read-Write Recovery（CS# 立ち上げ後の回復） |
+| tACC | 36 ns min | 初期アクセス（レイテンシクロック数はこれを満たすよう選ぶ） |
+| tCSS / tCSH | 2 ns / 0 ns min | CS# セットアップ/ホールド（対 CK エッジ） |
+| tCSHI | 6 ns min | トランザクション間の CS# High 期間 |
 
 ### 物理層（psram_phy）
 
@@ -229,4 +287,4 @@ L4 の残余であり，spike 段 1 で確認する．
 | nextpnr タイミングモデル | Gowin EDA との保守性差が未知 | 54 MHz の安全側初期値で開始 |
 | sby の同梱確認 | pin 済み OSS CAD Suite 2026-07-20 での同梱未確認 | **解決（2026-07-22）**: sby と SMT ソルバ群の同梱を確認（[verification.md](verification.md)） |
 | 内蔵ダイの仕様差 | W955D8MBYA 相当は非公式情報 | IR0 の実機読み出しで確認し，本文書に結果を記録 |
-| CR0 デフォルト値 | 電源投入時のレイテンシ初期値に依存した初期化順序 | データシート取得後に確定（TBD） |
+| CR0 デフォルト値 | 電源投入時のレイテンシ初期値に依存した初期化順序 | **解決（2026-07-22）**: POR デフォルトは固定 2x・6 クロック（8F1Fh）．CR0 書き込み前でもレイテンシは決定的（「プロトコル仕様」節） |
