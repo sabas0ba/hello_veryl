@@ -49,7 +49,7 @@
 
 ## 現行テスト一覧（L1）
 
-Veryl ネイティブテスト 14 件: Blink 3 / UART TX・RX・loopback・overrun 7 /
-VideoTiming 1 / TextConsole 2 / PsramSpike 1．実行方法は
+Veryl ネイティブテスト 15 件: Blink 3 / UART TX・RX・loopback・overrun 7 /
+VideoTiming 1 / TextConsole 2 / PsramSpike 1 / ActivityLed 1．実行方法は
 [environment.md](environment.md)，CI 規約は
 [CONTRIBUTING.md](../CONTRIBUTING.md) を参照．

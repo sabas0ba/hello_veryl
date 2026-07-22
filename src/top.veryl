@@ -76,8 +76,8 @@ module Top #(
     // DQ の双方向は Gowin IOBUF プリミティブを明示インスタンス化する．
     // 合成フロー (yosys-slang) は assign による tristate 推論 (cond ? d : 'z)
     // で z を don't-care に畳み込み，入力経路が消失するため使えない．
-    // OEN は 1 で High-Z (UG289)．IOBUF の定義は合成時に解決される
-    // (synth.ys の read_slang --ignore-unknown-modules)
+    // OEN は 1 で High-Z (UG289)．定義は blackbox スタブ (src/gowin_prims.sv,
+    // synth.ys で読込) が与え，実体は nextpnr が解決する
     let ps_dq_oen: logic = ~ps_dq_oe;
     for i in 0..8 :g_psram_dq0 {
         inst pad: $sv::IOBUF (
@@ -151,8 +151,10 @@ module Top #(
     // サンプリングエッジを半周期ずらす
     assign lcd_clk = ~i_clk;
 
-    // LED Blink Test
-    for i in 0..NumLeds :g_led {
+    // LED 割当 (active-low):
+    //   leds[0..3]: 点滅 (1..4 Hz，生存表示)
+    //   leds[4]   : UART RX アクティビティ / leds[5]: UART TX アクティビティ
+    for i in 0..4 :g_led {
         inst blink: Blink #(
             InClkFreq: OscFreq,
             BlinkFreq: i + 1,
@@ -162,4 +164,26 @@ module Top #(
             o_led: leds[i],
         );
     }
+
+    // UART TX/RX インジケータ (ボードに専用 LED がないため LED を割当)．
+    // ラインの Low (start bit 等) を検出して 100 ms 保持する．
+    // uart_rx は非同期入力だが，LED 保持カウンタのリロード条件のみに
+    // 使うため同期化は省略する (メタステーブルの影響は視認不能)
+    var rx_act: logic;
+    var tx_act: logic;
+
+    inst rx_activity: ActivityLed (
+        i_clk             ,
+        i_rst             ,
+        i_active: ~uart_rx,
+        o_on    : rx_act  ,
+    );
+    inst tx_activity: ActivityLed (
+        i_clk             ,
+        i_rst             ,
+        i_active: ~uart_tx,
+        o_on    : tx_act  ,
+    );
+    assign leds[4] = ~rx_act;
+    assign leds[5] = ~tx_act;
 }

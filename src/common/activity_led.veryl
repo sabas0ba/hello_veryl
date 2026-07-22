@@ -1,0 +1,79 @@
+// アクティビティ表示: i_active のパルスを人間が視認できる幅へ引き伸ばす．
+// i_active が立つたびに保持カウンタをリロードし，HoldCycles の間 o_on を保つ
+module ActivityLed #(
+    param HoldCycles: u32 = 2_700_000, // 100 ms @ 27 MHz
+) (
+    i_clk   : input  clock,
+    i_rst   : input  reset,
+    i_active: input  logic, // アクティビティ検出 (レベル，1 で活動中)
+    o_on    : output logic,
+) {
+    const CntWidth: u32 = $clog2(HoldCycles + 1);
+
+    var cnt: logic<CntWidth>;
+
+    assign o_on = cnt != 0;
+
+    always_ff (i_clk, i_rst) {
+        if_reset {
+            cnt = 0;
+        } else if i_active {
+            cnt = HoldCycles;
+        } else if cnt != 0 {
+            cnt = cnt - 1;
+        }
+    }
+}
+
+#[test(test_activity_led)]
+module test_activity_led {
+    const Hold: u32 = 8;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    var active: logic;
+    var on    : logic;
+
+    inst dut: ActivityLed #(
+        HoldCycles: Hold,
+    ) (
+        i_clk   : clk   ,
+        i_rst   : rst   ,
+        i_active: active,
+        o_on    : on    ,
+    );
+
+    initial {
+        active     = 0;
+        rst.assert();
+        $assert   (on == 1'b0, "idle: off");
+
+        // 1 サイクルのパルスで Hold サイクル点灯し，その後消灯する
+        active   = 1;
+        clk.next(1);
+        active   = 0;
+        for _i in 0..Hold {
+            $assert (on == 1'b1, "hold: on");
+            clk.next(1);
+        }
+        $assert(on == 1'b0, "expire: off");
+
+        // 保持中の再トリガで延長される
+        active   = 1;
+        clk.next(1);
+        active   = 0;
+        clk.next(4);
+        active   = 1;
+        clk.next(1);
+        active   = 0;
+        for _i in 0..Hold {
+            $assert (on == 1'b1, "retrigger: on");
+            clk.next(1);
+        }
+        clk.next(1);
+        $assert (on == 1'b0, "retrigger expire: off");
+
+        $finish();
+    }
+}
