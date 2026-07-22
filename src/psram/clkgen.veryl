@@ -1,0 +1,39 @@
+// PSRAM 用クロック生成: rPLL で 27 MHz から clk_mem (54 MHz) を作る．
+// 設定 (docs/psram.md，UG286): fCLKOUT = 27 * FBDIV(2) / IDIV(1) = 54 MHz，
+// fVCO = 54 * ODIV(16) = 864 MHz (GW1NR-9 C6/I5 許容 400-1200 MHz 内，DS117)．
+// 位相調整出力 CLKOUTP は phy パッチで使用する (PSDA_SEL は初期値 90°=0100)．
+// LOCK はロック過程でグリッチしうる (UG286 note) ため表示用途に留める
+module PsramClkGen (
+    i_clk      : input  'osc  clock,
+    o_clk_mem  : output 'mem  clock,
+    o_clk_mem_p: output 'memp clock, // 位相シフト出力 (段2では未使用)
+    o_lock     : output 'osc  logic, // 非同期出力 (表示用途のみ)
+) {
+    // PLL はクロック生成器そのものであり，入出力が異なるドメインに属する
+    // 正当な交差点のため unsafe (cdc) で明示する
+    unsafe (cdc) {
+        inst pll: $sv::rPLL #(
+            FCLKIN   : "27"      ,
+            DEVICE   : "GW1N-9C" ,
+            IDIV_SEL : 0         , // /1
+            FBDIV_SEL: 1         , // x2
+            ODIV_SEL : 16        , // VCO 864 MHz
+            PSDA_SEL : "0100"    , // CLKOUTP +90°
+            CLKFB_SEL: "internal",
+        ) (
+            CLKIN  : i_clk      ,
+            CLKFB  : 1'b0       ,
+            RESET  : 1'b0       ,
+            RESET_P: 1'b0       ,
+            FBDSEL : 6'b000000  ,
+            IDSEL  : 6'b000000  ,
+            ODSEL  : 6'b000000  ,
+            PSDA   : 4'b0000    ,
+            DUTYDA : 4'b0000    ,
+            FDLY   : 4'b0000    ,
+            CLKOUT : o_clk_mem  ,
+            CLKOUTP: o_clk_mem_p,
+            LOCK   : o_lock     ,
+        );
+    }
+}

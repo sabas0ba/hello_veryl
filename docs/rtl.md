@@ -23,7 +23,7 @@ flowchart LR
     FONT["FontRom 8x16<br>(font/ から生成)"] --> CON
     VT["VideoTiming<br>800x480 DEモード"] --> CON
     CON -- "RGB565 (白文字/黒背景)" --> LCD["5inch LCD<br>050QG32-40"]
-    BL["Blink x4"] --> LEDS["leds[3:0]"]
+    BL["Blink x3 + PLL lock"] --> LEDS["leds[3:0]"]
     ACT["ActivityLed x2<br>(UART TX/RX 傍受)"] --> LEDS2["leds[5:4]"]
 ```
 
@@ -31,7 +31,10 @@ LED 割当（すべて active-low）:
 
 | LED | 内容 |
 | --- | --- |
-| leds[0..3] | 1〜4 Hz 点滅（生存表示） |
+| leds[0] | 1 Hz 点滅（27 MHz 基準） |
+| leds[1] | 1 Hz 点滅（clk_mem 54 MHz 換算．leds[0] と同周期なら PLL 正常） |
+| leds[2] | PSRAM PLL lock（点灯=ロック） |
+| leds[3] | 2 Hz 点滅（生存表示） |
 | leds[4] | UART RX アクティビティ（100 ms 保持） |
 | leds[5] | UART TX アクティビティ（100 ms 保持） |
 
@@ -41,6 +44,7 @@ LED 割当（すべて active-low）:
 | Blink | src/blink.veryl | 分周点滅（LED 割当表を参照） |
 | ActivityLed | src/common/activity_led.veryl | UART TX/RX ラインの Low を 100 ms 引き伸ばすインジケータ（leds[5:4]） |
 | PsramSpikeBitbang | src/psram/spike_bitbang.veryl | PSRAM ch0 レジスタ読み出し spike（[psram.md](psram.md)） |
+| PsramClkGen | src/psram/clkgen.veryl | rPLL による clk_mem 54 MHz 生成（[psram.md](psram.md)） |
 | stream_if | src/common/stream.veryl | valid/ready ハンドシェイクの汎用 stream interface |
 | Uart | src/uart/uart.veryl | 115200bps 8N1．RX は 2FF 同期 + 中央サンプリング，ノンブロッキング供給 |
 | VideoTiming | src/video/timing.veryl | LCD タイミング生成（datasheet 導出の 27MHz 直結 59.1Hz，HTotal=890 x VTotal=513） |

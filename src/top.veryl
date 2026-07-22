@@ -151,19 +151,58 @@ module Top #(
     // サンプリングエッジを半周期ずらす
     assign lcd_clk = ~i_clk;
 
+    // PSRAM spike 段2: rPLL 単体実証 (docs/psram.md)．
+    // clk_mem (54 MHz) で 1 Hz 点滅を作り，27 MHz 基準の leds[0] と
+    // 周期を目視比較することで実周波数を確認する．lock は leds[2] へ
+    var clk_mem   : 'mem  clock;
+    var _clk_mem_p: 'memp clock; // 位相シフト出力 (phy パッチで使用)
+    var pll_lock  :       logic;
+
+    inst psram_clkgen: PsramClkGen (
+        i_clk                  ,
+        o_clk_mem  : clk_mem   ,
+        o_clk_mem_p: _clk_mem_p,
+        o_lock     : pll_lock  ,
+    );
+
     // LED 割当 (active-low):
-    //   leds[0..3]: 点滅 (1..4 Hz，生存表示)
-    //   leds[4]   : UART RX アクティビティ / leds[5]: UART TX アクティビティ
-    for i in 0..4 :g_led {
-        inst blink: Blink #(
-            InClkFreq: OscFreq,
-            BlinkFreq: i + 1,
+    //   leds[0]: 1 Hz 点滅 (27 MHz 基準)
+    //   leds[1]: 1 Hz 点滅 (clk_mem 54 MHz 換算．leds[0] と同周期なら PLL 正常)
+    //   leds[2]: PLL lock (点灯=ロック)
+    //   leds[3]: 2 Hz 点滅 (生存表示)
+    //   leds[4]: UART RX アクティビティ / leds[5]: UART TX アクティビティ
+    inst blink_ref: Blink #(
+        InClkFreq: OscFreq,
+        BlinkFreq: 1      ,
+    ) (
+        i_clk: i_clk  ,
+        i_rst: i_rst  ,
+        o_led: leds[0],
+    );
+
+    // clk_mem ドメインの点滅．交差は (1) 非同期リセットの共有 (アサートのみ
+    // 使用)，(2) LED パッドへの出力，のみで観測は目視のため許容する
+    unsafe (cdc) {
+        inst blink_mem: Blink #(
+            InClkFreq: 54_000_000,
+            BlinkFreq: 1         ,
         ) (
-            i_clk: i_clk  ,
+            i_clk: clk_mem,
             i_rst: i_rst  ,
-            o_led: leds[i],
+            o_led: leds[1],
         );
     }
+
+    assign leds[2] = ~pll_lock;
+
+    inst blink_alive: Blink #(
+        InClkFreq: OscFreq,
+        BlinkFreq: 2      ,
+    ) (
+        i_clk: i_clk  ,
+        i_rst: i_rst  ,
+        o_led: leds[3],
+    );
 
     // UART TX/RX インジケータ (ボードに専用 LED がないため LED を割当)．
     // ラインの Low (start bit 等) を検出して 100 ms 保持する．
