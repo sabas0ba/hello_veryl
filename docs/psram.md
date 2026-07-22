@@ -21,12 +21,17 @@ OSS ツールチェーンのみで利用するためのコントローラ設計�
 
 | 資料 | 用途 | 取得元 | 版数 | SHA-256 |
 | --- | --- | --- | --- | --- |
-| Winbond W955D8MBYA datasheet | HyperBus プロトコル・レイテンシ・CR/IR 定義（内蔵ダイは本品のコピーとされる） | winbond.com | TBD | TBD |
-| Winbond W956x8MBYA datasheet | 同上の 64 Mbit 版（プロトコル同一，補完用） | winbond.com | TBD | TBD |
-| Gowin DS117 (GW1NR Data Sheet) | PSRAM 構成・電気仕様（PSRAM IF は 1.8 V） | cdn.gowinsemi.com.cn/DS117E.pdf | TBD | TBD |
-| Gowin UG289 (Programmable IO) | ODDR/IDDR ポート・パラメータ定義 | cdn.gowinsemi.com.cn/UG289E.pdf | TBD | TBD |
-| Gowin UG286 (Clock) | rPLL 分周比・位相シフト設定 | gowinsemi.com（URL 要確認） | TBD | TBD |
-| UG803 (GW1NR-9 Pinout) | PSRAM マジックポートの正式定義 | gowinsemi.com（URL 要確認） | TBD | TBD |
+| Winbond W955D8MBYA datasheet | HyperBus プロトコル・レイテンシ・CR/IR 定義（内蔵ダイは本品のコピーとされる） | winbond.com/resource-files/W955D8MBYA_85C_PKG_datasheet_A01-001_20190605.pdf | A01-001 (2019-06-05) | `a735c54f5b7df8e9b32412eb4d663ba245da9fa37ed32725e70b4f274f8cf14d` |
+| Winbond W956x8MBYA datasheet | 同上の 64 Mbit 版（プロトコル同一，補完用） | winbond.com（DL ゲートウェイ経由，利用者取得） | A01-002 (2019-11-13) | `795c6e412890ef3e740150b248e400df5f687c7024a29b9efe1a740983f3a89b` |
+| Gowin DS117 (GW1NR Data Sheet) | PSRAM 構成・電気仕様（PSRAM IF は 1.8 V） | cdn.gowinsemi.com.cn/DS117E.pdf | DS117-3.2.4E (2026-03-27) | `5801e4d10d080cec37e1a775dd4a8ce2fbd8ed513eefa1d478dd602bcb5ac313` |
+| Gowin UG289 (Programmable IO) | ODDR/IDDR ポート・パラメータ定義 | cdn.gowinsemi.com.cn/UG289E.pdf | UG289-2.2.1E (2025-12-19) | `edec5c97e813e41cfbb6d49ab3bea2a8c8c28b92ec3234c74e865cbd4c88d1db` |
+| Gowin UG286 (Clock) | rPLL 分周比・位相シフト設定 | cdn.gowinsemi.com.cn/UG286E.pdf | UG286-2.0.2E (2025-12-19) | `9e047c027228d085a781ccebabfa6094bedabb569103bd750da0cca40d8f0a8d` |
+| UG803 (GW1NR-9 Pinout) | PSRAM マジックポートの正式定義 | cdn.gowinsemi.com.cn/UG803E.pdf | UG803-1.6.5E (2025-03-07) | `ebe1350849abb5903c2c934a33d19c27635b50c1b09eee27968fc894f5fef836` |
+
+- W955D8MBYA には新版 A01-002 (2022-09-16) が存在するが，winbond.com の
+  ダウンロードゲートウェイ（対話的 DL）経由のため未取得．直接 URL で取得可能な
+  A01-001 を採用し，差分が問題になった場合に新版を手動取得する
+- UG803 は公式 CDN から正式版を取得済み（旧記載「Scribd 転載 v1.6E のみ確認」を更新）
 
 注: 内蔵ダイの型番は Gowin 非公開であり，W955D8MBYA 相当というのはコミュニティの
 解析結果である．spike の IR0 読み出しで製造者 ID・密度を実機確認する．
