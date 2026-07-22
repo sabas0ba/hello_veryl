@@ -15,10 +15,20 @@ module Top #(
     lcd_r    : output logic<5>,
     lcd_g    : output logic<6>,
     lcd_b    : output logic<5>,
+    // PSRAM (GW1NR-9 内蔵)．ポート名をマジックポート名に一致させることで
+    // nextpnr が cst なしで内蔵パッドへ自動配置する (docs/psram.md)
+    O_psram_ck     : output logic    <2> ,
+    O_psram_ck_n   : output logic    <2> ,
+    O_psram_cs_n   : output logic    <2> ,
+    O_psram_reset_n: output logic    <2> ,
+    IO_psram_dq    : inout  tri logic<16>,
+    // spike では RWDS を読むだけのため input とする (メモリライトのマスクで
+    // 駆動が必要になる phy パッチで inout 化する)
+    IO_psram_rwds: input logic<2>,
 ) {
-    // UART Loopback Test: 受信バイトをそのまま送り返す
-    // RX(source)がdata/valid，TX(sink)がreadyを駆動するため1本のstream_ifで直結できる
-    inst echo_stream: stream_if;
+    // UART エコー: RX(source) → TX arbiter → TX(sink)
+    inst echo_stream: stream_if; // RX からのエコー経路
+    inst tx_stream  : stream_if; // arbiter → TX
 
     inst uart: Uart #(
         InClkFreq: OscFreq,
@@ -28,9 +38,70 @@ module Top #(
         i_rst    : i_rst      ,
         uart_tx  : uart_tx    ,
         uart_rx  : uart_rx    ,
-        tx_stream: echo_stream,
+        tx_stream: tx_stream  ,
         rx_stream: echo_stream,
     );
+
+    // PSRAM spike 段1: リセット毎に ch0 の IR0/IR1/CR0 を読み UART/LCD へ報告
+    var ps_ck      : logic   ;
+    var ps_cs_n    : logic   ;
+    var ps_reset_n : logic   ;
+    var ps_dq_o    : logic<8>;
+    var ps_dq_oe   : logic   ;
+    var ps_dq_in   : logic<8>;
+    var _ps_dq_in_1: logic<8>; // ch1 DQ 読み値 (未使用)
+
+    inst spike_msg: stream_if;
+
+    inst psram_spike: PsramSpikeBitbang (
+        i_clk                      ,
+        i_rst                      ,
+        o_ck     : ps_ck           ,
+        o_cs_n   : ps_cs_n         ,
+        o_reset_n: ps_reset_n      ,
+        o_dq     : ps_dq_o         ,
+        o_dq_oe  : ps_dq_oe        ,
+        i_dq     : ps_dq_in        ,
+        i_rwds   : IO_psram_rwds[0],
+        msg      : spike_msg       ,
+    );
+
+    // ch0 のみ使用．ch1 は CS#/RESET# 非活性固定，CK は差動アイドル
+    // (CK=Low / CK#=High)，DQ は入力固定 (High-Z)
+    assign O_psram_ck      = {1'b0, ps_ck};
+    assign O_psram_ck_n    = {1'b1, ~ps_ck};
+    assign O_psram_cs_n    = {1'b1, ps_cs_n};
+    assign O_psram_reset_n = {1'b1, ps_reset_n};
+
+    // DQ の双方向は Gowin IOBUF プリミティブを明示インスタンス化する．
+    // 合成フロー (yosys-slang) は assign による tristate 推論 (cond ? d : 'z)
+    // で z を don't-care に畳み込み，入力経路が消失するため使えない．
+    // OEN は 1 で High-Z (UG289)．IOBUF の定義は合成時に解決される
+    // (synth.ys の read_slang --ignore-unknown-modules)
+    let ps_dq_oen: logic = ~ps_dq_oe;
+    for i in 0..8 :g_psram_dq0 {
+        inst pad: $sv::IOBUF (
+            O  : ps_dq_in[i]   ,
+            IO : IO_psram_dq[i],
+            I  : ps_dq_o[i]    ,
+            OEN: ps_dq_oen     ,
+        );
+    }
+    for i in 0..8 :g_psram_dq1 {
+        inst pad: $sv::IOBUF (
+            O  : _ps_dq_in_1[i]    ,
+            IO : IO_psram_dq[i + 8],
+            I  : 1'b0              ,
+            OEN: 1'b1              ,
+        );
+    }
+
+    // TX arbiter: spike メッセージ優先．spike はリセット直後のみ送出するため
+    // エコーとの競合は実用上起きない (競合時はエコー側が待たされる)
+    assign tx_stream.valid   = spike_msg.valid || echo_stream.valid;
+    assign tx_stream.data    = if spike_msg.valid ? spike_msg.data : echo_stream.data;
+    assign spike_msg.ready   = tx_stream.ready;
+    assign echo_stream.ready = tx_stream.ready && !spike_msg.valid;
 
     // LCD: UART TXへ流れるバイト列を傍受してテキスト表示 (白文字/黒背景)
     var vt_de    : logic    ;
@@ -52,23 +123,23 @@ module Top #(
         pos_y: vt_pos_y ,
     );
 
-    // handshake成立サイクルを傍受 (エコー動作には影響しない)
-    let snoop_valid: logic = echo_stream.valid && echo_stream.ready;
+    // handshake成立サイクルを傍受 (TX へ流れる全バイト = spike報告 + エコー)
+    let snoop_valid: logic = tx_stream.valid && tx_stream.ready;
 
     inst console: TextConsole (
-        i_clk                         ,
-        i_rst                         ,
-        i_char_valid: snoop_valid     ,
-        i_char      : echo_stream.data,
-        i_de        : vt_de           ,
-        i_hsync     : vt_hsync        ,
-        i_vsync     : vt_vsync        ,
-        i_pos_x     : vt_pos_x        ,
-        i_pos_y     : vt_pos_y        ,
-        o_de        : lcd_de          ,
-        o_hsync     : lcd_hsync       ,
-        o_vsync     : lcd_vsync       ,
-        o_pixel     : px              ,
+        i_clk                       ,
+        i_rst                       ,
+        i_char_valid: snoop_valid   ,
+        i_char      : tx_stream.data,
+        i_de        : vt_de         ,
+        i_hsync     : vt_hsync      ,
+        i_vsync     : vt_vsync      ,
+        i_pos_x     : vt_pos_x      ,
+        i_pos_y     : vt_pos_y      ,
+        o_de        : lcd_de        ,
+        o_hsync     : lcd_hsync     ,
+        o_vsync     : lcd_vsync     ,
+        o_pixel     : px            ,
     );
 
     // 画素合成: 文字前景=白

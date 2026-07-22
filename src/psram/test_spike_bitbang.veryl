@@ -1,0 +1,212 @@
+// PsramSpikeBitbang の L1 テスト (docs/psram.md「L1: 自作ビヘイビアモデルとテスト」)
+// モデルは W955D8MBYA データシート (§7, §9) の自前解釈のみから実装しており，
+// 外部コードの引用はない．DUT と共通のデータシート解釈を共有する
+// 共通モード誤りは L4 (実機 IR0 読み出し) で照合する．
+
+// HyperBus レジスタリード応答モデル (システムクロックで CK をオーバーサンプル)
+// - CA 期間 (先頭 6 エッジ) に RWDS=1 を駆動 (固定レイテンシ表示)
+// - CA を取り込み，リード対象レジスタを CA[24]/CA[0] で選択
+// - CS# assert から DataStartCycle 番目の CK 立上りで byte A (上位) を出し，
+//   以降 CK エッジ毎に RWDS トグルと共にレジスタ値を繰り返す
+module HyperRamRegReadModel #(
+    param DataStartCycle: u32       = 15      , // CA 3 + 固定 2x レイテンシ (2x6 CK)
+    param Ir0           : logic<16> = 16'h005f,
+    param Ir1           : logic<16> = 16'h000f,
+    param Cr0           : logic<16> = 16'h8f1f,
+    param Cr1           : logic<16> = 16'h0000,
+) (
+    i_clk: input clock,
+    i_rst: input reset,
+
+    i_ck        : input  logic    ,
+    i_cs_n      : input  logic    ,
+    i_dq        : input  logic<8> ,
+    o_dq        : output logic<8> ,
+    o_dq_drive  : output logic    ,
+    o_rwds      : output logic    ,
+    o_rwds_drive: output logic    ,
+    o_ca        : output logic<48>,
+) {
+    var ck_q  : logic    ;
+    var ca_sh : logic<48>;
+    var edges : logic<3> ; // CA エッジ数 (0..6 で飽和)
+    var cycles: logic<6> ; // CK 立上り数 = 現立上りのサイクル番号
+
+    let ck_rise: logic = i_ck && !ck_q;
+    let ck_fall: logic = !i_ck && ck_q;
+
+    assign o_ca = ca_sh;
+
+    // レジスタ選択 (CA[46]=1 のレジスタ空間リード前提)
+    let sel: logic<16> = if ca_sh[24] ? (if ca_sh[0] ? Cr1 : Cr0) : (if ca_sh[0] ? Ir1 : Ir0);
+
+    always_ff (i_clk, i_rst) {
+        if_reset {
+            ck_q         = 0;
+            ca_sh        = 0;
+            edges        = 0;
+            cycles       = 0;
+            o_dq         = 0;
+            o_dq_drive   = 0;
+            o_rwds       = 0;
+            o_rwds_drive = 0;
+        } else {
+            ck_q = i_ck;
+            if i_cs_n {
+                edges        = 0;
+                cycles       = 0;
+                o_dq_drive   = 0;
+                o_rwds_drive = 0;
+                o_rwds       = 1; // 次の CA 期間に備える (固定レイテンシ表示)
+            } else {
+                o_rwds_drive = 1;
+                if (ck_rise || ck_fall) && edges <: 6 {
+                    ca_sh = {ca_sh[39:0], i_dq};
+                    edges = edges + 1;
+                }
+                if ck_rise {
+                    cycles = cycles + 1;
+                    if cycles >: 2 && cycles <: DataStartCycle {
+                        // レイテンシ期間: RWDS Low を駆動
+                        o_rwds = 0;
+                    }
+                    if cycles >: DataStartCycle - 1 {
+                        // データ語 (エッジ整列): 立上りで byte A + RWDS=1
+                        o_dq       = sel[15:8];
+                        o_dq_drive = 1;
+                        o_rwds     = 1;
+                    }
+                }
+                if ck_fall && o_dq_drive {
+                    // 立下りで byte B + RWDS=0
+                    o_dq   = sel[7:0];
+                    o_rwds = 0;
+                }
+            }
+        }
+    }
+}
+
+#[test(test_psram_spike_bitbang)]
+module test_psram_spike_bitbang {
+    const MaxWait: u32 = 8000;
+    const MsgLen : u32 = 43;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    inst msg_st: stream_if;
+
+    var ck          : logic    ;
+    var cs_n        : logic    ;
+    var _reset_n    : logic    ;
+    var dut_dq_o    : logic<8> ;
+    var dut_dq_oe   : logic    ;
+    var m_dq        : logic<8> ;
+    var m_dq_drive  : logic    ;
+    var m_rwds      : logic    ;
+    var m_rwds_drive: logic    ;
+    var m_ca        : logic<48>;
+
+    // パッド解決 (非駆動時は 0 に落とす)
+    let dut_dq_in  : logic<8> = if m_dq_drive ? m_dq : 8'h00;
+    let dut_rwds_in: logic    = if m_rwds_drive ? m_rwds : 1'b0;
+
+    inst dut: PsramSpikeBitbang #(
+        TvcsCycles: 40, // テスト短縮 (実機は 5400 = 200 µs)
+    ) (
+        i_clk    : clk        ,
+        i_rst    : rst        ,
+        o_ck     : ck         ,
+        o_cs_n   : cs_n       ,
+        o_reset_n: _reset_n   ,
+        o_dq     : dut_dq_o   ,
+        o_dq_oe  : dut_dq_oe  ,
+        i_dq     : dut_dq_in  ,
+        i_rwds   : dut_rwds_in,
+        msg      : msg_st     ,
+    );
+
+    inst model: HyperRamRegReadModel (
+        i_clk       : clk         ,
+        i_rst       : rst         ,
+        i_ck        : ck          ,
+        i_cs_n      : cs_n        ,
+        i_dq        : dut_dq_o    ,
+        o_dq        : m_dq        ,
+        o_dq_drive  : m_dq_drive  ,
+        o_rwds      : m_rwds      ,
+        o_rwds_drive: m_rwds_drive,
+        o_ca        : m_ca        ,
+    );
+
+    var exp: logic<8> [43];
+
+    initial {
+        // "PSRAM IR0=005F IR1=000F CR0=8F1F L=0C W=1\r\n"
+        exp[0]  = 8'h50; // 'P'
+        exp[1]  = 8'h53; // 'S'
+        exp[2]  = 8'h52; // 'R'
+        exp[3]  = 8'h41; // 'A'
+        exp[4]  = 8'h4d; // 'M'
+        exp[5]  = 8'h20;
+        exp[6]  = 8'h49; // 'I'
+        exp[7]  = 8'h52; // 'R'
+        exp[8]  = 8'h30; // '0'
+        exp[9]  = 8'h3d; // '='
+        exp[10] = 8'h30; // IR0 = 005F
+        exp[11] = 8'h30;
+        exp[12] = 8'h35;
+        exp[13] = 8'h46;
+        exp[14] = 8'h20;
+        exp[15] = 8'h49; // 'I'
+        exp[16] = 8'h52; // 'R'
+        exp[17] = 8'h31; // '1'
+        exp[18] = 8'h3d; // '='
+        exp[19] = 8'h30; // IR1 = 000F
+        exp[20] = 8'h30;
+        exp[21] = 8'h30;
+        exp[22] = 8'h46;
+        exp[23] = 8'h20;
+        exp[24] = 8'h43; // 'C'
+        exp[25] = 8'h52; // 'R'
+        exp[26] = 8'h30; // '0'
+        exp[27] = 8'h3d; // '='
+        exp[28] = 8'h38; // CR0 = 8F1F
+        exp[29] = 8'h46;
+        exp[30] = 8'h31;
+        exp[31] = 8'h46;
+        exp[32] = 8'h20;
+        exp[33] = 8'h4c; // 'L'
+        exp[34] = 8'h3d; // '='
+        exp[35] = 8'h30; // L = 0C (2x6 = 12 CK)
+        exp[36] = 8'h43;
+        exp[37] = 8'h20;
+        exp[38] = 8'h57; // 'W'
+        exp[39] = 8'h3d; // '='
+        exp[40] = 8'h31; // W = 1 (CA 期間 RWDS High)
+        exp[41] = 8'h0d;
+        exp[42] = 8'h0a;
+
+        msg_st.ready = 1;
+        rst.assert  ();
+
+        for n in 0..MsgLen {
+            for _w in 0..MaxWait {
+                if msg_st.valid == 1'b1 {
+                    break;
+                }
+                clk.next(1);
+            }
+            $assert (msg_st.valid == 1'b1, "msg byte %0d: valid", n);
+            $assert (msg_st.data == exp[n], "msg byte %0d: got %02x", n, msg_st.data);
+            clk.next(1); // handshake
+        }
+
+        clk.next(1);
+        $assert (msg_st.valid == 1'b0, "msg end");
+        // 最終トランザクション (CR0 リード) の CA 全体を照合
+        $assert(m_ca == 48'he000_0100_0000, "CR0 read CA");
+        $finish();
+    }
+}

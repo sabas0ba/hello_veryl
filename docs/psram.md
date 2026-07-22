@@ -104,7 +104,7 @@ flowchart LR
 | 使用チャネル | ch0 のみ | ch1 はポート定義のみ（将来拡張） |
 | レイテンシ | 固定レイテンシモード（常に 2x） | CR0 で設定．RWDS 監視による可変判定を省き FSM を単純化．可変化は性能改善パッチ |
 | バースト | なし（16 bit 単発 x2） | |
-| CK | シングルエンド（デフォルト） | O_psram_ck_n は非駆動固定 |
+| CK | 差動（CK/CK#，idle: CK=Low/CK#=High） | W955 系は差動クロック入力（データシート §7）．O_psram_ck_n は ~ck を駆動する（旧決定「非駆動固定」をデータシート確認により訂正） |
 | 初期化 | 電源投入後 150 µs 待機 → CR0 書き込み → IR0 読み出しで疎通確認 | 待機は 27 MHz カウンタ，IR0 確認は自己診断を兼ねる |
 
 ### プロトコル仕様（W955D8MBYA A01-001 より確定）
@@ -175,7 +175,11 @@ CR0[3]=1 を維持する（CR0 書き込み値 8FEFh）．
 - Apicula 対応状況（Wiki 2024-11-19 版で確認済み）:
   ODDR/ODDRC/IDDR/IDDRC/rPLL は対応，IODELAY 系は未対応．
   本設計は IODELAY を使用しない（位相調整は rPLL の位相シフトで行う）
-- DQ / RWDS の双方向制御はトップの IOBUF（または inout 直記述）で行う
+- DQ / RWDS の双方向制御は **Gowin IOBUF プリミティブの明示インスタンス化**で
+  行う（`$sv::IOBUF` + blackbox スタブ `src/gowin_prims.sv`）．本フローの
+  SV フロントエンド (yosys-slang) は `cond ? d : 'z` による tristate 推論で
+  z を don't-care へ畳み込み，パッドが出力専用化して入力経路が消失する
+  （spike 実装時に PnR 結果検査で確認．inout の直記述は使用不可）
 
 ### パッドマッピング（確認済み 2026-07-22）
 
