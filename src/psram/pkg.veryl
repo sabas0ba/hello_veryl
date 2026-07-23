@@ -12,4 +12,11 @@ pub package psram_pkg {
     struct rsp_t {
         rdata: logic<32>, /// リードデータ
     }
+
+    /// 4bit 値 → ASCII 16進文字
+    function HexChar (
+        n: input logic<4>,
+    ) -> logic<8> {
+        return if n <: 4'd10 ? 8'h30 + {4'b0000, n} : 8'h37 + {4'b0000, n};
+    }
 }

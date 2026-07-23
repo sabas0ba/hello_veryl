@@ -337,6 +337,29 @@ PSRAM IR0=005F IR1=000F CR0=8F1F L=0B W=1
   L1 モデル（HyperRamRegReadModel）へ反映済み．コントローラ FSM 設計は
   この起点を採用する
 
+#### memtest と Top 統合（パッチ #7，2026-07-24）
+
+- `PsramMemtest`（src/psram/memtest.veryl）: AXI4-Lite マスタとして Words 語
+  （既定 1024）をアドレス関数パターンで書き込み→読み返し照合し，
+  `PSRAM INIT=x MEMTEST=PASS/FAIL ERR=xxxx` の 1 行を UART/LCD へ報告する
+- Top を spike 配線から phy + ctrl + bridge + memtest のサブシステムへ切替．
+  spike モジュール（PsramSpikeBitbang / PsramClkGen の LED 表示）は
+  L1 テスト付きで残置し，clkgen と LED 割当（leds[1] 周期比較 / leds[2] lock）
+  は継続使用する
+- Top 統合後の PnR で phy プリミティブ（ODDR 13 / IDDR 9 / IOBUF 18 / rPLL 1）
+  の正規パッド配置を確認済み
+- **実機結果（2026-07-24，SRAM ロード直後の UART）**:
+  `PSRAM INIT=0 MEMTEST=FAIL ERR=0400` — IR0 照合失敗 + 全 1024 リードが
+  タイムアウト応答（FFFF）．L1 全通過に対する L4 固有の失敗であり，
+  残余⑤（DDR/位相の実挙動）の領域．未検証の疑い順に:
+  1. ODDR の D0/D1 半サイクル割当の解釈（誤りなら CA バイト順が崩れ全滅する．
+     UG289 のタイミング図は本文テキストから抽出できておらず未確認）
+  2. CR0 書き込みのタイミング崩れによる誤書き込み（DPD ビット 0 で
+     Deep Power Down に入ると全応答が消える）
+  3. CK 位相（PSDA_SEL）とリード取り込みの整合
+  切り分けは 1 実験 1 未知変数で: (a) CR0 書き込みスキップ変種で 2 を除外 →
+  (b) D0/D1 スワップ変種で 1 を判定 → (c) PSDA_SEL 掃引で 3 を調整
+
 ### spike 段2 実機結果（2026-07-22）
 
 - leds[1]（clk_mem 54 MHz 換算 1 Hz）が leds[0]（27 MHz 基準 1 Hz）と同周期で

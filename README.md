@@ -2,8 +2,9 @@
 
 [![CI](https://github.com/sabas0ba/hello_veryl/actions/workflows/ci.yml/badge.svg)](https://github.com/sabas0ba/hello_veryl/actions/workflows/ci.yml)
 
-[Veryl](https://veryl-lang.org/) で記述した Lチカ・UART エコー・LCD テキストコンソールを
-OSS ツールチェーンのみで Tang Nano 9K (GOWIN GW1NR-LV9QN88PC6/I5) 上で動作させるプロジェクト．
+[Veryl](https://veryl-lang.org/) で記述した Lチカ・UART エコー・LCD テキストコンソール・
+内蔵 PSRAM コントローラ（起動時 memtest）を OSS ツールチェーンのみで
+Tang Nano 9K (GOWIN GW1NR-LV9QN88PC6/I5) 上で動作させるプロジェクト．
 
 ## 必要環境
 

@@ -1,0 +1,176 @@
+// PsramMemtest + PsramAxiBridge + PsramCtrl + SDR HyperRAM モデルの
+// フルスタック L1 テスト (結果メッセージが PASS になることを確認)
+
+#[test(test_psram_memtest)]
+module test_psram_memtest {
+    const MaxWait: u32 = 30000;
+    const MsgLen : u32 = 36;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    inst axi   : $std::axi4_lite_if::<$std::axi4_lite_pkg::<22, 4, 1>>;
+    inst msg_st: stream_if;
+
+    var req_valid: logic               ;
+    var req_ready: logic               ;
+    var req      : psram_pkg::req_t    ;
+    var rsp_valid: logic               ;
+    var rsp_ready: logic               ;
+    var rsp      : psram_pkg::rsp_t    ;
+    var init_done: logic               ;
+    var init_ok  : logic               ;
+    var _cr0     : logic           <16>;
+
+    var ck_en   : logic   ;
+    var cs_n    : logic   ;
+    var reset_n : logic   ;
+    var dq_a_o  : logic<8>;
+    var dq_b_o  : logic<8>;
+    var dq_oe   : logic   ;
+    var rwds_a_o: logic   ;
+    var rwds_b_o: logic   ;
+    var rwds_oe : logic   ;
+    var dq_a_i  : logic<8>;
+    var dq_b_i  : logic<8>;
+    var rwds_a_i: logic   ;
+    var rwds_b_i: logic   ;
+
+    inst dut: PsramMemtest #(
+        Words: 16, // モデル容量 (64 HyperBus 語 = 32 ワード) 内
+    ) (
+        i_clk      : clk      ,
+        i_rst      : rst      ,
+        m_axi      : axi      ,
+        i_init_done: init_done,
+        i_init_ok  : init_ok  ,
+        msg        : msg_st   ,
+    );
+
+    // テストでは両ドメインへ同一クロックを供給する
+    unsafe (cdc) {
+        inst bridge: PsramAxiBridge (
+            i_clk_axi  : clk      ,
+            i_rst_axi  : rst      ,
+            i_clk_mem  : clk      ,
+            i_rst_mem  : rst      ,
+            s_axi      : axi      ,
+            o_req_valid: req_valid,
+            i_req_ready: req_ready,
+            o_req      : req      ,
+            i_rsp_valid: rsp_valid,
+            o_rsp_ready: rsp_ready,
+            i_rsp      : rsp      ,
+        );
+    }
+
+    inst ctrl: PsramCtrl #(
+        ResetPulseCycles: 4 ,
+        TvcsCycles      : 16, // テスト短縮
+    ) (
+        i_clk      : clk      ,
+        i_rst      : rst      ,
+        i_req_valid: req_valid,
+        o_req_ready: req_ready,
+        i_req      : req      ,
+        o_rsp_valid: rsp_valid,
+        i_rsp_ready: rsp_ready,
+        o_rsp      : rsp      ,
+        o_init_done: init_done,
+        o_init_ok  : init_ok  ,
+        o_ck_en    : ck_en    ,
+        o_cs_n     : cs_n     ,
+        o_reset_n  : reset_n  ,
+        o_dq_a     : dq_a_o   ,
+        o_dq_b     : dq_b_o   ,
+        o_dq_oe    : dq_oe    ,
+        o_rwds_a   : rwds_a_o ,
+        o_rwds_b   : rwds_b_o ,
+        o_rwds_oe  : rwds_oe  ,
+        i_dq_a     : dq_a_i   ,
+        i_dq_b     : dq_b_i   ,
+        i_rwds_a   : rwds_a_i ,
+        i_rwds_b   : rwds_b_i ,
+    );
+
+    inst model: SdrHyperRamModel (
+        i_clk    : clk     ,
+        i_rst    : rst     ,
+        i_ck_en  : ck_en   ,
+        i_cs_n   : cs_n    ,
+        i_reset_n: reset_n ,
+        i_dq_a   : dq_a_o  ,
+        i_dq_b   : dq_b_o  ,
+        i_dq_oe  : dq_oe   ,
+        i_rwds_a : rwds_a_o,
+        i_rwds_b : rwds_b_o,
+        i_rwds_oe: rwds_oe ,
+        o_dq_a   : dq_a_i  ,
+        o_dq_b   : dq_b_i  ,
+        o_rwds_a : rwds_a_i,
+        o_rwds_b : rwds_b_i,
+        o_cr0    : _cr0    ,
+    );
+
+    var exp: logic<8> [36];
+
+    initial {
+        // "PSRAM INIT=1 MEMTEST=PASS ERR=0000\r\n"
+        exp[0]  = 8'h50; // 'P'
+        exp[1]  = 8'h53; // 'S'
+        exp[2]  = 8'h52; // 'R'
+        exp[3]  = 8'h41; // 'A'
+        exp[4]  = 8'h4d; // 'M'
+        exp[5]  = 8'h20;
+        exp[6]  = 8'h49; // 'I'
+        exp[7]  = 8'h4e; // 'N'
+        exp[8]  = 8'h49; // 'I'
+        exp[9]  = 8'h54; // 'T'
+        exp[10] = 8'h3d; // '='
+        exp[11] = 8'h31; // '1'
+        exp[12] = 8'h20;
+        exp[13] = 8'h4d; // 'M'
+        exp[14] = 8'h45; // 'E'
+        exp[15] = 8'h4d; // 'M'
+        exp[16] = 8'h54; // 'T'
+        exp[17] = 8'h45; // 'E'
+        exp[18] = 8'h53; // 'S'
+        exp[19] = 8'h54; // 'T'
+        exp[20] = 8'h3d; // '='
+        exp[21] = 8'h50; // 'P'
+        exp[22] = 8'h41; // 'A'
+        exp[23] = 8'h53; // 'S'
+        exp[24] = 8'h53; // 'S'
+        exp[25] = 8'h20;
+        exp[26] = 8'h45; // 'E'
+        exp[27] = 8'h52; // 'R'
+        exp[28] = 8'h52; // 'R'
+        exp[29] = 8'h3d; // '='
+        exp[30] = 8'h30; // ERR=0000
+        exp[31] = 8'h30;
+        exp[32] = 8'h30;
+        exp[33] = 8'h30;
+        exp[34] = 8'h0d;
+        exp[35] = 8'h0a;
+
+        axi.awid     = 0;
+        axi.arid     = 0;
+        msg_st.ready = 1;
+        rst.assert  ();
+
+        for n in 0..MsgLen {
+            for _w in 0..MaxWait {
+                if msg_st.valid == 1'b1 {
+                    break;
+                }
+                clk.next(1);
+            }
+            $assert (msg_st.valid == 1'b1, "msg byte %0d: valid", n);
+            $assert (msg_st.data == exp[n], "msg byte %0d mismatch", n);
+            clk.next(1);
+        }
+        clk.next(1);
+        $assert (msg_st.valid == 1'b0, "msg end");
+        $finish ();
+    }
+}

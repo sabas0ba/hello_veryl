@@ -49,9 +49,9 @@
 
 ## 現行テスト一覧（L1）
 
-Veryl ネイティブテスト 20 件: Blink 3 / UART TX・RX・loopback・overrun 7 /
+Veryl ネイティブテスト 21 件: Blink 3 / UART TX・RX・loopback・overrun 7 /
 VideoTiming 1 / TextConsole 2 / PsramSpike 1 / ActivityLed 1 /
-PsramCtrl 3（init・R/W+WSTRB・straddle）/ CdcHandshake 1 / PsramAxi 1．
-実行方法は
+PsramCtrl 3（init・R/W+WSTRB・straddle）/ CdcHandshake 1 / PsramAxi 1 /
+PsramMemtest 1．実行方法は
 [environment.md](environment.md)，CI 規約は
 [CONTRIBUTING.md](../CONTRIBUTING.md) を参照．
