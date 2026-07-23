@@ -1,0 +1,15 @@
+/// PSRAM サブシステム共通定義 (docs/psram.md)
+pub package psram_pkg {
+    /// 32bit アクセス要求 (AXI 側 → コントローラ．CDC ペイロード)
+    struct req_t {
+        we   : logic    , /// 1=ライト
+        addr : logic<20>, /// 32bit ワードアドレス (= AXI addr[21:2])
+        wdata: logic<32>, /// ライトデータ
+        wstrb: logic<4> , /// バイトイネーブル
+    }
+
+    /// 応答 (コントローラ → AXI 側．ライト時の rdata は不定)
+    struct rsp_t {
+        rdata: logic<32>, /// リードデータ
+    }
+}

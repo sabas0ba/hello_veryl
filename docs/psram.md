@@ -107,6 +107,29 @@ flowchart LR
 | CK | 差動（CK/CK#，idle: CK=Low/CK#=High） | W955 系は差動クロック入力（データシート §7）．O_psram_ck_n は ~ck を駆動する（旧決定「非駆動固定」をデータシート確認により訂正） |
 | 初期化 | 電源投入後 150 µs 待機 → CR0 書き込み → IR0 読み出しで疎通確認 | 待機は 27 MHz カウンタ，IR0 確認は自己診断を兼ねる |
 
+#### コントローラ実装（v1，2026-07-23）
+
+`PsramCtrl`（src/psram/ctrl.veryl，clk_mem 単一ドメイン）として実装済み．
+
+- **初期化**: RESET# パルス（tRP）→ tVCS 待機 → CR0 書き込み（8FEFh =
+  IL=3・固定 2x）→ IR0 読み出しで 005Fh を照合（`o_init_ok`）．
+  初期化完了まで `o_req_ready` を落として要求を待たせる
+- **トランザクションタイミング**（SDR サイクル，cyc0 = CS# assert）:
+  CA = cyc1..3，レジスタ書き込みデータ = cyc4（ゼロレイテンシ），
+  メモリライトデータ = cyc `3 + 2*IL`（CA 3 クロック目立上り起点，
+  spike 実測で確定），ギャップ = CS# High 2 cyc（tRWR 36 ns）
+- **リード取り込み**: RWDS 修飾のペア検出．半サンプル列から
+  {RWDS=1, 続く RWDS=0} の組を語として取り込むため，phy の IDDR 取り込みが
+  位相依存で半サイクルずれても（byte A が Q1 側に載っても）正しく組める．
+  タイムアウト時は FFFF を応答（初期化中なら `o_init_ok=0`）
+- **32bit 分割**: AXI ワードを 16bit×2 の HyperBus アクセスへ分割．
+  WSTRB は RWDS マスク（High=マスク）へ写像し，全マスクの半語は
+  トランザクション自体を省略する
+- **L1 テスト**（src/psram/test_ctrl.veryl）: SDR 境界 HyperRAM モデル
+  （CA 解釈・CR0/IR・固定レイテンシ・64 語メモリ・ライトマスク）に対し，
+  初期化 / フルワード W→R / WSTRB 部分書き込み / 半サイクルずれ応答
+  （StraddleRead 変種）の 3 テスト
+
 ### プロトコル仕様（W955D8MBYA A01-001 より確定）
 
 出典: W955D8MBYA datasheet §7（CA・Read/Write），§9（Register Space），
@@ -184,6 +207,9 @@ DDR パッド信号へ変換する．
   位相調整が単一変数になる（L4 残余⑤）．ck_en は clk_mem で 1 段受けてから
   clk_mem_p ODDR へ渡す（T/4 ≈ 4.6 ns 予算の同一 PLL 位相差経路）
 - 入力（DQ/RWDS）は clk_mem の IDDR で取り込む（Q0=立上り / Q1=立下り）
+- FSM 側入力はすべて 1 段レジスタで受ける．CK パス（clk_mem_p の ODDR）が
+  構造上 1 サイクル遅れるため，データ/CS 側にも同じ 1 段を入れて
+  SDR サイクルの同時性を保つ（コントローラ実装時に整合を修正）
 - DQ/RWDS のトライステートは ODDR の TX→Q1 を IOBUF の OEN へ接続する
   専用経路で制御する（yosys-slang の tristate 推論は z を don't-care へ
   畳み込み使用不可 — spike 実装時に PnR 結果検査で確認済み）
