@@ -24,6 +24,8 @@ pub module PsramCtrl #(
     param InitialLatency: u32 = 3,
     /// CR0 書き込み値 (IL=3, 固定 2x, 他はデフォルト維持)
     param Cr0Value: logic<16> = 16'h8fef,
+    /// CR0 書き込みを行うか (0 で POR デフォルト IL=6 のまま動作．L4 切り分け用)
+    param WriteCr0: bit = 1,
     /// IR0 期待値 (Winbond / 32 Mbit．spike 段1 実測値)
     param Ir0Expected: logic<16> = 16'h005f,
     /// リード検出ウィンドウ開始 [txn cyc] (CA 期間の RWDS High を誤検出しない下限)
@@ -179,7 +181,7 @@ pub module PsramCtrl #(
         } else if state == State::tvcs_wait {
             if wait_cnt <: TvcsCycles - 1 {
                 wait_cnt = wait_cnt + 1;
-            } else {
+            } else if WriteCr0 {
                 // 初期化: CR0 書き込みから開始
                 seq         = Seq::init_cr0;
                 txn_ca      = CaCr0Write;
@@ -188,6 +190,17 @@ pub module PsramCtrl #(
                 txn_wdata   = Cr0Value;
                 txn_wmask_a = 0;
                 txn_wmask_b = 0;
+                state       = State::txn;
+                cyc         = 0;
+                o_cs_n      = 0;
+            } else {
+                // CR0 書き込みをスキップし IR0 自己診断へ (POR: 固定 2x, IL=6)
+                seq         = Seq::init_ir0;
+                txn_ca      = CaIr0Read;
+                txn_read    = 1;
+                txn_reg_wr  = 0;
+                det_done    = 0;
+                det_timeout = 0;
                 state       = State::txn;
                 cyc         = 0;
                 o_cs_n      = 0;

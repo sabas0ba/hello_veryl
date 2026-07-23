@@ -359,6 +359,23 @@ PSRAM IR0=005F IR1=000F CR0=8F1F L=0B W=1
   3. CK 位相（PSDA_SEL）とリード取り込みの整合
   切り分けは 1 実験 1 未知変数で: (a) CR0 書き込みスキップ変種で 2 を除外 →
   (b) D0/D1 スワップ変種で 1 を判定 → (c) PSDA_SEL 掃引で 3 を調整
+- **切り分け実験の結果（2026-07-24 実施，全て同一の失敗 INIT=0/ERR=0400）**:
+  - (a) CR0 書き込みスキップ（PsramCtrl の WriteCr0=0 ノブ，POR IL=6 のまま）
+    → 変化なし．**CR0 誤書き込み → DPD 説を棄却**
+  - (b) 全 ODDR の D0/D1 と IDDR の Q0/Q1 をスワップ → 変化なし．
+    **半サイクル割当の解釈誤り説を棄却**（単独原因としては）
+  - (e) CK 生成を clk_mem_p から clk_mem の ODDR（D1=en，180° 位相）へ変更
+    → 変化なし．**CLKOUTP 死亡説・位相依存説を棄却**
+  - (h1) CS#/RESET# を ODDR からファブリック FF 直結（spike 実証済み経路，
+    CS# は +2cyc 遅延で整合）へ変更 → 変化なし．**CS#/RESET# 固着説を棄却**
+  - 残る共通要素は **DQ/CK/RWDS の ODDR / IDDR / IOBUF(OEN=ODDR Q1) の
+    bitstream 実挙動**．gowin_pack は IOLOGIC の INIT 属性を未処理として
+    スキップしており（`XXX IOLOGIC` メッセージ，値はデフォルト 0 のため
+    それ自体は無害の可能性），apicula の GW1N-9C IOLOGIC 対応の実績確認が必要
+  - 次の判定実験（未実施）: ODDR/IDDR を使わない half-rate SDR fallback phy
+    （CK 27 MHz をファブリック生成，spike 方式の一般化）．これが動けば
+    「ロジック正・IOLOGIC bitstream 化が原因」とほぼ確定し，apicula の
+    実例調査（gowin_unpack での fuse 比較・upstream examples 突合）へ進む
 
 ### spike 段2 実機結果（2026-07-22）
 
