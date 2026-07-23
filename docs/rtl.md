@@ -43,6 +43,7 @@ LED 割当（すべて active-low）:
 | Top | src/top.veryl | 全体統合（UARTエコー + 傍受テキスト表示 + LED点滅） |
 | Blink | src/blink.veryl | 分周点滅（LED 割当表を参照） |
 | ActivityLed | src/common/activity_led.veryl | UART TX/RX ラインの Low を 100 ms 引き伸ばすインジケータ（leds[5:4]） |
+| CdcHandshake | src/common/cdc_handshake.veryl | トグルハンドシェイク + 2FF の汎用 CDC（単一データ転送） |
 | PsramSpikeBitbang | src/psram/spike_bitbang.veryl | PSRAM ch0 レジスタ読み出し spike（[psram.md](psram.md)） |
 | PsramClkGen | src/psram/clkgen.veryl | rPLL による clk_mem 54 MHz 生成（[psram.md](psram.md)） |
 | stream_if | src/common/stream.veryl | valid/ready ハンドシェイクの汎用 stream interface |

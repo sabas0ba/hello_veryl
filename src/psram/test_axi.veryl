@@ -1,0 +1,234 @@
+// PsramAxiBridge + PsramCtrl + SDR HyperRAM モデルの L1 テスト
+// (AXI4-Lite ライト/リード往復と CDC の論理機能．周波数比は L1 では
+// モデル化せず，両ドメインへ同一クロックを供給する — verification.md)
+
+#[test(test_psram_axi)]
+module test_psram_axi {
+    const MaxWait: u32 = 8000;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    inst axi: $std::axi4_lite_if::<$std::axi4_lite_pkg::<22, 4, 1>>;
+
+    var req_valid: logic               ;
+    var req_ready: logic               ;
+    var req      : psram_pkg::req_t    ;
+    var rsp_valid: logic               ;
+    var rsp_ready: logic               ;
+    var rsp      : psram_pkg::rsp_t    ;
+    var init_done: logic               ;
+    var init_ok  : logic               ;
+    var _cr0     : logic           <16>;
+
+    var ck_en   : logic   ;
+    var cs_n    : logic   ;
+    var reset_n : logic   ;
+    var dq_a_o  : logic<8>;
+    var dq_b_o  : logic<8>;
+    var dq_oe   : logic   ;
+    var rwds_a_o: logic   ;
+    var rwds_b_o: logic   ;
+    var rwds_oe : logic   ;
+    var dq_a_i  : logic<8>;
+    var dq_b_i  : logic<8>;
+    var rwds_a_i: logic   ;
+    var rwds_b_i: logic   ;
+
+    // テストでは両ドメインへ同一クロックを供給する (CDC は論理機能のみ確認)
+    unsafe (cdc) {
+        inst dut: PsramAxiBridge (
+            i_clk_axi  : clk      ,
+            i_rst_axi  : rst      ,
+            i_clk_mem  : clk      ,
+            i_rst_mem  : rst      ,
+            s_axi      : axi      ,
+            o_req_valid: req_valid,
+            i_req_ready: req_ready,
+            o_req      : req      ,
+            i_rsp_valid: rsp_valid,
+            o_rsp_ready: rsp_ready,
+            i_rsp      : rsp      ,
+        );
+    }
+
+    inst ctrl: PsramCtrl #(
+        ResetPulseCycles: 4 ,
+        TvcsCycles      : 16, // テスト短縮
+    ) (
+        i_clk      : clk      ,
+        i_rst      : rst      ,
+        i_req_valid: req_valid,
+        o_req_ready: req_ready,
+        i_req      : req      ,
+        o_rsp_valid: rsp_valid,
+        i_rsp_ready: rsp_ready,
+        o_rsp      : rsp      ,
+        o_init_done: init_done,
+        o_init_ok  : init_ok  ,
+        o_ck_en    : ck_en    ,
+        o_cs_n     : cs_n     ,
+        o_reset_n  : reset_n  ,
+        o_dq_a     : dq_a_o   ,
+        o_dq_b     : dq_b_o   ,
+        o_dq_oe    : dq_oe    ,
+        o_rwds_a   : rwds_a_o ,
+        o_rwds_b   : rwds_b_o ,
+        o_rwds_oe  : rwds_oe  ,
+        i_dq_a     : dq_a_i   ,
+        i_dq_b     : dq_b_i   ,
+        i_rwds_a   : rwds_a_i ,
+        i_rwds_b   : rwds_b_i ,
+    );
+
+    inst model: SdrHyperRamModel (
+        i_clk    : clk     ,
+        i_rst    : rst     ,
+        i_ck_en  : ck_en   ,
+        i_cs_n   : cs_n    ,
+        i_reset_n: reset_n ,
+        i_dq_a   : dq_a_o  ,
+        i_dq_b   : dq_b_o  ,
+        i_dq_oe  : dq_oe   ,
+        i_rwds_a : rwds_a_o,
+        i_rwds_b : rwds_b_o,
+        i_rwds_oe: rwds_oe ,
+        o_dq_a   : dq_a_i  ,
+        o_dq_b   : dq_b_i  ,
+        o_rwds_a : rwds_a_i,
+        o_rwds_b : rwds_b_i,
+        o_cr0    : _cr0    ,
+    );
+
+    initial {
+        axi.awvalid                   = 0;
+        axi.awaddr                    = 0;
+        axi.awid                      = 0;
+        axi.awprot.instruction_access = 0;
+        axi.awprot.non_secure         = 0;
+        axi.awprot.privileged         = 0;
+        axi.arprot.instruction_access = 0;
+        axi.arprot.non_secure         = 0;
+        axi.arprot.privileged         = 0;
+        axi.wvalid                    = 0;
+        axi.wdata                     = 0;
+        axi.wstrb                     = 0;
+        axi.bready                    = 1;
+        axi.arvalid                   = 0;
+        axi.araddr                    = 0;
+        axi.arid                      = 0;
+        axi.rready                    = 1;
+        rst.assert                   ();
+
+        // ---- 初期化完了前に発行したライトが完了する (ready 待ちのブロック) ----
+        axi.awvalid = 1;
+        axi.awaddr  = 22'h40; // 32bit ワード 0x10
+        axi.wvalid  = 1;
+        axi.wdata   = 32'h0badf00d;
+        axi.wstrb   = 4'hf;
+        for _w in 0..MaxWait {
+            if axi.awready == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        clk.next   (1); // accept edge (AW/W 同時)
+        axi.awvalid = 0;
+        axi.wvalid  = 0;
+        for _w in 0..MaxWait {
+            if axi.bvalid == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        $assert (init_done == 1'b1, "write blocked until init");
+        $assert (axi.bresp == $std::axi4_lite_config::resp_variants::OKAY, "bresp OKAY");
+        clk.next(1); // consume B
+
+        // ---- リードバック ----
+        axi.arvalid = 1;
+        axi.araddr  = 22'h40;
+        for _w in 0..MaxWait {
+            if axi.arready == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        clk.next   (1);
+        axi.arvalid = 0;
+        for _w in 0..MaxWait {
+            if axi.rvalid == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        $assert (axi.rdata == 32'h0badf00d, "readback via AXI");
+        $assert (axi.rresp == $std::axi4_lite_config::resp_variants::OKAY, "rresp OKAY");
+        clk.next(1); // consume R
+
+        // ---- 別アドレスへの部分ライト + リード ----
+        axi.awvalid = 1;
+        axi.awaddr  = 22'h44;
+        axi.wvalid  = 1;
+        axi.wdata   = 32'haa55cc33;
+        axi.wstrb   = 4'hf;
+        for _w in 0..MaxWait {
+            if axi.awready == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        clk.next   (1);
+        axi.awvalid = 0;
+        axi.wvalid  = 0;
+        for _w in 0..MaxWait {
+            if axi.bvalid == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        clk.next(1);
+
+        axi.awvalid = 1;
+        axi.wvalid  = 1;
+        axi.wdata   = 32'h00ff0000;
+        axi.wstrb   = 4'b0100; // byte2 のみ
+        for _w in 0..MaxWait {
+            if axi.awready == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        clk.next   (1);
+        axi.awvalid = 0;
+        axi.wvalid  = 0;
+        for _w in 0..MaxWait {
+            if axi.bvalid == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        clk.next(1);
+
+        axi.arvalid = 1;
+        axi.araddr  = 22'h44;
+        for _w in 0..MaxWait {
+            if axi.arready == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        clk.next   (1);
+        axi.arvalid = 0;
+        for _w in 0..MaxWait {
+            if axi.rvalid == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        $assert (axi.rdata == 32'haaffcc33, "partial write via AXI (byte2)");
+        clk.next(1);
+
+        $finish();
+    }
+}

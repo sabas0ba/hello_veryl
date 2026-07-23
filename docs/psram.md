@@ -90,12 +90,19 @@ flowchart LR
 外部依存も増えない．stdlib API の安定性リスクは
 [CONTRIBUTING.md](../CONTRIBUTING.md) の更新手順で扱う．
 
-### CDC: std::async_handshake
+### CDC: CdcHandshake（自作，2026-07-24 改訂）
 
-- 要求パス（合成済み内部コマンド: addr / we / wdata / wstrb）と
-  応答パス（rdata）にそれぞれ 1 個使用
-- 単一アウトスタンディング前提のため非同期 FIFO は不要．
-  バースト対応時に `$std::async_fifo` への置換を検討する
+- 要求パス（we / addr / wdata / wstrb）と応答パス（rdata）にそれぞれ 1 個使用
+- 単一アウトスタンディング前提のため非同期 FIFO は不要
+- **当初計画の `std::async_handshake` から自作 `CdcHandshake`
+  （src/common/cdc_handshake.veryl，同一のトグルハンドシェイク + 2FF 方式）へ
+  変更**．std 部品は内部の reset_sync で導出したリセットを用いており，
+  veryl 0.20.2 のネイティブテストでは時刻 0 以前に印加される tb リセットを
+  受けられず src ready が初期化されないまま停止する（interpret / cc /
+  Verilator すべてで再現）．L1 検証可能性を優先し，リセットを各ドメインの
+  FF へ直結する自作実装とした．波形解析では std 部品内部の synchronizer への
+  WIDTH=1 指定が効かず 8bit で生成される事象も観測しており（ジェネリクスの
+  不具合の疑い），Veryl 更新時に上流状況を再確認する
 
 ### コントローラ仕様（v1）
 
@@ -129,6 +136,13 @@ flowchart LR
   （CA 解釈・CR0/IR・固定レイテンシ・64 語メモリ・ライトマスク）に対し，
   初期化 / フルワード W→R / WSTRB 部分書き込み / 半サイクルずれ応答
   （StraddleRead 変種）の 3 テスト
+- **AXI4-Lite ブリッジ**（src/psram/axi_bridge.veryl，2026-07-24）:
+  `PsramAxiBridge` が s_axi（`$std::axi4_lite_if`，27 MHz 側）の単一
+  アウトスタンディング要求を req_t へ束ね，CdcHandshake×2 で ctrl と結ぶ．
+  AW/W は到着順非依存で合流し両方揃ってから同時受理，応答は常に OKAY．
+  初期化未完了時は ctrl が要求を取らないため AXI 側は応答待ちで自然に
+  ブロックされる．L1 テスト（test_axi.veryl）はブリッジ+ctrl+モデルの
+  フルスタックで W→R / WSTRB 部分書き込みと初期化前発行のブロックを確認
 
 ### プロトコル仕様（W955D8MBYA A01-001 より確定）
 
