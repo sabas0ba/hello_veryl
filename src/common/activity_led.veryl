@@ -1,12 +1,24 @@
-// アクティビティ表示: i_active のパルスを人間が視認できる幅へ引き伸ばす．
-// i_active が立つたびに保持カウンタをリロードし，HoldCycles の間 o_on を保つ
-module ActivityLed #(
-    param HoldCycles: u32 = 2_700_000, // 100 ms @ 27 MHz
+/// アクティビティ表示 (パルス引き伸ばし)
+///
+/// `i_active` のパルスを人間が視認できる幅へ引き伸ばす．
+/// `i_active` が立つたびに保持カウンタをリロードし，`HoldCycles` の間
+/// `o_on` を保持する (保持中の再トリガで延長)．
+///
+/// ```wavedrom
+/// {signal: [
+///   {name: 'clk',      wave: 'p.......'},
+///   {name: 'i_active', wave: '010.....'},
+///   {name: 'o_on',     wave: '0.1...0.', node: '..a...b'},
+/// ], edge: ['a<->b HoldCycles']}
+/// ```
+pub module ActivityLed #(
+    /// 保持サイクル数 (既定 100 ms @ 27 MHz)
+    param HoldCycles: u32 = 2_700_000,
 ) (
-    i_clk   : input  clock,
-    i_rst   : input  reset,
-    i_active: input  logic, // アクティビティ検出 (レベル，1 で活動中)
-    o_on    : output logic,
+    i_clk   : input  clock, /// クロック
+    i_rst   : input  reset, /// リセット
+    i_active: input  logic, /// アクティビティ検出 (レベル，1 で活動中)
+    o_on    : output logic, /// 表示出力 (保持中 1)
 ) {
     const CntWidth: u32 = $clog2(HoldCycles + 1);
 

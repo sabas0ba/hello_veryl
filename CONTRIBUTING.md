@@ -30,6 +30,10 @@
 
 - 設計判断・実機で得た事実は該当する設計文書（`docs/`）へ追記する
   （検証で得た事実の扱いは [docs/verification.md](docs/verification.md) の運用規則）
+- モジュール・interface のヘッダ説明は `///` ドキュメンテーションコメントで
+  記述し `pub` を付ける（`veryl doc` の対象となり GitHub Pages へ公開される．
+  生成方法は [docs/environment.md](docs/environment.md)）．テストモジュールは
+  非 pub のまま公開対象から除外する
 - データシート等の再配布制限がある資料は `docs/datasheets/`（git 管理外）に置き，
   取得元・版数・SHA-256 を設計文書の一次資料表に記録する
 

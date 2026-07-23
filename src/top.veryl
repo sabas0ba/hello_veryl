@@ -1,29 +1,47 @@
-module Top #(
+/// トップモジュール (Tang Nano 9K)
+///
+/// UART エコー + テキストコンソール (LCD) + PSRAM spike + LED 表示の統合．
+///
+/// ```mermaid
+/// flowchart LR
+///     PC["PC (COMポート)"] -- uart_rx --> RX["Uart RX"]
+///     RX -- "echo" --> ARB["TX arbiter<br>(spike優先)"]
+///     SPIKE["PsramSpikeBitbang"] -- "結果1行" --> ARB
+///     ARB --> TX["Uart TX"] -- uart_tx --> PC
+///     ARB -. "傍受" .-> CON["TextConsole"] --> LCD["5inch LCD"]
+///     SPIKE <--> RAM["内蔵 PSRAM ch0"]
+///     PLL["PsramClkGen<br>(rPLL 54MHz)"] --> LEDS["leds"]
+/// ```
+///
+/// LED 割当は docs/rtl.md，PSRAM サブシステムは docs/psram.md を参照．
+pub module Top #(
+    /// オシレータ周波数 [Hz]
     param OscFreq: u32 = 27_000_000,
-    param NumLeds: u32 = 6         ,
+    /// LED 数
+    param NumLeds: u32 = 6,
 ) (
-    i_clk  : input  clock         ,
-    i_rst  : input  reset         ,
-    leds   : output logic<NumLeds>,
-    uart_tx: output logic         ,
-    uart_rx: input  logic         ,
+    i_clk  : input  clock         , /// 27 MHz オシレータ
+    i_rst  : input  reset         , /// S1 ボタン (active-low)
+    leds   : output logic<NumLeds>, /// LED (active-low，割当は rtl.md)
+    uart_tx: output logic         , /// UART TX
+    uart_rx: input  logic         , /// UART RX
     // LCD (5inch 800x480 RGB565, DEモード)
-    lcd_clk  : output logic   ,
-    lcd_de   : output logic   ,
-    lcd_hsync: output logic   ,
-    lcd_vsync: output logic   ,
-    lcd_r    : output logic<5>,
-    lcd_g    : output logic<6>,
-    lcd_b    : output logic<5>,
+    lcd_clk  : output logic   , /// LCD ピクセルクロック (反転出力)
+    lcd_de   : output logic   , /// LCD データイネーブル
+    lcd_hsync: output logic   , /// LCD 水平同期 (負極性)
+    lcd_vsync: output logic   , /// LCD 垂直同期 (負極性)
+    lcd_r    : output logic<5>, /// LCD R (RGB565)
+    lcd_g    : output logic<6>, /// LCD G (RGB565)
+    lcd_b    : output logic<5>, /// LCD B (RGB565)
     // PSRAM (GW1NR-9 内蔵)．ポート名をマジックポート名に一致させることで
     // nextpnr が cst なしで内蔵パッドへ自動配置する (docs/psram.md)
-    O_psram_ck     : output logic    <2> ,
-    O_psram_ck_n   : output logic    <2> ,
-    O_psram_cs_n   : output logic    <2> ,
-    O_psram_reset_n: output logic    <2> ,
-    IO_psram_dq    : inout  tri logic<16>,
-    // spike では RWDS を読むだけのため input とする (メモリライトのマスクで
-    // 駆動が必要になる phy パッチで inout 化する)
+    O_psram_ck     : output logic    <2> , /// PSRAM CK (ch1:ch0)
+    O_psram_ck_n   : output logic    <2> , /// PSRAM CK# (差動)
+    O_psram_cs_n   : output logic    <2> , /// PSRAM CS#
+    O_psram_reset_n: output logic    <2> , /// PSRAM RESET#
+    IO_psram_dq    : inout  tri logic<16>, /// PSRAM DQ (ch0=下位8bit)
+    /// PSRAM RWDS．spike では読むだけのため input とする
+    /// (メモリライトのマスクで駆動が必要になる phy パッチで inout 化する)
     IO_psram_rwds: input logic<2>,
 ) {
     // UART エコー: RX(source) → TX arbiter → TX(sink)

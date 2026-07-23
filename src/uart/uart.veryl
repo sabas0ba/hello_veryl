@@ -1,16 +1,30 @@
-module Uart #(
+/// UART 送受信 (8N1)
+///
+/// - TX: `tx_stream` から 1 バイト受け取り LSB first で送出する
+/// - RX: 2FF 同期 + start bit 中央から 1 ビット周期ごとの中央サンプリング．
+///   受信完了で即 `valid` を立てて次フレームに備えるノンブロッキング供給
+///   (未消費のまま次バイトが完了した場合は旧バイトを上書き)
+///
+/// ```wavedrom
+/// {signal: [
+///   {name: 'uart_tx', wave: '10========1.', data: ['D0','D1','D2','D3','D4','D5','D6','D7'],
+///    node: '.a........b'},
+/// ], edge: ['a<->b start + 8 data + stop']}
+/// ```
+pub module Uart #(
+    /// 入力クロック周波数 [Hz]
     param InClkFreq: u32 = 27_000_000,
-    param BaudRate : u32 = 115200    ,
+    /// ボーレート [bps]
+    param BaudRate: u32 = 115200,
 ) (
-    // Clock/Reset
-    i_clk: input clock,
-    i_rst: input reset,
+    i_clk: input clock, /// クロック
+    i_rst: input reset, /// リセット
     // UART TX/RX pin
-    uart_tx: output logic,
-    uart_rx: input  logic,
+    uart_tx: output logic, /// TX ライン (idle High)
+    uart_rx: input  logic, /// RX ライン (非同期入力，内部で 2FF 同期)
     // TX/RX Data
-    tx_stream: modport stream_if::sink  ,
-    rx_stream: modport stream_if::source,
+    tx_stream: modport stream_if::sink  , /// 送信データ入力
+    rx_stream: modport stream_if::source, /// 受信データ出力 (ノンブロッキング)
 ) {
     // 四捨五入付きで，1bitあたりのサイクル数算出
     const CycPerBit      : u32 = (InClkFreq + BaudRate / 2) / BaudRate;

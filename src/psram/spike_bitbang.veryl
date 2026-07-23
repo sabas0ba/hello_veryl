@@ -1,33 +1,44 @@
-// PSRAM spike 段1: bit-bang レジスタ読み出し (docs/psram.md「spikeの構成」)
-// PLL・DDRプリミティブを使わず 27 MHz ロジックのみで CK = 27/4 = 6.75 MHz を
-// 生成し，ch0 の IR0/IR1/CR0 を読み出して結果を ASCII 1行の stream として送出する．
-//
-// CK 位相 (1 CK = 4 サイクル，phase 0..3):
-//   データ遷移: phase 3→0 / 1→2 境界，CK 立上り: 0→1 境界，立下り: 2→3 境界
-//   → CK エッジがデータ遷移から 1 サイクル遅れ，構成的に 90° 相当の関係になる
-// リード側は POR デフォルト (固定 2x レイテンシ) 前提で CR0 を書かず，
-// RWDS のエッジ検出で自己同期してデータ語を取り込む (レイテンシ実測値は
-// L=xx として報告し，L1 モデル/データシート解釈の照合に使う)
-module PsramSpikeBitbang #(
-    // リセットパルス幅 (tRP = 200 ns min → 27 MHz で 8 cyc = 296 ns)
+/// PSRAM spike 段1: bit-bang レジスタ読み出し (docs/psram.md「spikeの構成」)
+///
+/// PLL・DDR プリミティブを使わず 27 MHz ロジックのみで CK = 27/4 = 6.75 MHz を
+/// 生成し，ch0 の IR0/IR1/CR0 を読み出して結果を ASCII 1 行の stream として
+/// 送出する (`PSRAM IR0=xxxx IR1=xxxx CR0=xxxx L=xx W=x`)．
+///
+/// CK 位相 (1 CK = 4 サイクル，phase 0..3)．CK エッジがデータ遷移から
+/// 1 サイクル遅れ，構成的に 90° 相当の関係になる:
+///
+/// ```wavedrom
+/// {signal: [
+///   {name: 'i_clk', wave: 'p.......'},
+///   {name: 'phase', wave: '========', data: ['0','1','2','3','0','1','2','3']},
+///   {name: 'o_ck',  wave: '01.0.1.0'},
+///   {name: 'o_dq',  wave: '=.=.=.=.', data: ['CA0','CA1','CA2','CA3']}
+/// ]}
+/// ```
+///
+/// リード側は POR デフォルト (固定 2x レイテンシ) 前提で CR0 を書かず，
+/// RWDS のエッジ検出で自己同期してデータ語を取り込む (レイテンシ実測値は
+/// L=xx として報告し，L1 モデル/データシート解釈の照合に使う)．
+/// 実機結果 (2026-07-22): IR0=005F / IR1=000F / CR0=8F1F / L=0B / W=1．
+pub module PsramSpikeBitbang #(
+    /// リセットパルス幅 [cyc] (tRP = 200 ns min → 27 MHz で 8 cyc = 296 ns)
     param ResetPulseCycles: u32 = 8,
-    // RESET# 解除後の待機 (tVCS = 150 µs min → 200 µs 相当を既定とする)
+    /// RESET# 解除後の待機 [cyc] (tVCS = 150 µs min → 200 µs 相当を既定とする)
     param TvcsCycles: u32 = 5400,
 ) (
-    i_clk: input clock,
-    i_rst: input reset,
+    i_clk: input clock, /// クロック (27 MHz)
+    i_rst: input reset, /// リセット
 
-    // PSRAM ch0 パッド (双方向はトップの inout で束ねる)
-    o_ck     : output logic   ,
-    o_cs_n   : output logic   ,
-    o_reset_n: output logic   ,
-    o_dq     : output logic<8>,
-    o_dq_oe  : output logic   ,
-    i_dq     : input  logic<8>,
-    i_rwds   : input  logic   ,
+    // PSRAM ch0 パッド (双方向はトップの IOBUF で束ねる)
+    o_ck     : output logic   , /// CK 出力 (6.75 MHz)
+    o_cs_n   : output logic   , /// CS# 出力
+    o_reset_n: output logic   , /// RESET# 出力
+    o_dq     : output logic<8>, /// DQ 出力 (CA)
+    o_dq_oe  : output logic   , /// DQ 出力イネーブル
+    i_dq     : input  logic<8>, /// DQ 入力 (リードデータ)
+    i_rwds   : input  logic   , /// RWDS 入力 (データ検出に使用)
 
-    // 結果メッセージ (リセット毎に MsgLen バイトを 1 回送出)
-    msg: modport stream_if::source,
+    msg: modport stream_if::source, /// 結果メッセージ (リセット毎に 1 行送出)
 ) {
     // トランザクション構成 (CK サイクル単位)
     const CaCycles      : u32 = 3; // CA 転送 (6 エッジ)

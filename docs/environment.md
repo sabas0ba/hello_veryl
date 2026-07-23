@@ -51,6 +51,18 @@ Veryl 拡張（0.20.2 固定）と veryl-ls がコンテナ内で動作する（
   （合否条件などの規約は [CONTRIBUTING.md](../CONTRIBUTING.md)）
 - テストの一覧・検証レイヤの割当は [verification.md](verification.md) を参照
 
+## ドキュメント生成
+
+```powershell
+.\scripts\veryl.ps1 doc
+```
+
+- ソース中の `///` ドキュメンテーションコメント（markdown / mermaid / wavedrom
+  対応）から HTML を `doc/`（git 管理外）へ生成する
+- 対象は `pub` 付きの要素のみ（テストモジュールは非 pub のため除外される）
+- main への push で CI（`.github/workflows/docs.yml`）が GitHub Pages へ公開する
+  （リポジトリ設定 Pages の Source を "GitHub Actions" にしておくこと）
+
 ## 外部依存のバージョン固定
 
 | 対象 | バージョン | ハッシュ | 取得元 |

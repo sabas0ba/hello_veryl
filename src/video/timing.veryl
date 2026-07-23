@@ -1,36 +1,46 @@
-// RGB LCD (DEモード) タイミングジェネレータ
-//
-// デフォルトタイミングは 5inch 800x480 パネル (050QG32-40) のdatasheet
-// "6.4 Timing Characteristics" から導出した pclk=27MHz 用の値:
-//   - HSyncWidth=1 (thpw min), HBackPorch=46 (thb 固定値)
-//   - VSyncWidth=3 (tvpw min), VBackPorch=23 (tvb 固定値)
-//   - FrontPorchはライン長/フレーム長の選択からの逆算 (HTotal=890, VTotal=513)
-//   - 27MHz / (890 * 513) = 59.1Hz refresh
-// sync極性は負 (公式Wiki rgb_screen: "enabled by negative polarity")
-//
-// 本モジュールはタイミングと座標の生成のみを担う．画素合成(色のゲートや
-// フォーマット変換)は利用側で行い，パイプライン段数に応じてde/syncを
-// 遅延させて位相を合わせること
-module VideoTiming #(
-    param Width      : u32 = 800,
-    param Height     : u32 = 480,
-    param HFrontPorch: u32 = 43 ,
-    param HSyncWidth : u32 = 1  ,
-    param HBackPorch : u32 = 46 ,
-    param VFrontPorch: u32 = 7  ,
-    param VSyncWidth : u32 = 3  ,
-    param VBackPorch : u32 = 23 ,
+/// RGB LCD (DEモード) タイミングジェネレータ
+///
+/// デフォルトタイミングは 5inch 800x480 パネル (050QG32-40) の datasheet
+/// "6.4 Timing Characteristics" から導出した pclk=27MHz 用の値:
+///
+/// - HSyncWidth=1 (thpw min)，HBackPorch=46 (thb 固定値)
+/// - VSyncWidth=3 (tvpw min)，VBackPorch=23 (tvb 固定値)
+/// - FrontPorch はライン長/フレーム長の選択からの逆算 (HTotal=890, VTotal=513)
+/// - 27MHz / (890 * 513) = 59.1Hz refresh
+///
+/// sync 極性は負 (公式 Wiki rgb_screen: "enabled by negative polarity")．
+///
+/// 本モジュールはタイミングと座標の生成のみを担う．画素合成 (色のゲートや
+/// フォーマット変換) は利用側で行い，パイプライン段数に応じて de/sync を
+/// 遅延させて位相を合わせること．
+pub module VideoTiming #(
+    /// 有効画素数 (水平)
+    param Width: u32 = 800,
+    /// 有効画素数 (垂直)
+    param Height: u32 = 480,
+    /// 水平フロントポーチ [pclk]
+    param HFrontPorch: u32 = 43,
+    /// 水平同期幅 [pclk]
+    param HSyncWidth: u32 = 1,
+    /// 水平バックポーチ [pclk]
+    param HBackPorch: u32 = 46,
+    /// 垂直フロントポーチ [line]
+    param VFrontPorch: u32 = 7,
+    /// 垂直同期幅 [line]
+    param VSyncWidth: u32 = 3,
+    /// 垂直バックポーチ [line]
+    param VBackPorch: u32 = 23,
 ) (
-    i_clk: input clock,
-    i_rst: input reset,
+    i_clk: input clock, /// クロック (= pclk)
+    i_rst: input reset, /// リセット
     // LCD用タイミング (sync系は負極性)
-    de   : output logic,
-    hsync: output logic,
-    vsync: output logic,
+    de   : output logic, /// データイネーブル
+    hsync: output logic, /// 水平同期 (負極性)
+    vsync: output logic, /// 垂直同期 (負極性)
     // pos_x/pos_yはde==1の期間のみ有効
-    frame: output logic                , // Vブランキング先頭の1クロックパルス
-    pos_x: output logic<$clog2(Width)> ,
-    pos_y: output logic<$clog2(Height)>,
+    frame: output logic                , /// Vブランキング先頭の1クロックパルス
+    pos_x: output logic<$clog2(Width)> , /// 画素 X 座標 (de==1 で有効)
+    pos_y: output logic<$clog2(Height)>, /// 画素 Y 座標 (de==1 で有効)
 ) {
     const HTotal    : u32 = Width + HFrontPorch + HSyncWidth + HBackPorch;
     const VTotal    : u32 = Height + VFrontPorch + VSyncWidth + VBackPorch;

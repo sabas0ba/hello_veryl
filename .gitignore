@@ -13,3 +13,6 @@ obj_dir/
 
 # Datasheets (redistribution restricted)
 docs/datasheets/
+
+# veryl doc output (published via CI)
+/doc/
