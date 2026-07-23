@@ -1,0 +1,45 @@
+name: Docs
+
+# veryl doc で生成したドキュメントを GitHub Pages へ公開する．
+# 事前条件: リポジトリ設定 Pages の Source を "GitHub Actions" にする
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      # veryllang/veryl:0.20.2 (ci.yml と同一 digest)
+      image: veryllang/veryl@sha256:147ca873b012cb0c0ba00f5a19f7f2f58a7fdd6400c5f823bb78bf23f2100ac9
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Generate documentation
+        run: veryl doc
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: doc
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
