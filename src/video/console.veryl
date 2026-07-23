@@ -1,37 +1,50 @@
-// テキストコンソール
-//
-// 受信した文字をカーソル位置へ書き込み，VideoTimingの座標に同期して
-// 文字ピクセルを描画する．text RAM (std::ram) + FontRom の2段読み出しに
-// 合わせ，de/syncを2サイクル遅延して出力する．
-//
-// 文字セマンティクス:
-//   - 0x20-0x7E: カーソル位置へ表示しカーソル前進 (右端で折り返し)
-//   - LF (0x0A): 改行 (行頭復帰 + 行送り)
-//   - CR (0x0D): 行頭復帰
-//   - その他: 無視
-// 最下行での行送りはリングバッファ的に1行スクロールする (base_row前進 +
-// 新最下行のクリア)．クリア中(Colsサイクル)の文字入力は無視されるが，
-// UARTのバイト間隔(115200bpsで約2300サイクル)より十分短いため実害はない
-module TextConsole #(
+/// テキストコンソール
+///
+/// 受信した文字をカーソル位置へ書き込み，VideoTiming の座標に同期して
+/// 文字ピクセルを描画する．text RAM (std::ram) + FontRom の 2 段読み出しに
+/// 合わせ，de/sync を 2 サイクル遅延して出力する．
+///
+/// ```mermaid
+/// flowchart LR
+///     CH["文字入力"] --> WR["書き込みFSM<br>カーソル/スクロール"]
+///     WR --> RAM["text RAM<br>(std::ram)"]
+///     POS["VideoTiming座標"] --> RAM
+///     RAM --> FONT["FontRom 8x16"]
+///     FONT --> PX["ピクセル出力<br>(2段パイプライン)"]
+/// ```
+///
+/// 文字セマンティクス:
+///
+/// - 0x20-0x7E: カーソル位置へ表示しカーソル前進 (右端で折り返し)
+/// - LF (0x0A): 改行 (行頭復帰 + 行送り)
+/// - CR (0x0D): 行頭復帰
+/// - その他: 無視
+///
+/// 最下行での行送りはリングバッファ的に 1 行スクロールする (base_row 前進 +
+/// 新最下行のクリア)．クリア中 (Cols サイクル) の文字入力は無視されるが，
+/// UART のバイト間隔 (115200bps で約 2300 サイクル) より十分短いため実害はない．
+pub module TextConsole #(
+    /// 桁数
     param Cols: u32 = 100,
-    param Rows: u32 = 30 ,
+    /// 行数
+    param Rows: u32 = 30,
 ) (
-    i_clk: input clock,
-    i_rst: input reset,
+    i_clk: input clock, /// クロック
+    i_rst: input reset, /// リセット
     // 文字入力 (backpressureなし)
-    i_char_valid: input logic   ,
-    i_char      : input logic<8>,
+    i_char_valid: input logic   , /// 文字入力有効
+    i_char      : input logic<8>, /// 文字コード (ASCII)
     // VideoTimingの出力
-    i_de   : input logic    ,
-    i_hsync: input logic    ,
-    i_vsync: input logic    ,
-    i_pos_x: input logic<10>,
-    i_pos_y: input logic<9> ,
+    i_de   : input logic    , /// データイネーブル入力
+    i_hsync: input logic    , /// 水平同期入力
+    i_vsync: input logic    , /// 垂直同期入力
+    i_pos_x: input logic<10>, /// 画素 X 座標
+    i_pos_y: input logic<9> , /// 画素 Y 座標
     // LCDへ (2サイクル遅延で位相整合済み)
-    o_de   : output logic,
-    o_hsync: output logic,
-    o_vsync: output logic,
-    o_pixel: output logic, // 文字前景=1
+    o_de   : output logic, /// データイネーブル出力
+    o_hsync: output logic, /// 水平同期出力
+    o_vsync: output logic, /// 垂直同期出力
+    o_pixel: output logic, /// 文字前景=1
 ) {
     const CellCount: u32 = Cols * Rows;
     const AddrW    : u32 = $clog2(CellCount);

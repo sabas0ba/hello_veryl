@@ -1,4 +1,18 @@
-interface stream_if #(
+/// valid/ready ハンドシェイクの汎用 stream interface
+///
+/// `valid && ready` のサイクルで `data` を 1 語転送する．
+/// source が data/valid を，sink が ready を駆動する．
+///
+/// ```wavedrom
+/// {signal: [
+///   {name: 'clk',   wave: 'p......'},
+///   {name: 'data',  wave: 'x=x.=.x', data: ['D0','D1']},
+///   {name: 'valid', wave: '010.1.0'},
+///   {name: 'ready', wave: '1...01.'}
+/// ]}
+/// ```
+pub interface stream_if #(
+    /// データ幅 [bit]
     param BitWidth: u32 = 8,
 ) {
     var data : logic<BitWidth>;

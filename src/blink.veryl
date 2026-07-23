@@ -1,10 +1,16 @@
-module Blink #(
+/// LED 点滅 (分周トグル)
+///
+/// `InClkFreq / (BlinkFreq * 2)` サイクルごとに出力を反転し，
+/// `BlinkFreq` [Hz] の矩形波を生成する．
+pub module Blink #(
+    /// 入力クロック周波数 [Hz]
     param InClkFreq: u32 = 27_000_000,
-    param BlinkFreq: u32 = 1         ,
+    /// 点滅周波数 [Hz]
+    param BlinkFreq: u32 = 1,
 ) (
-    i_clk: input  clock,
-    i_rst: input  reset,
-    o_led: output logic,
+    i_clk: input  clock, /// クロック
+    i_rst: input  reset, /// リセット
+    o_led: output logic, /// LED 出力 (トグル)
 ) {
     const InvCount    : u32                 = InClkFreq / (BlinkFreq * 2);
     const CounterWidth: u32                 = $clog2(InvCount);

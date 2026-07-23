@@ -1,0 +1,292 @@
+/// PSRAM spike 段1: bit-bang レジスタ読み出し (docs/psram.md「spikeの構成」)
+///
+/// PLL・DDR プリミティブを使わず 27 MHz ロジックのみで CK = 27/4 = 6.75 MHz を
+/// 生成し，ch0 の IR0/IR1/CR0 を読み出して結果を ASCII 1 行の stream として
+/// 送出する (`PSRAM IR0=xxxx IR1=xxxx CR0=xxxx L=xx W=x`)．
+///
+/// CK 位相 (1 CK = 4 サイクル，phase 0..3)．CK エッジがデータ遷移から
+/// 1 サイクル遅れ，構成的に 90° 相当の関係になる:
+///
+/// ```wavedrom
+/// {signal: [
+///   {name: 'i_clk', wave: 'p.......'},
+///   {name: 'phase', wave: '========', data: ['0','1','2','3','0','1','2','3']},
+///   {name: 'o_ck',  wave: '01.0.1.0'},
+///   {name: 'o_dq',  wave: '=.=.=.=.', data: ['CA0','CA1','CA2','CA3']}
+/// ]}
+/// ```
+///
+/// リード側は POR デフォルト (固定 2x レイテンシ) 前提で CR0 を書かず，
+/// RWDS のエッジ検出で自己同期してデータ語を取り込む (レイテンシ実測値は
+/// L=xx として報告し，L1 モデル/データシート解釈の照合に使う)．
+/// 実機結果 (2026-07-22): IR0=005F / IR1=000F / CR0=8F1F / L=0B / W=1．
+pub module PsramSpikeBitbang #(
+    /// リセットパルス幅 [cyc] (tRP = 200 ns min → 27 MHz で 8 cyc = 296 ns)
+    param ResetPulseCycles: u32 = 8,
+    /// RESET# 解除後の待機 [cyc] (tVCS = 150 µs min → 200 µs 相当を既定とする)
+    param TvcsCycles: u32 = 5400,
+) (
+    i_clk: input clock, /// クロック (27 MHz)
+    i_rst: input reset, /// リセット
+
+    // PSRAM ch0 パッド (双方向はトップの IOBUF で束ねる)
+    o_ck     : output logic   , /// CK 出力 (6.75 MHz)
+    o_cs_n   : output logic   , /// CS# 出力
+    o_reset_n: output logic   , /// RESET# 出力
+    o_dq     : output logic<8>, /// DQ 出力 (CA)
+    o_dq_oe  : output logic   , /// DQ 出力イネーブル
+    i_dq     : input  logic<8>, /// DQ 入力 (リードデータ)
+    i_rwds   : input  logic   , /// RWDS 入力 (データ検出に使用)
+
+    msg: modport stream_if::source, /// 結果メッセージ (リセット毎に 1 行送出)
+) {
+    // トランザクション構成 (CK サイクル単位)
+    const CaCycles      : u32 = 3; // CA 転送 (6 エッジ)
+    const DetectStartCyc: u32 = 8; // RWDS データ検出開始 (CA 末尾の RWDS High を誤検出しない余裕)
+    const TimeoutCyc    : u32 = 20; // 検出打ち切り (CS# Low ≈ 3.1 µs < tCSM 4 µs)
+    const GapCycles     : u32 = 4; // CS# High 期間 (148 ns > tRWR 36 ns, tCSHI 6 ns)
+    const MsgLen        : u32 = 43;
+    const NumReads      : u32 = 3; // IR0, IR1, CR0
+
+    enum State: logic<3> {
+        reset_pulse,
+        tvcs_wait,
+        xfer,
+        gap,
+        send,
+        done,
+    }
+
+    var state   : State    ;
+    var wait_cnt: logic<16>;
+    var phase   : logic<2> ; // CK 内位相
+    var ck_cycle: logic<5> ; // CS# assert からの CK サイクル番号
+    var rd_idx  : logic<2> ; // 0=IR0, 1=IR1, 2=CR0
+    var got_a   : logic    ; // データ byte A 捕捉済み
+    var ending  : logic    ; // トランザクション終了処理中
+    var word_hi : logic<8> ;
+    var ir0     : logic<16>;
+    var ir1     : logic<16>;
+    var cr0     : logic<16>;
+    var rwds_ca : logic    ; // CA 期間中の RWDS (固定レイテンシなら 1)
+    var lat     : logic<8> ; // CA 終端→byte A 検出までの CK 数 (IR0 読み時に記録)
+    var send_idx: logic<6> ;
+
+    // レジスタ空間リードの CA (docs/psram.md「プロトコル仕様」):
+    //   IR0: E0 00 00 00 00 00 / IR1: E0 00 00 00 00 01 / CR0: E0 00 01 00 00 00
+    function CaByte (
+        rd: input logic<2>,
+        bi: input logic<3>,
+    ) -> logic<8> {
+        return if bi == 3'd0 ?
+            8'he0
+        : if bi == 3'd2 && rd == 2'd2 ?
+            8'h01
+        : if bi == 3'd5 && rd == 2'd1 ?
+            8'h01
+        :
+            8'h00
+        ;
+    }
+
+    function HexChar (
+        n: input logic<4>,
+    ) -> logic<8> {
+        return if n <: 4'd10 ? 8'h30 + {4'b0000, n} : 8'h37 + {4'b0000, n};
+    }
+
+    // "PSRAM IR0=xxxx IR1=xxxx CR0=xxxx L=xx W=x\r\n" (43 byte)
+    assign msg.data = case send_idx {
+        0      : 8'h50, // 'P'
+        1      : 8'h53, // 'S'
+        2      : 8'h52, // 'R'
+        3      : 8'h41, // 'A'
+        4      : 8'h4d, // 'M'
+        5      : 8'h20, // ' '
+        6      : 8'h49, // 'I'
+        7      : 8'h52, // 'R'
+        8      : 8'h30, // '0'
+        9      : 8'h3d, // '='
+        10     : HexChar(ir0[15:12]),
+        11     : HexChar(ir0[11:8]),
+        12     : HexChar(ir0[7:4]),
+        13     : HexChar(ir0[3:0]),
+        14     : 8'h20, // ' '
+        15     : 8'h49, // 'I'
+        16     : 8'h52, // 'R'
+        17     : 8'h31, // '1'
+        18     : 8'h3d, // '='
+        19     : HexChar(ir1[15:12]),
+        20     : HexChar(ir1[11:8]),
+        21     : HexChar(ir1[7:4]),
+        22     : HexChar(ir1[3:0]),
+        23     : 8'h20, // ' '
+        24     : 8'h43, // 'C'
+        25     : 8'h52, // 'R'
+        26     : 8'h30, // '0'
+        27     : 8'h3d, // '='
+        28     : HexChar(cr0[15:12]),
+        29     : HexChar(cr0[11:8]),
+        30     : HexChar(cr0[7:4]),
+        31     : HexChar(cr0[3:0]),
+        32     : 8'h20, // ' '
+        33     : 8'h4c, // 'L'
+        34     : 8'h3d, // '='
+        35     : HexChar(lat[7:4]),
+        36     : HexChar(lat[3:0]),
+        37     : 8'h20, // ' '
+        38     : 8'h57, // 'W'
+        39     : 8'h3d, // '='
+        40     : 8'h30 + {7'b0000000, rwds_ca},
+        41     : 8'h0d, // CR
+        42     : 8'h0a, // LF
+        default: 8'h00,
+    };
+
+    always_ff (i_clk, i_rst) {
+        if_reset {
+            state     = State::reset_pulse;
+            wait_cnt  = 0;
+            phase     = 0;
+            ck_cycle  = 0;
+            rd_idx    = 0;
+            got_a     = 0;
+            ending    = 0;
+            word_hi   = 0;
+            ir0       = 0;
+            ir1       = 0;
+            cr0       = 0;
+            rwds_ca   = 0;
+            lat       = 0;
+            send_idx  = 0;
+            o_ck      = 0;
+            o_cs_n    = 1;
+            o_reset_n = 0;
+            o_dq      = 0;
+            o_dq_oe   = 0;
+            msg.valid = 0;
+        } else if state == State::reset_pulse {
+            if wait_cnt <: ResetPulseCycles - 1 {
+                wait_cnt = wait_cnt + 1;
+            } else {
+                o_reset_n = 1;
+                wait_cnt  = 0;
+                state     = State::tvcs_wait;
+            }
+        } else if state == State::tvcs_wait {
+            if wait_cnt <: TvcsCycles - 1 {
+                wait_cnt = wait_cnt + 1;
+            } else {
+                // トランザクション開始: CS# assert と同時に CA byte0 を提示
+                // (最初の CK 立上りは 1 サイクル後 = 37 ns > tCSS 2 ns)
+                wait_cnt = 0;
+                state    = State::xfer;
+                o_cs_n   = 0;
+                phase    = 0;
+                ck_cycle = 0;
+                got_a    = 0;
+                ending   = 0;
+                o_dq     = 8'he0; // CaByte(rd, 0)
+                o_dq_oe  = 1;
+            }
+        } else if state == State::xfer {
+            // 位相進行と CK 生成 (phase 1,2 で High)
+            phase = phase + 1;
+            o_ck  = phase == 2'd0 || phase == 2'd1;
+            if phase == 2'd3 {
+                ck_cycle = ck_cycle + 1;
+            }
+
+            // CA 提示 (DDR): phase 3→0 境界で次サイクルの byte A,
+            // phase 1→2 境界で byte B に切り替える
+            if phase == 2'd3 && ck_cycle <: CaCycles - 1 {
+                o_dq = CaByte(rd_idx, {ck_cycle[1:0] + 2'd1, 1'b0});
+            }
+            if phase == 2'd1 && ck_cycle <: CaCycles {
+                o_dq = CaByte(rd_idx, {ck_cycle[1:0], 1'b1});
+            }
+            // CA 最終 byte は cycle2 の立下り (phase 2→3 境界) で取り込まれる
+            // → cycle2 phase3 でバス開放
+            if phase == 2'd3 && ck_cycle == CaCycles - 1 {
+                o_dq_oe = 0;
+            }
+
+            // CA 期間中の RWDS 捕捉 (cycle0 立上りの 1 サイクル後)
+            if phase == 2'd2 && ck_cycle == 0 && rd_idx == 0 {
+                rwds_ca = i_rwds;
+            }
+
+            if !ending && ck_cycle >: DetectStartCyc - 1 {
+                // byte A: CK 立上り後 (phase 2→3 境界) に RWDS=1 なら捕捉
+                if phase == 2'd2 && !got_a && i_rwds {
+                    word_hi = i_dq;
+                    got_a   = 1;
+                    if rd_idx == 0 {
+                        lat = {3'b000, ck_cycle} - 8'd3;
+                    }
+                }
+                // byte B: 次の CK 立下り後 (phase 0→1 境界) に捕捉して語確定
+                if phase == 2'd0 && got_a {
+                    if rd_idx == 0 {
+                        ir0 = {word_hi, i_dq};
+                    } else if rd_idx == 1 {
+                        ir1 = {word_hi, i_dq};
+                    } else {
+                        cr0 = {word_hi, i_dq};
+                    }
+                    ending = 1;
+                }
+                // タイムアウト (パッド未応答の自己診断: FFFF / L=FF を報告)
+                if phase == 2'd3 && ck_cycle == TimeoutCyc && !got_a {
+                    if rd_idx == 0 {
+                        ir0 = '1;
+                        lat = '1;
+                    } else if rd_idx == 1 {
+                        ir1 = '1;
+                    } else {
+                        cr0 = '1;
+                    }
+                    got_a  = 1;
+                    ending = 1;
+                }
+            }
+
+            // 終了: CK Low 期間 (phase 3→0 境界) に CS# を上げる (tCSH ≥ 0)
+            if ending && phase == 2'd3 {
+                o_cs_n   = 1;
+                state    = State::gap;
+                wait_cnt = 0;
+            }
+        } else if state == State::gap {
+            if wait_cnt <: GapCycles - 1 {
+                wait_cnt = wait_cnt + 1;
+            } else if rd_idx <: NumReads - 1 {
+                // 次のレジスタリードへ
+                rd_idx   = rd_idx + 1;
+                wait_cnt = 0;
+                state    = State::xfer;
+                o_cs_n   = 0;
+                phase    = 0;
+                ck_cycle = 0;
+                got_a    = 0;
+                ending   = 0;
+                o_dq     = 8'he0; // CaByte(rd, 0)
+                o_dq_oe  = 1;
+            } else {
+                state     = State::send;
+                send_idx  = 0;
+                msg.valid = 1;
+            }
+        } else if state == State::send {
+            if msg.valid && msg.ready {
+                if send_idx == MsgLen - 1 {
+                    msg.valid = 0;
+                    state     = State::done;
+                } else {
+                    send_idx = send_idx + 1;
+                }
+            }
+        }
+        // State::done: リセットまで何もしない
+    }
+}

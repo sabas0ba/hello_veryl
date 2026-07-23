@@ -1,24 +1,52 @@
-module Top #(
+/// トップモジュール (Tang Nano 9K)
+///
+/// UART エコー + テキストコンソール (LCD) + PSRAM spike + LED 表示の統合．
+///
+/// ```mermaid
+/// flowchart LR
+///     PC["PC (COMポート)"] -- uart_rx --> RX["Uart RX"]
+///     RX -- "echo" --> ARB["TX arbiter<br>(spike優先)"]
+///     SPIKE["PsramSpikeBitbang"] -- "結果1行" --> ARB
+///     ARB --> TX["Uart TX"] -- uart_tx --> PC
+///     ARB -. "傍受" .-> CON["TextConsole"] --> LCD["5inch LCD"]
+///     SPIKE <--> RAM["内蔵 PSRAM ch0"]
+///     PLL["PsramClkGen<br>(rPLL 54MHz)"] --> LEDS["leds"]
+/// ```
+///
+/// LED 割当は docs/rtl.md，PSRAM サブシステムは docs/psram.md を参照．
+pub module Top #(
+    /// オシレータ周波数 [Hz]
     param OscFreq: u32 = 27_000_000,
-    param NumLeds: u32 = 6         ,
+    /// LED 数
+    param NumLeds: u32 = 6,
 ) (
-    i_clk  : input  clock         ,
-    i_rst  : input  reset         ,
-    leds   : output logic<NumLeds>,
-    uart_tx: output logic         ,
-    uart_rx: input  logic         ,
+    i_clk  : input  clock         , /// 27 MHz オシレータ
+    i_rst  : input  reset         , /// S1 ボタン (active-low)
+    leds   : output logic<NumLeds>, /// LED (active-low，割当は rtl.md)
+    uart_tx: output logic         , /// UART TX
+    uart_rx: input  logic         , /// UART RX
     // LCD (5inch 800x480 RGB565, DEモード)
-    lcd_clk  : output logic   ,
-    lcd_de   : output logic   ,
-    lcd_hsync: output logic   ,
-    lcd_vsync: output logic   ,
-    lcd_r    : output logic<5>,
-    lcd_g    : output logic<6>,
-    lcd_b    : output logic<5>,
+    lcd_clk  : output logic   , /// LCD ピクセルクロック (反転出力)
+    lcd_de   : output logic   , /// LCD データイネーブル
+    lcd_hsync: output logic   , /// LCD 水平同期 (負極性)
+    lcd_vsync: output logic   , /// LCD 垂直同期 (負極性)
+    lcd_r    : output logic<5>, /// LCD R (RGB565)
+    lcd_g    : output logic<6>, /// LCD G (RGB565)
+    lcd_b    : output logic<5>, /// LCD B (RGB565)
+    // PSRAM (GW1NR-9 内蔵)．ポート名をマジックポート名に一致させることで
+    // nextpnr が cst なしで内蔵パッドへ自動配置する (docs/psram.md)
+    O_psram_ck     : output logic    <2> , /// PSRAM CK (ch1:ch0)
+    O_psram_ck_n   : output logic    <2> , /// PSRAM CK# (差動)
+    O_psram_cs_n   : output logic    <2> , /// PSRAM CS#
+    O_psram_reset_n: output logic    <2> , /// PSRAM RESET#
+    IO_psram_dq    : inout  tri logic<16>, /// PSRAM DQ (ch0=下位8bit)
+    /// PSRAM RWDS．spike では読むだけのため input とする
+    /// (メモリライトのマスクで駆動が必要になる phy パッチで inout 化する)
+    IO_psram_rwds: input logic<2>,
 ) {
-    // UART Loopback Test: 受信バイトをそのまま送り返す
-    // RX(source)がdata/valid，TX(sink)がreadyを駆動するため1本のstream_ifで直結できる
-    inst echo_stream: stream_if;
+    // UART エコー: RX(source) → TX arbiter → TX(sink)
+    inst echo_stream: stream_if; // RX からのエコー経路
+    inst tx_stream  : stream_if; // arbiter → TX
 
     inst uart: Uart #(
         InClkFreq: OscFreq,
@@ -28,9 +56,70 @@ module Top #(
         i_rst    : i_rst      ,
         uart_tx  : uart_tx    ,
         uart_rx  : uart_rx    ,
-        tx_stream: echo_stream,
+        tx_stream: tx_stream  ,
         rx_stream: echo_stream,
     );
+
+    // PSRAM spike 段1: リセット毎に ch0 の IR0/IR1/CR0 を読み UART/LCD へ報告
+    var ps_ck      : logic   ;
+    var ps_cs_n    : logic   ;
+    var ps_reset_n : logic   ;
+    var ps_dq_o    : logic<8>;
+    var ps_dq_oe   : logic   ;
+    var ps_dq_in   : logic<8>;
+    var _ps_dq_in_1: logic<8>; // ch1 DQ 読み値 (未使用)
+
+    inst spike_msg: stream_if;
+
+    inst psram_spike: PsramSpikeBitbang (
+        i_clk                      ,
+        i_rst                      ,
+        o_ck     : ps_ck           ,
+        o_cs_n   : ps_cs_n         ,
+        o_reset_n: ps_reset_n      ,
+        o_dq     : ps_dq_o         ,
+        o_dq_oe  : ps_dq_oe        ,
+        i_dq     : ps_dq_in        ,
+        i_rwds   : IO_psram_rwds[0],
+        msg      : spike_msg       ,
+    );
+
+    // ch0 のみ使用．ch1 は CS#/RESET# 非活性固定，CK は差動アイドル
+    // (CK=Low / CK#=High)，DQ は入力固定 (High-Z)
+    assign O_psram_ck      = {1'b0, ps_ck};
+    assign O_psram_ck_n    = {1'b1, ~ps_ck};
+    assign O_psram_cs_n    = {1'b1, ps_cs_n};
+    assign O_psram_reset_n = {1'b1, ps_reset_n};
+
+    // DQ の双方向は Gowin IOBUF プリミティブを明示インスタンス化する．
+    // 合成フロー (yosys-slang) は assign による tristate 推論 (cond ? d : 'z)
+    // で z を don't-care に畳み込み，入力経路が消失するため使えない．
+    // OEN は 1 で High-Z (UG289)．定義は blackbox スタブ (src/gowin_prims.sv,
+    // synth.ys で読込) が与え，実体は nextpnr が解決する
+    let ps_dq_oen: logic = ~ps_dq_oe;
+    for i in 0..8 :g_psram_dq0 {
+        inst pad: $sv::IOBUF (
+            O  : ps_dq_in[i]   ,
+            IO : IO_psram_dq[i],
+            I  : ps_dq_o[i]    ,
+            OEN: ps_dq_oen     ,
+        );
+    }
+    for i in 0..8 :g_psram_dq1 {
+        inst pad: $sv::IOBUF (
+            O  : _ps_dq_in_1[i]    ,
+            IO : IO_psram_dq[i + 8],
+            I  : 1'b0              ,
+            OEN: 1'b1              ,
+        );
+    }
+
+    // TX arbiter: spike メッセージ優先．spike はリセット直後のみ送出するため
+    // エコーとの競合は実用上起きない (競合時はエコー側が待たされる)
+    assign tx_stream.valid   = spike_msg.valid || echo_stream.valid;
+    assign tx_stream.data    = if spike_msg.valid ? spike_msg.data : echo_stream.data;
+    assign spike_msg.ready   = tx_stream.ready;
+    assign echo_stream.ready = tx_stream.ready && !spike_msg.valid;
 
     // LCD: UART TXへ流れるバイト列を傍受してテキスト表示 (白文字/黒背景)
     var vt_de    : logic    ;
@@ -52,23 +141,23 @@ module Top #(
         pos_y: vt_pos_y ,
     );
 
-    // handshake成立サイクルを傍受 (エコー動作には影響しない)
-    let snoop_valid: logic = echo_stream.valid && echo_stream.ready;
+    // handshake成立サイクルを傍受 (TX へ流れる全バイト = spike報告 + エコー)
+    let snoop_valid: logic = tx_stream.valid && tx_stream.ready;
 
     inst console: TextConsole (
-        i_clk                         ,
-        i_rst                         ,
-        i_char_valid: snoop_valid     ,
-        i_char      : echo_stream.data,
-        i_de        : vt_de           ,
-        i_hsync     : vt_hsync        ,
-        i_vsync     : vt_vsync        ,
-        i_pos_x     : vt_pos_x        ,
-        i_pos_y     : vt_pos_y        ,
-        o_de        : lcd_de          ,
-        o_hsync     : lcd_hsync       ,
-        o_vsync     : lcd_vsync       ,
-        o_pixel     : px              ,
+        i_clk                       ,
+        i_rst                       ,
+        i_char_valid: snoop_valid   ,
+        i_char      : tx_stream.data,
+        i_de        : vt_de         ,
+        i_hsync     : vt_hsync      ,
+        i_vsync     : vt_vsync      ,
+        i_pos_x     : vt_pos_x      ,
+        i_pos_y     : vt_pos_y      ,
+        o_de        : lcd_de        ,
+        o_hsync     : lcd_hsync     ,
+        o_vsync     : lcd_vsync     ,
+        o_pixel     : px            ,
     );
 
     // 画素合成: 文字前景=白
@@ -80,15 +169,78 @@ module Top #(
     // サンプリングエッジを半周期ずらす
     assign lcd_clk = ~i_clk;
 
-    // LED Blink Test
-    for i in 0..NumLeds :g_led {
-        inst blink: Blink #(
-            InClkFreq: OscFreq,
-            BlinkFreq: i + 1,
+    // PSRAM spike 段2: rPLL 単体実証 (docs/psram.md)．
+    // clk_mem (54 MHz) で 1 Hz 点滅を作り，27 MHz 基準の leds[0] と
+    // 周期を目視比較することで実周波数を確認する．lock は leds[2] へ
+    var clk_mem   : 'mem  clock;
+    var _clk_mem_p: 'memp clock; // 位相シフト出力 (phy パッチで使用)
+    var pll_lock  :       logic;
+
+    inst psram_clkgen: PsramClkGen (
+        i_clk                  ,
+        o_clk_mem  : clk_mem   ,
+        o_clk_mem_p: _clk_mem_p,
+        o_lock     : pll_lock  ,
+    );
+
+    // LED 割当 (active-low):
+    //   leds[0]: 1 Hz 点滅 (27 MHz 基準)
+    //   leds[1]: 1 Hz 点滅 (clk_mem 54 MHz 換算．leds[0] と同周期なら PLL 正常)
+    //   leds[2]: PLL lock (点灯=ロック)
+    //   leds[3]: 2 Hz 点滅 (生存表示)
+    //   leds[4]: UART RX アクティビティ / leds[5]: UART TX アクティビティ
+    inst blink_ref: Blink #(
+        InClkFreq: OscFreq,
+        BlinkFreq: 1      ,
+    ) (
+        i_clk: i_clk  ,
+        i_rst: i_rst  ,
+        o_led: leds[0],
+    );
+
+    // clk_mem ドメインの点滅．交差は (1) 非同期リセットの共有 (アサートのみ
+    // 使用)，(2) LED パッドへの出力，のみで観測は目視のため許容する
+    unsafe (cdc) {
+        inst blink_mem: Blink #(
+            InClkFreq: 54_000_000,
+            BlinkFreq: 1         ,
         ) (
-            i_clk: i_clk  ,
+            i_clk: clk_mem,
             i_rst: i_rst  ,
-            o_led: leds[i],
+            o_led: leds[1],
         );
     }
+
+    assign leds[2] = ~pll_lock;
+
+    inst blink_alive: Blink #(
+        InClkFreq: OscFreq,
+        BlinkFreq: 2      ,
+    ) (
+        i_clk: i_clk  ,
+        i_rst: i_rst  ,
+        o_led: leds[3],
+    );
+
+    // UART TX/RX インジケータ (ボードに専用 LED がないため LED を割当)．
+    // ラインの Low (start bit 等) を検出して 100 ms 保持する．
+    // uart_rx は非同期入力だが，LED 保持カウンタのリロード条件のみに
+    // 使うため同期化は省略する (メタステーブルの影響は視認不能)
+    var rx_act: logic;
+    var tx_act: logic;
+
+    inst rx_activity: ActivityLed (
+        i_clk             ,
+        i_rst             ,
+        i_active: ~uart_rx,
+        o_on    : rx_act  ,
+    );
+    inst tx_activity: ActivityLed (
+        i_clk             ,
+        i_rst             ,
+        i_active: ~uart_tx,
+        o_on    : tx_act  ,
+    );
+    assign leds[4] = ~rx_act;
+    assign leds[5] = ~tx_act;
 }
