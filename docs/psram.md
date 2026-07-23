@@ -170,16 +170,41 @@ CR0[3]=1 を維持する（CR0 書き込み値 8FEFh）．
 
 ### 物理層（psram_phy）
 
-- Gowin プリミティブ ODDR / IDDR を SystemVerilog ラッパ経由
-  （Veryl の `$sv::` 名前空間）でインスタンス化する
-- Apicula 対応状況（Wiki 2024-11-19 版で確認済み）:
-  ODDR/ODDRC/IDDR/IDDRC/rPLL は対応，IODELAY 系は未対応．
-  本設計は IODELAY を使用しない（位相調整は rPLL の位相シフトで行う）
-- DQ / RWDS の双方向制御は **Gowin IOBUF プリミティブの明示インスタンス化**で
-  行う（`$sv::IOBUF` + blackbox スタブ `src/gowin_prims.sv`）．本フローの
-  SV フロントエンド (yosys-slang) は `cond ? d : 'z` による tristate 推論で
-  z を don't-care へ畳み込み，パッドが出力専用化して入力経路が消失する
-  （spike 実装時に PnR 結果検査で確認．inout の直記述は使用不可）
+実装: `PsramPhy`（src/psram/phy.veryl，2026-07-23）．
+FSM 側の SDR インタフェース（1 サイクル = 1 CK，A=立上り側 / B=立下り側）を
+DDR パッド信号へ変換する．
+
+- Gowin プリミティブ ODDR / IDDR / IOBUF を `$sv::` 名前空間で明示
+  インスタンス化する（blackbox スタブ `src/gowin_prims.sv`，UG289 準拠）
+- **全出力パッド（CK/CK#/CS#/RESET#/DQ/RWDS）を ODDR 経由**とし，出力
+  パイプライン段数を構成的に一致させる（CS#/RESET# は D0=D1 の SDR 運用．
+  ODDR の内部段数の絶対値に依存しない = 段数解釈の共通モード誤りを排除）
+- CK/CK# は clk_mem_p（+90°）の ODDR によるクロックフォワーディングで生成．
+  データ（clk_mem 側）に対する 90° 関係は PLL の PSDA_SEL のみで決まり，
+  位相調整が単一変数になる（L4 残余⑤）．ck_en は clk_mem で 1 段受けてから
+  clk_mem_p ODDR へ渡す（T/4 ≈ 4.6 ns 予算の同一 PLL 位相差経路）
+- 入力（DQ/RWDS）は clk_mem の IDDR で取り込む（Q0=立上り / Q1=立下り）
+- DQ/RWDS のトライステートは ODDR の TX→Q1 を IOBUF の OEN へ接続する
+  専用経路で制御する（yosys-slang の tristate 推論は z を don't-care へ
+  畳み込み使用不可 — spike 実装時に PnR 結果検査で確認済み）
+- 注意: ODDR の INIT は 1'b0 固定のため，コンフィグ直後〜FSM 駆動開始まで
+  CS#=0/RESET#=0 がパッドへ出る．RESET#=0 が RAM をリセットに保持するため
+  無害だが，FSM は必ず RESET# パルス→tVCS 待機から開始すること
+- Apicula 対応状況（Wiki 2024-11-19 版）: ODDR/ODDRC/IDDR/IDDRC/rPLL 対応，
+  IODELAY 系は未対応（本設計は不使用）
+- **単体実証と接続検査（`verif/psram_phy/`，2026-07-23 実施）**:
+  `run.sh` が probe トップの合成→PnR→ネットリスト機械照合
+  （`check_netlist.py`）を行う．検査項目は (1) bit ごとの
+  ODDR.Q0→IOBUF.I / ODDR.Q1→OEN / IOBUF.O→IDDR.D 接続，(2) bit i ↔
+  sip_cst パッド位置の対応（ビット入れ違い検出）と IOLOGIC I/O 側の整合，
+  (3) ODDR/IDDR のクロック接続（CK 系=CLKOUTP，データ系=CLKOUT）．
+  `$sv::` インスタンスの繋ぎ忘れ・取り違えは Veryl/L0 では検出されない
+  ため，この検査をリグレッションに含める（CI の verif ジョブ /
+  ローカルは `.\scripts\verif.ps1`）．検査自体の有効性は
+  OEN 直結の変異を入れて 8 bit 全数で FAIL することを確認済み．
+  全 PSRAM パッドで IOBUF@IOB + ODDR@IOLOGIC*O + IDDR@IOLOGIC*I の配置
+  （**同一パッドでの ODDR/IDDR 同居**を含む）と
+  clk_mem/clk_mem_p のグローバル配線も同 probe で確認済み
 
 ### パッドマッピング（確認済み 2026-07-22）
 
@@ -282,8 +307,13 @@ PSRAM IR0=005F IR1=000F CR0=8F1F L=0B W=1
 ### L1: 自作ビヘイビアモデルとテスト
 
 - モデル（すべて Winbond データシート・Gowin UG289 起点で実装，外部コードの引用なし）:
-  ODDR / IDDR（数十行の等価モデル），rPLL（クロック生成のみの簡易モデル），
   HyperRAM（CA 解釈・レイテンシ・リード/ライト応答・CR/IR）
+- **割当の改訂（2026-07-23）**: プリミティブを含む PsramPhy はネイティブ
+  テストでシミュレーション不能（blackbox）のため，当初計画の
+  「ODDR/IDDR 等価モデル」は廃し，L1 は **phy の SDR 境界**へ SDR 版
+  HyperRAM モデルを接続してコントローラを検証する．phy 内部の配線の
+  正しさは L2 相当の合成後ネットリスト検査（PnR 結果の配置・接続確認）と
+  L4（コントローラ初期化時の IR0 読み出し自己診断）へ割り当てる
 - テスト: 初期化シーケンス / 単発リード / 単発ライト / WSTRB 部分書き込み /
   レイテンシ境界 / CDC 往復
 

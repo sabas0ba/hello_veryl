@@ -47,7 +47,9 @@ Veryl 拡張（0.20.2 固定）と veryl-ls がコンテナ内で動作する（
 - `--wave` で VCD がソースファイルの隣に出力される
   （例: `src/test_blink_small.vcd`．ビューアは未導入）
 - `--sim verilator` でイメージ同梱の Verilator による実行も可能
-- CI は `veryl fmt --check` → `check` → `build` → `test` を実行する
+- 合成後検査（`verif/` 配下の一括実行）は `.\scripts\verif.ps1`．
+  CI では veryl ジョブ（`fmt --check` → `check` → `build` → `test`）と
+  verif ジョブ（同コンテナをビルドし `verif/run.sh`）が実行される
   （合否条件などの規約は [CONTRIBUTING.md](../CONTRIBUTING.md)）
 - テストの一覧・検証レイヤの割当は [verification.md](verification.md) を参照
 
@@ -86,6 +88,7 @@ src/           Veryl ソース
   video/         VideoTiming / TextConsole / FontRom (生成物)
   top.veryl, blink.veryl
 docs/          設計・検証文書（datasheets/ は git 管理外）
+verif/         合成後検査（psram_phy/: phy の PnR 後ネットリスト照合）
 font/          フォント一次ソース (font8x16.txt, CC0 1.0)
 .devcontainer/ RTL 設計用 DevContainer 定義（container/ と同一イメージ）
 constraints/   物理制約 (tangnano9k.cst)

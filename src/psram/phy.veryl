@@ -1,0 +1,153 @@
+/// PSRAM 物理層 (ODDR/IDDR/IOBUF ラッパ，docs/psram.md「物理層」)
+///
+/// FSM 側の SDR インタフェース (1 サイクル = 1 CK，A=CK 立上り側 / B=立下り側)
+/// を DDR パッド信号へ変換する．
+///
+/// - すべての出力パッド (CK/CK#/CS#/RESET#/DQ/RWDS) を ODDR 経由とし，
+///   出力パイプライン段数を構成的に一致させる (段数の絶対値に依存しない)
+/// - CK/CK# は clk_mem_p (+90°) の ODDR によるクロックフォワーディングで生成し，
+///   clk_mem 側で出すデータに対する 90° 位相関係を PLL の位相シフト設定のみで
+///   決める (位相調整を単一変数化，L4 残余(5))
+/// - 入力 (DQ/RWDS) は clk_mem の IDDR で取り込む (Q0=立上り / Q1=立下り)
+///
+/// 注意: ODDR の INIT は 1'b0 固定のため，コンフィグ直後〜FSM 駆動開始までの
+/// 遷移期間は CS#=0/RESET#=0 がパッドへ出る．RESET#=0 が RAM をリセットに
+/// 保持するため CS# の値は無害だが，FSM は必ず RESET# パルス→tVCS 待機から
+/// 開始すること．
+pub module PsramPhy (
+    i_clk  : input 'mem  clock, /// clk_mem (FSM/データ，54 MHz)
+    i_clk_p: input 'memp clock, /// clk_mem_p (+90°，CK 出力用)
+    i_rst  : input 'mem  reset, /// リセット
+
+    // FSM 側 (SDR)
+    i_ck_en  : input  'mem logic   , /// CK 駆動 (1 で 1 CK パルス)
+    i_cs_n   : input  'mem logic   , /// CS#
+    i_reset_n: input  'mem logic   , /// RESET#
+    i_dq_a   : input  'mem logic<8>, /// DQ 送出 byte A (CK 立上り側)
+    i_dq_b   : input  'mem logic<8>, /// DQ 送出 byte B (CK 立下り側)
+    i_dq_oe  : input  'mem logic   , /// DQ 出力イネーブル
+    i_rwds_a : input  'mem logic   , /// RWDS 送出 A (ライトマスク)
+    i_rwds_b : input  'mem logic   , /// RWDS 送出 B
+    i_rwds_oe: input  'mem logic   , /// RWDS 出力イネーブル
+    o_dq_a   : output 'mem logic<8>, /// DQ 取り込み (立上り)
+    o_dq_b   : output 'mem logic<8>, /// DQ 取り込み (立下り)
+    o_rwds_a : output 'mem logic   , /// RWDS 取り込み (立上り)
+    o_rwds_b : output 'mem logic   , /// RWDS 取り込み (立下り)
+
+    // パッド側 (ch0．Top でマジックポートへ接続する)
+    o_pad_ck     : output 'memp logic       , /// CK パッド
+    o_pad_ck_n   : output 'memp logic       , /// CK# パッド (差動)
+    o_pad_cs_n   : output 'mem  logic       , /// CS# パッド
+    o_pad_reset_n: output 'mem  logic       , /// RESET# パッド
+    io_pad_dq    : inout  'mem  tri logic<8>, /// DQ パッド
+    io_pad_rwds  : inout  'mem  tri logic   , /// RWDS パッド
+) {
+    // CK イネーブルは clk_mem で 1 段受けてから clk_mem_p の ODDR へ渡す
+    // (mem→memp は同一 PLL 由来の +90° 位相差経路．T/4 ≈ 4.6 ns のセットアップ
+    // 予算を持つ配置配線対象パスであり，非同期 CDC ではない)
+    var ck_en_q: 'mem logic;
+
+    always_ff (i_clk, i_rst) {
+        if_reset {
+            ck_en_q = 0;
+        } else {
+            ck_en_q = i_ck_en;
+        }
+    }
+
+    // CK/CK#: クロックフォワーディング (D0=有効時 High/Low の順，差動)
+    unsafe (cdc) {
+        inst u_ck_oddr: $sv::ODDR (
+            CLK: i_clk_p ,
+            D0 : ck_en_q ,
+            D1 : 1'b0    ,
+            TX : 1'b0    ,
+            Q0 : o_pad_ck,
+            Q1 : _       ,
+        );
+        inst u_ck_n_oddr: $sv::ODDR (
+            CLK: i_clk_p   ,
+            D0 : ~ck_en_q  ,
+            D1 : 1'b1      ,
+            TX : 1'b0      ,
+            Q0 : o_pad_ck_n,
+            Q1 : _         ,
+        );
+    }
+
+    // CS#/RESET#: D0=D1 の ODDR で DQ と同一段数の SDR 出力にする
+    inst u_cs_oddr: $sv::ODDR (
+        CLK: i_clk     ,
+        D0 : i_cs_n    ,
+        D1 : i_cs_n    ,
+        TX : 1'b0      ,
+        Q0 : o_pad_cs_n,
+        Q1 : _         ,
+    );
+    inst u_reset_oddr: $sv::ODDR (
+        CLK: i_clk        ,
+        D0 : i_reset_n    ,
+        D1 : i_reset_n    ,
+        TX : 1'b0         ,
+        Q0 : o_pad_reset_n,
+        Q1 : _            ,
+    );
+
+    // DQ x8: ODDR (TX→Q1→OEN) + IOBUF + IDDR
+    var dq_o: 'mem logic<8>;
+    var dq_t: 'mem logic<8>;
+    var dq_i: 'mem logic<8>;
+
+    let dq_oen: 'mem logic = ~i_dq_oe; // OEN=1 で High-Z (UG289)
+
+    for i in 0..8 :g_dq {
+        inst u_oddr: $sv::ODDR (
+            CLK: i_clk    ,
+            D0 : i_dq_a[i],
+            D1 : i_dq_b[i],
+            TX : dq_oen   ,
+            Q0 : dq_o[i]  ,
+            Q1 : dq_t[i]  ,
+        );
+        inst u_iobuf: $sv::IOBUF (
+            I  : dq_o[i]     ,
+            OEN: dq_t[i]     ,
+            IO : io_pad_dq[i],
+            O  : dq_i[i]     ,
+        );
+        inst u_iddr: $sv::IDDR (
+            CLK: i_clk    ,
+            D  : dq_i[i]  ,
+            Q0 : o_dq_a[i],
+            Q1 : o_dq_b[i],
+        );
+    }
+
+    // RWDS: 同構成 x1 (リードのストローブ入力 / ライトのマスク出力)
+    var rwds_o: 'mem logic;
+    var rwds_t: 'mem logic;
+    var rwds_i: 'mem logic;
+
+    let rwds_oen: 'mem logic = ~i_rwds_oe;
+
+    inst u_rwds_oddr: $sv::ODDR (
+        CLK: i_clk   ,
+        D0 : i_rwds_a,
+        D1 : i_rwds_b,
+        TX : rwds_oen,
+        Q0 : rwds_o  ,
+        Q1 : rwds_t  ,
+    );
+    inst u_rwds_iobuf: $sv::IOBUF (
+        I  : rwds_o     ,
+        OEN: rwds_t     ,
+        IO : io_pad_rwds,
+        O  : rwds_i     ,
+    );
+    inst u_rwds_iddr: $sv::IDDR (
+        CLK: i_clk   ,
+        D  : rwds_i  ,
+        Q0 : o_rwds_a,
+        Q1 : o_rwds_b,
+    );
+}

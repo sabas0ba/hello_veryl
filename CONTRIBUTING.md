@@ -15,6 +15,9 @@
 - コミット前に `.\scripts\veryl.ps1 fmt` を適用すること
 - CI（`fmt --check` → `check` → `build` → `test`）は Warning でも失敗する
   （`veryl check` は Warning のみでも exit 1）
+- 合成後検査（`verif/`，`$sv::` プリミティブ接続のネットリスト照合等）も
+  CI の verif ジョブで実行される．RTL 変更時はローカルでも
+  `.\scripts\verif.ps1` を通すこと
 
 ## 外部依存の追加・更新
 
