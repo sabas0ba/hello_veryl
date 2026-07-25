@@ -19,7 +19,7 @@ flowchart LR
     PC["PC (COMポート)"] -- uart_rx --> RX["Uart RX"]
     RX -- "stream_if (echo)" --> TX["Uart TX"]
     TX -- uart_tx --> PC
-    TFS["TfSpikeInit<br>(TFカード spike)"] -- "結果1行" --> TX
+    TFD["TfCtrl → Fat32Reader → TfTextDemo<br>(TFカード, tfcard.md)"] -- "報告行 + *.TXT 内容" --> TX
     RX -. "傍受 (valid && ready)" .-> CON["TextConsole<br>100列x30行 / BSRAM"]
     FONT["FontRom 8x16<br>(font/ から生成)"] --> CON
     VT["VideoTiming<br>800x480 DEモード"] --> CON
@@ -47,9 +47,10 @@ LED 割当（すべて active-low）:
 | PsramSpikeBitbang | src/psram/spike_bitbang.veryl | PSRAM ch0 レジスタ読み出し spike（[psram.md](psram.md)） |
 | PsramClkGen | src/psram/clkgen.veryl | rPLL による clk_mem 54 MHz 生成（[psram.md](psram.md)） |
 | SpiMaster | src/tfcard/spi_master.veryl | SPI mode 0 マスタ，分周切替（[tfcard.md](tfcard.md)） |
-| TfSpikeInit | src/tfcard/spike_init.veryl | TF カード初期化 + セクタ 0 リード spike（[tfcard.md](tfcard.md)） |
+| TfSpikeInit | src/tfcard/spike_init.veryl | TF カード初期化 + セクタ 0 リード spike（ブリングアップ用，Top 非接続） |
 | TfCtrl | src/tfcard/tf_ctrl.veryl | TF カードブロックリードコントローラ v1（[tfcard.md](tfcard.md)） |
 | Fat32Reader | src/tfcard/fat32_reader.veryl | FAT32 リーダ v2（8.3 名照合・チェーン追跡，[tfcard.md](tfcard.md)） |
+| TfTextDemo | src/tfcard/text_demo.veryl | TF カード報告行 + ルート最初の *.TXT を UART/LCD 表示 |
 | stream_if | src/common/stream.veryl | valid/ready ハンドシェイクの汎用 stream interface |
 | Uart | src/uart/uart.veryl | 115200bps 8N1．RX は 2FF 同期 + 中央サンプリング，ノンブロッキング供給 |
 | VideoTiming | src/video/timing.veryl | LCD タイミング生成（datasheet 導出の 27MHz 直結 59.1Hz，HTotal=890 x VTotal=513） |

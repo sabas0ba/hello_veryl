@@ -1,20 +1,25 @@
 /// トップモジュール (Tang Nano 9K)
 ///
-/// UART エコー + テキストコンソール (LCD) + PSRAM spike + TF カード spike +
-/// LED 表示の統合．
+/// UART エコー + テキストコンソール (LCD) + PSRAM spike + TF カード
+/// テキスト表示デモ + LED 表示の統合．
 ///
 /// ```mermaid
 /// flowchart LR
 ///     PC["PC (COMポート)"] -- uart_rx --> RX["Uart RX"]
-///     RX -- "echo" --> ARB["TX arbiter<br>(spike優先)"]
+///     RX -- "echo" --> ARB["TX arbiter<br>(spike/デモ優先)"]
 ///     SPIKE["PsramSpikeBitbang"] -- "結果1行" --> ARB
-///     TFS["TfSpikeInit"] -- "結果1行" --> ARB
+///     DEMO["TfTextDemo"] -- "報告行 + *.TXT 内容" --> ARB
+///     FAT["Fat32Reader"] --> DEMO
+///     TFC["TfCtrl"] --> FAT
 ///     ARB --> TX["Uart TX"] -- uart_tx --> PC
 ///     ARB -. "傍受" .-> CON["TextConsole"] --> LCD["5inch LCD"]
 ///     SPIKE <--> RAM["内蔵 PSRAM ch0"]
-///     TFS <--> TF["TF カード (SPI)"]
+///     TFC <--> TF["TF カード (SPI)"]
 ///     PLL["PsramClkGen<br>(rPLL 54MHz)"] --> LEDS["leds"]
 /// ```
+///
+/// TF カードのブリングアップ時は TfSpikeInit (Top 非接続の spike) を
+/// 本デモ一式と差し替えて使う (docs/tfcard.md「spike の構成」)．
 ///
 /// LED 割当は docs/rtl.md，PSRAM サブシステムは docs/psram.md，
 /// TF カードサブシステムは docs/tfcard.md を参照．
@@ -123,23 +128,86 @@ pub module Top #(
         );
     }
 
-    // TF カード spike: リセット毎に初期化 + セクタ 0 リードの結果 1 行を送出
-    inst tf_msg: stream_if;
+    // TF カードテキスト表示デモ: 初期化報告行 + ルート最初の *.TXT の内容を
+    // 送出する (TfCtrl → Fat32Reader → TfTextDemo，docs/tfcard.md)
+    inst tf_blk_st: stream_if; // TfCtrl → Fat32Reader
+    inst tf_f_st  : stream_if; // Fat32Reader → TfTextDemo
+    inst tf_msg   : stream_if; // TfTextDemo → TX アービタ
 
-    inst tf_spike: TfSpikeInit (
-        i_clk          ,
-        i_rst          ,
-        o_sclk: tf_sclk,
-        o_mosi: tf_mosi,
-        o_cs_n: tf_cs_n,
-        i_miso: tf_miso,
-        msg   : tf_msg ,
+    var tf_blk_req_valid: logic             ;
+    var tf_blk_req_lba  : logic         <32>;
+    var tf_blk_req_ready: logic             ;
+    var tf_init_done    : logic             ;
+    var tf_init_err     : TfTypes::Error    ;
+    var tf_blk_done     : logic             ;
+    var tf_blk_err      : TfTypes::Error    ;
+
+    var tf_freq_valid : logic               ;
+    var tf_freq_name  : logic           <88>;
+    var tf_freq_offset: logic           <32>;
+    var tf_freq_len   : logic           <32>;
+    var tf_freq_ready : logic               ;
+    var tf_f_done     : logic               ;
+    var tf_f_err      : TfTypes::FsError    ;
+    var _tf_f_size    : logic           <32>; // デモでは未使用
+
+    inst tf_ctrl: TfCtrl (
+        i_clk                        ,
+        i_rst                        ,
+        i_req_valid: tf_blk_req_valid,
+        i_req_lba  : tf_blk_req_lba  ,
+        o_req_ready: tf_blk_req_ready,
+        o_init_done: tf_init_done    ,
+        o_init_err : tf_init_err     ,
+        o_done     : tf_blk_done     ,
+        o_err      : tf_blk_err      ,
+        data       : tf_blk_st       ,
+        o_sclk     : tf_sclk         ,
+        o_mosi     : tf_mosi         ,
+        o_cs_n     : tf_cs_n         ,
+        i_miso     : tf_miso         ,
     );
 
-    // TX arbiter: spike メッセージ優先 (PSRAM > TF > エコー)．spike は
+    inst tf_fat: Fat32Reader (
+        i_clk                         ,
+        i_rst                         ,
+        i_req_valid : tf_freq_valid   ,
+        i_req_name  : tf_freq_name    ,
+        i_req_offset: tf_freq_offset  ,
+        i_req_len   : tf_freq_len     ,
+        o_req_ready : tf_freq_ready   ,
+        o_done      : tf_f_done       ,
+        o_err       : tf_f_err        ,
+        o_file_size : _tf_f_size      ,
+        data        : tf_f_st         ,
+        o_blk_valid : tf_blk_req_valid,
+        o_blk_lba   : tf_blk_req_lba  ,
+        i_blk_ready : tf_blk_req_ready,
+        i_blk_done  : tf_blk_done     ,
+        i_blk_err   : tf_blk_err      ,
+        blk         : tf_blk_st       ,
+    );
+
+    inst tf_demo: TfTextDemo (
+        i_clk                       ,
+        i_rst                       ,
+        i_init_done : tf_init_done  ,
+        i_init_err  : tf_init_err   ,
+        o_req_valid : tf_freq_valid ,
+        o_req_name  : tf_freq_name  ,
+        o_req_offset: tf_freq_offset,
+        o_req_len   : tf_freq_len   ,
+        i_req_ready : tf_freq_ready ,
+        i_done      : tf_f_done     ,
+        i_err       : tf_f_err      ,
+        fdat        : tf_f_st       ,
+        msg         : tf_msg        ,
+    );
+
+    // TX arbiter: PSRAM spike > TF デモ > エコーの優先順位．いずれも
     // リセット直後のみ送出するためエコーとの競合は実用上起きない
-    // (競合時は下位側が待たされる)．各 spike は行単位で valid を保持する
-    // ため行の混線は起きない
+    // (競合時は下位側が待たされる)．TF デモのファイル転送中の
+    // ブロック間ギャップではエコーが割り込みうるが，デモ用途では許容する
     assign tx_stream.valid   = spike_msg.valid || tf_msg.valid || echo_stream.valid;
     assign tx_stream.data    = if spike_msg.valid ? spike_msg.data : if tf_msg.valid ? tf_msg.data : echo_stream.data;
     assign spike_msg.ready   = tx_stream.ready;
