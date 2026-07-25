@@ -1,0 +1,464 @@
+/// TF カードブロックリードコントローラ v1 (docs/tfcard.md「プロトコル仕様」)
+///
+/// リセット後に自動で初期化シーケンス (CMD0 → CMD8 → CMD55/ACMD41 ポーリング →
+/// CMD58) を実行し，完了後は要求 IF (valid/ready + LBA) で CMD17 単発リードを
+/// 受け付ける．512 バイトを stream_if で送出し，CRC16 を検査して完了時に
+/// エラー種別を報告する．
+///
+/// - **リード専用**: 発行コマンドは CMD0/CMD8/CMD55/ACMD41/CMD58/CMD17 のみ．
+///   write 系・erase 系は FSM 上存在しない
+/// - **バッファレス**: データバイトは受信毎に stream の handshake を待ち，
+///   その間 SCK を停止する (SPI はマスタペースのため合法)．BSRAM 面バッファは
+///   不要 (docs/tfcard.md「インタフェース」)
+/// - CCS=0 (バイトアドレッシング旧世代) は初期化時に unsupported として拒否する
+/// - CRC 不一致はデータストリーム後の完了報告で通知する (リトライは利用側判断)
+///
+/// 初期化失敗時は o_init_done が立たず o_init_err に種別が残る (復帰はリセット)．
+pub module TfCtrl #(
+    /// 初期化クロック分周比 (337.5 kHz)
+    param InitDivider: u32 = 80,
+    /// データ転送クロック分周比 (13.5 MHz)
+    param FastDivider: u32 = 2,
+    /// 電源投入クロック供給のバイト数 (74 クロック以上 → 10 バイト = 80 クロック)
+    param PowerUpBytes: u32 = 10,
+    /// R1 応答待ちの上限バイト数 (NCR)
+    param NcrMaxBytes: u32 = 8,
+    /// ACMD41 ポーリング上限回数 (337.5 kHz で約 1.2 s 相当)
+    param Acmd41MaxPolls: u32 = 3000,
+    /// データトークン待ちの上限バイト数 (13.5 MHz で約 155 ms 相当)
+    param TokenMaxBytes: u32 = 262144,
+) (
+    i_clk: input clock, /// クロック (27 MHz)
+    i_rst: input reset, /// リセット
+
+    // 要求 IF (o_init_done 後に受付)
+    i_req_valid: input  logic    , /// ブロックリード要求
+    i_req_lba  : input  logic<32>, /// 論理ブロックアドレス
+    o_req_ready: output logic    , /// 要求受付可能
+
+    // 状態
+    o_init_done: output logic         , /// 初期化完了
+    o_init_err : output TfTypes::Error, /// 初期化エラー (失敗時に latch)
+    o_done     : output logic         , /// ブロックリード完了 (1 サイクルパルス)
+    o_err      : output TfTypes::Error, /// 完了時のエラー種別 (o_done で有効)
+
+    data: modport stream_if::source, /// リードデータ (512 バイト/ブロック)
+
+    o_sclk: output logic, /// TF SCK
+    o_mosi: output logic, /// TF MOSI
+    o_cs_n: output logic, /// TF CS#
+    i_miso: input  logic, /// TF MISO
+) {
+    enum State: logic<4> {
+        power_up,
+        cmd_send,
+        r1_wait,
+        r7_read,
+        token_wait,
+        data_read,
+        crc_read,
+        trailer,
+        idle,
+        fail,
+    }
+
+    // コマンド列 (cstep): 0=CMD0, 1=CMD8, 2=CMD55, 3=ACMD41, 4=CMD58, 5=CMD17
+    function CmdCode (
+        stp: input logic<3>,
+    ) -> logic<6> {
+        return case stp {
+            0      : 6'd0,
+            1      : 6'd8,
+            2      : 6'd55,
+            3      : 6'd41,
+            4      : 6'd58,
+            default: 6'd17,
+        };
+    }
+
+    function CmdArg (
+        stp: input logic<3> ,
+        lba: input logic<32>,
+    ) -> logic<32> {
+        return case stp {
+            1      : 32'h0000_01aa, // CMD8: 電圧範囲 + チェックパターン
+            3      : 32'h4000_0000, // ACMD41: HCS=1
+            5      : lba,
+            default: 32'h0000_0000,
+        };
+    }
+
+    // コマンドフレームの 2 バイト目以降 (idx は直前に送ったバイトの位置)
+    function CmdTxByte (
+        stp: input logic<3> ,
+        idx: input logic<3> ,
+        crc: input logic<7> ,
+        lba: input logic<32>,
+    ) -> logic<8> {
+        var a: logic<32>;
+        a = CmdArg(stp, lba);
+        return case idx {
+            0      : a[31:24],
+            1      : a[23:16],
+            2      : a[15:8],
+            3      : a[7:0],
+            default: {crc, 1'b1},
+        };
+    }
+
+    const PollCntWidth : u32 = $clog2(Acmd41MaxPolls);
+    const TokenCntWidth: u32 = $clog2(TokenMaxBytes);
+
+    var state        : State                        ;
+    var cstep        : logic         <3>            ;
+    var after_trailer: logic         <3>            ; // 6 = idle へ / 7 = fail へ / 他 = 次コマンド
+    var pcnt         : logic         <4>            ;
+    var byte_idx     : logic         <3>            ;
+    var crc7         : logic         <7>            ;
+    var ncr_cnt      : logic         <4>            ;
+    var poll_cnt     : logic         <PollCntWidth> ;
+    var token_cnt    : logic         <TokenCntWidth>;
+    var r7_buf       : logic         <32>           ;
+    var r7_cnt       : logic         <2>            ;
+    var lba          : logic         <32>           ;
+    var data_cnt     : logic         <10>           ;
+    var crc16        : logic         <16>           ;
+    var crc_hi_rx    : logic         <8>            ;
+    var crc_cnt      : logic                        ;
+    var rd_err       : TfTypes::Error               ;
+    var did_read     : logic                        ;
+
+    // SPI マスタ
+    var spi_fast: logic   ;
+    var spi_vld : logic   ;
+    var spi_dat : logic<8>;
+    var spi_rdy : logic   ;
+    var spi_ovld: logic   ;
+    var spi_odat: logic<8>;
+
+    inst spi: SpiMaster #(
+        InitDivider: InitDivider,
+        FastDivider: FastDivider,
+    ) (
+        i_clk            ,
+        i_rst            ,
+        i_fast : spi_fast,
+        i_valid: spi_vld ,
+        i_data : spi_dat ,
+        o_ready: spi_rdy ,
+        o_valid: spi_ovld,
+        o_data : spi_odat,
+        o_sclk           ,
+        o_mosi           ,
+        i_miso           ,
+    );
+
+    always_ff (i_clk, i_rst) {
+        if_reset {
+            state         = State::power_up;
+            cstep         = 0;
+            after_trailer = 0;
+            pcnt          = 0;
+            byte_idx      = 0;
+            crc7          = 0;
+            ncr_cnt       = 0;
+            poll_cnt      = 0;
+            token_cnt     = 0;
+            r7_buf        = 0;
+            r7_cnt        = 0;
+            lba           = 0;
+            data_cnt      = 0;
+            crc16         = 0;
+            crc_hi_rx     = 0;
+            crc_cnt       = 0;
+            rd_err        = TfTypes::Error::none;
+            did_read      = 0;
+            spi_fast      = 0;
+            spi_vld       = 1; // 電源投入クロック供給の先頭バイトを即発行
+            spi_dat       = '1;
+            o_cs_n        = 1;
+            o_req_ready   = 0;
+            o_init_done   = 0;
+            o_init_err    = TfTypes::Error::none;
+            o_done        = 0;
+            o_err         = TfTypes::Error::none;
+            data.valid    = 0;
+            data.data     = 0;
+        } else {
+            // 完了パルスと SPI handshake の後始末
+            if o_done {
+                o_done = 0;
+            }
+            if spi_vld && spi_rdy {
+                spi_vld = 0;
+            }
+
+            if state == State::power_up {
+                if spi_ovld {
+                    if pcnt == PowerUpBytes - 1 {
+                        // CMD0 開始
+                        o_cs_n   = 0;
+                        state    = State::cmd_send;
+                        cstep    = 0;
+                        byte_idx = 0;
+                        spi_dat  = {2'b01, CmdCode(3'd0)};
+                        crc7     = TfCrc::Crc7Byte(7'd0, {2'b01, CmdCode(3'd0)});
+                        spi_vld  = 1;
+                    } else {
+                        pcnt    = pcnt + 1;
+                        spi_dat = '1;
+                        spi_vld = 1;
+                    }
+                }
+            } else if state == State::cmd_send {
+                if spi_ovld {
+                    if byte_idx == 3'd5 {
+                        state   = State::r1_wait;
+                        ncr_cnt = 0;
+                        spi_dat = '1;
+                        spi_vld = 1;
+                    } else {
+                        spi_dat = CmdTxByte(cstep, byte_idx, crc7, lba);
+                        if byte_idx <: 3'd4 {
+                            crc7 = TfCrc::Crc7Byte(crc7, CmdTxByte(cstep, byte_idx, crc7, lba));
+                        }
+                        byte_idx = byte_idx + 1;
+                        spi_vld  = 1;
+                    }
+                }
+            } else if state == State::r1_wait {
+                if spi_ovld {
+                    if spi_odat[7] == 1'b0 {
+                        // R1 受信
+                        if cstep == 3'd0 {
+                            if spi_odat == 8'h01 {
+                                after_trailer = 1;
+                            } else {
+                                o_init_err    = TfTypes::Error::resp;
+                                after_trailer = 7;
+                            }
+                            o_cs_n  = 1;
+                            state   = State::trailer;
+                            spi_dat = '1;
+                            spi_vld = 1;
+                        } else if cstep == 3'd1 {
+                            if (spi_odat & 8'hfe) == 8'h00 {
+                                state   = State::r7_read;
+                                r7_cnt  = 0;
+                                spi_dat = '1;
+                                spi_vld = 1;
+                            } else {
+                                // illegal command 等: 旧世代カード
+                                o_init_err    = TfTypes::Error::unsupported;
+                                after_trailer = 7;
+                                o_cs_n        = 1;
+                                state         = State::trailer;
+                                spi_dat       = '1;
+                                spi_vld       = 1;
+                            }
+                        } else if cstep == 3'd2 {
+                            if (spi_odat & 8'hfe) == 8'h00 {
+                                after_trailer = 3;
+                            } else {
+                                o_init_err    = TfTypes::Error::resp;
+                                after_trailer = 7;
+                            }
+                            o_cs_n  = 1;
+                            state   = State::trailer;
+                            spi_dat = '1;
+                            spi_vld = 1;
+                        } else if cstep == 3'd3 {
+                            if spi_odat == 8'h00 {
+                                after_trailer = 4;
+                            } else if spi_odat == 8'h01 && poll_cnt <: Acmd41MaxPolls - 1 {
+                                poll_cnt      = poll_cnt + 1;
+                                after_trailer = 2;
+                            } else if spi_odat == 8'h01 {
+                                o_init_err    = TfTypes::Error::timeout;
+                                after_trailer = 7;
+                            } else {
+                                o_init_err    = TfTypes::Error::resp;
+                                after_trailer = 7;
+                            }
+                            o_cs_n  = 1;
+                            state   = State::trailer;
+                            spi_dat = '1;
+                            spi_vld = 1;
+                        } else if cstep == 3'd4 {
+                            if spi_odat == 8'h00 {
+                                state   = State::r7_read;
+                                r7_cnt  = 0;
+                                spi_dat = '1;
+                                spi_vld = 1;
+                            } else {
+                                o_init_err    = TfTypes::Error::resp;
+                                after_trailer = 7;
+                                o_cs_n        = 1;
+                                state         = State::trailer;
+                                spi_dat       = '1;
+                                spi_vld       = 1;
+                            }
+                        } else {
+                            // CMD17
+                            if spi_odat == 8'h00 {
+                                state     = State::token_wait;
+                                token_cnt = 0;
+                                spi_dat   = '1;
+                                spi_vld   = 1;
+                            } else {
+                                rd_err        = TfTypes::Error::resp;
+                                after_trailer = 6;
+                                o_cs_n        = 1;
+                                state         = State::trailer;
+                                spi_dat       = '1;
+                                spi_vld       = 1;
+                            }
+                        }
+                    } else if ncr_cnt == NcrMaxBytes - 1 {
+                        // 応答タイムアウト
+                        if cstep == 3'd5 {
+                            rd_err        = TfTypes::Error::timeout;
+                            after_trailer = 6;
+                        } else {
+                            o_init_err    = TfTypes::Error::timeout;
+                            after_trailer = 7;
+                        }
+                        o_cs_n  = 1;
+                        state   = State::trailer;
+                        spi_dat = '1;
+                        spi_vld = 1;
+                    } else {
+                        ncr_cnt = ncr_cnt + 1;
+                        spi_dat = '1;
+                        spi_vld = 1;
+                    }
+                }
+            } else if state == State::r7_read {
+                if spi_ovld {
+                    r7_buf = {r7_buf[23:0], spi_odat};
+                    if r7_cnt == 2'd3 {
+                        o_cs_n  = 1;
+                        spi_dat = '1;
+                        spi_vld = 1;
+                        state   = State::trailer;
+                        if cstep == 3'd1 {
+                            // CMD8: 電圧範囲 + チェックパターンの echo 確認
+                            if r7_buf[3:0] == 4'h1 && spi_odat == 8'haa {
+                                after_trailer = 2;
+                            } else {
+                                o_init_err    = TfTypes::Error::unsupported;
+                                after_trailer = 7;
+                            }
+                        } else {
+                            // CMD58: CCS 検査 (OCR bit30)
+                            if r7_buf[22] == 1'b1 {
+                                spi_fast      = 1;
+                                after_trailer = 6;
+                            } else {
+                                o_init_err    = TfTypes::Error::unsupported;
+                                after_trailer = 7;
+                            }
+                        }
+                    } else {
+                        r7_cnt  = r7_cnt + 1;
+                        spi_dat = '1;
+                        spi_vld = 1;
+                    }
+                }
+            } else if state == State::token_wait {
+                if spi_ovld {
+                    if spi_odat == 8'hfe {
+                        state    = State::data_read;
+                        data_cnt = 0;
+                        crc16    = 0;
+                        spi_dat  = '1;
+                        spi_vld  = 1;
+                    } else if spi_odat == 8'hff && token_cnt <: TokenMaxBytes - 1 {
+                        token_cnt = token_cnt + 1;
+                        spi_dat   = '1;
+                        spi_vld   = 1;
+                    } else {
+                        // エラートークンまたはタイムアウト
+                        rd_err        = if spi_odat == 8'hff ? TfTypes::Error::timeout : TfTypes::Error::resp;
+                        after_trailer = 6;
+                        o_cs_n        = 1;
+                        state         = State::trailer;
+                        spi_dat       = '1;
+                        spi_vld       = 1;
+                    }
+                }
+            } else if state == State::data_read {
+                if spi_ovld {
+                    // 受信バイトを stream へ提示し，handshake まで SCK 停止
+                    data.data  = spi_odat;
+                    data.valid = 1;
+                    crc16      = TfCrc::Crc16Byte(crc16, spi_odat);
+                    data_cnt   = data_cnt + 1;
+                } else if data.valid && data.ready {
+                    data.valid = 0;
+                    if data_cnt == 10'd512 {
+                        state   = State::crc_read;
+                        crc_cnt = 0;
+                    }
+                    spi_dat = '1;
+                    spi_vld = 1;
+                }
+            } else if state == State::crc_read {
+                if spi_ovld {
+                    if crc_cnt == 1'b0 {
+                        crc_hi_rx = spi_odat;
+                        crc_cnt   = 1;
+                        spi_dat   = '1;
+                        spi_vld   = 1;
+                    } else {
+                        rd_err        = if {crc_hi_rx, spi_odat} != crc16 ? TfTypes::Error::crc : TfTypes::Error::none;
+                        after_trailer = 6;
+                        o_cs_n        = 1;
+                        state         = State::trailer;
+                        spi_dat       = '1;
+                        spi_vld       = 1;
+                    }
+                }
+            } else if state == State::trailer {
+                if spi_ovld {
+                    if after_trailer == 3'd7 {
+                        state = State::fail;
+                    } else if after_trailer == 3'd6 {
+                        state       = State::idle;
+                        o_init_done = 1;
+                        o_req_ready = 1;
+                        if did_read {
+                            did_read = 0;
+                            o_done   = 1;
+                            o_err    = rd_err;
+                        }
+                    } else {
+                        o_cs_n   = 0;
+                        state    = State::cmd_send;
+                        cstep    = after_trailer;
+                        byte_idx = 0;
+                        spi_dat  = {2'b01, CmdCode(after_trailer)};
+                        crc7     = TfCrc::Crc7Byte(7'd0, {2'b01, CmdCode(after_trailer)});
+                        spi_vld  = 1;
+                    }
+                }
+            } else if state == State::idle {
+                if i_req_valid && o_req_ready {
+                    // CMD17 開始
+                    o_req_ready = 0;
+                    lba         = i_req_lba;
+                    rd_err      = TfTypes::Error::none;
+                    did_read    = 1;
+                    o_cs_n      = 0;
+                    state       = State::cmd_send;
+                    cstep       = 5;
+                    byte_idx    = 0;
+                    spi_dat     = {2'b01, CmdCode(3'd5)};
+                    crc7        = TfCrc::Crc7Byte(7'd0, {2'b01, CmdCode(3'd5)});
+                    spi_vld     = 1;
+                }
+            }
+            // State::fail: 初期化失敗を latch (復帰はリセット)
+        }
+    }
+}

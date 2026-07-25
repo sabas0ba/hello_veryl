@@ -1,0 +1,611 @@
+// TfCtrl の L1 テスト (docs/tfcard.md「L1: 自作ビヘイビアモデルとテスト」)
+// TfCardModel のエラー注入設定で正常系と各エラー系を検証する．
+// テストでは InitDivider を短縮する (SCK 分周比はモデルに影響しない)．
+
+#[test(test_tf_ctrl_read)]
+module test_tf_ctrl_read {
+    const MaxWait: u32 = 50_000;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    inst dst: stream_if;
+
+    var sclk: logic;
+    var mosi: logic;
+    var miso: logic;
+    var cs_n: logic;
+
+    var req_valid: logic             ;
+    var req_lba  : logic         <32>;
+    var req_ready: logic             ;
+    var init_done: logic             ;
+    var init_err : TfTypes::Error    ;
+    var done     : logic             ;
+    var err      : TfTypes::Error    ;
+
+    var img_lba : logic<32>;
+    var img_off : logic<9> ;
+    var img_data: logic<8> ;
+
+    inst dut: TfCtrl #(
+        InitDivider: 8, // テスト短縮 (実機は 80 = 337.5 kHz)
+    ) (
+        i_clk      : clk      ,
+        i_rst      : rst      ,
+        i_req_valid: req_valid,
+        i_req_lba  : req_lba  ,
+        o_req_ready: req_ready,
+        o_init_done: init_done,
+        o_init_err : init_err ,
+        o_done     : done     ,
+        o_err      : err      ,
+        data       : dst      ,
+        o_sclk     : sclk     ,
+        o_mosi     : mosi     ,
+        o_cs_n     : cs_n     ,
+        i_miso     : miso     ,
+    );
+
+    inst card: TfCardModel #(
+        NcrBytes     : 1,
+        Acmd41Polls  : 2,
+        DataWaitBytes: 2,
+    ) (
+        i_clk            : clk     ,
+        i_rst            : rst     ,
+        i_sclk           : sclk    ,
+        i_cs_n           : cs_n    ,
+        i_mosi           : mosi    ,
+        o_miso           : miso    ,
+        i_cfg_legacy_cmd8: 1'b0    ,
+        i_cfg_ccs        : 1'b1    ,
+        i_cfg_never_ready: 1'b0    ,
+        i_cfg_no_token   : 1'b0    ,
+        i_cfg_corrupt_crc: 1'b0    ,
+        o_img_lba        : img_lba ,
+        o_img_off        : img_off ,
+        i_img_data       : img_data,
+    );
+
+    // ディスクイメージ: byte = LBA 下位 + オフセット下位 (mod 256)
+    assign img_data = img_lba[7:0] + img_off[7:0];
+
+    var expb: logic<8>;
+
+    initial {
+        req_valid  = 0;
+        req_lba    = 0;
+        dst.ready  = 0;
+        rst.assert();
+
+        // 初期化完了を待つ
+        for _w in 0..MaxWait {
+            if init_done == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        $assert(init_done == 1'b1, "init done");
+        $assert(init_err == TfTypes::Error::none, "init no error");
+        $assert(req_ready == 1'b1, "ready after init");
+
+        // ---- 1 ブロック目 (LBA=5，バックプレッシャあり) ----
+        req_lba   = 32'd5;
+        req_valid = 1;
+        clk.next (1); // accept edge
+        req_valid = 0;
+
+        expb = 8'd5;
+        for n in 0..512 {
+            for _w in 0..MaxWait {
+                if dst.valid == 1'b1 {
+                    break;
+                }
+                clk.next(1);
+            }
+            $assert_continue(dst.valid == 1'b1, "blk0: data valid");
+            $assert_continue(dst.data == expb, "blk0: data byte");
+            if n == 100 {
+                // handshake しない間 valid とデータが保持される (SCK 停止)
+                clk.next        (20);
+                $assert_continue(dst.valid == 1'b1, "blk0: valid held");
+                $assert_continue(dst.data == expb, "blk0: data held");
+            }
+            dst.ready = 1;
+            clk.next (1); // handshake
+            dst.ready = 0;
+            expb      = expb + 1;
+        }
+
+        for _w in 0..MaxWait {
+            if done == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        $assert(done == 1'b1, "blk0: done");
+        $assert(err == TfTypes::Error::none, "blk0: no error");
+
+        // ---- 2 ブロック目 (LBA=1，ready 常時 High) ----
+        for _w in 0..MaxWait {
+            if req_ready == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        req_lba   = 32'd1;
+        req_valid = 1;
+        clk.next (1); // accept edge
+        req_valid = 0;
+        dst.ready = 1;
+
+        expb = 8'd1;
+        for _n in 0..512 {
+            for _w in 0..MaxWait {
+                if dst.valid == 1'b1 {
+                    break;
+                }
+                clk.next(1);
+            }
+            $assert_continue(dst.data == expb, "blk1: data byte");
+            clk.next        (1); // handshake
+            expb             = expb + 1;
+        }
+
+        for _w in 0..MaxWait {
+            if done == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        $assert(done == 1'b1, "blk1: done");
+        $assert(err == TfTypes::Error::none, "blk1: no error");
+        $finish();
+    }
+}
+
+#[test(test_tf_ctrl_legacy_cmd8)]
+module test_tf_ctrl_legacy_cmd8 {
+    const MaxWait: u32 = 50_000;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    inst dst: stream_if;
+
+    var sclk: logic;
+    var mosi: logic;
+    var miso: logic;
+    var cs_n: logic;
+
+    var req_ready: logic         ;
+    var init_done: logic         ;
+    var init_err : TfTypes::Error;
+    var done     : logic         ;
+    var err      : TfTypes::Error;
+
+    var img_lba : logic<32>;
+    var img_off : logic<9> ;
+    var img_data: logic<8> ;
+
+    inst dut: TfCtrl #(
+        InitDivider: 8,
+    ) (
+        i_clk      : clk      ,
+        i_rst      : rst      ,
+        i_req_valid: 1'b0     ,
+        i_req_lba  : 32'd0    ,
+        o_req_ready: req_ready,
+        o_init_done: init_done,
+        o_init_err : init_err ,
+        o_done     : done     ,
+        o_err      : err      ,
+        data       : dst      ,
+        o_sclk     : sclk     ,
+        o_mosi     : mosi     ,
+        o_cs_n     : cs_n     ,
+        i_miso     : miso     ,
+    );
+
+    inst card: TfCardModel (
+        i_clk            : clk     ,
+        i_rst            : rst     ,
+        i_sclk           : sclk    ,
+        i_cs_n           : cs_n    ,
+        i_mosi           : mosi    ,
+        o_miso           : miso    ,
+        i_cfg_legacy_cmd8: 1'b1    , // 旧世代カード: CMD8 に illegal command
+        i_cfg_ccs        : 1'b1    ,
+        i_cfg_never_ready: 1'b0    ,
+        i_cfg_no_token   : 1'b0    ,
+        i_cfg_corrupt_crc: 1'b0    ,
+        o_img_lba        : img_lba ,
+        o_img_off        : img_off ,
+        i_img_data       : img_data,
+    );
+
+    assign img_data = img_lba[7:0] + img_off[7:0];
+
+    initial {
+        dst.ready  = 0;
+        rst.assert();
+
+        for _w in 0..MaxWait {
+            if init_err != TfTypes::Error::none {
+                break;
+            }
+            clk.next(1);
+        }
+        $assert(init_err == TfTypes::Error::unsupported, "legacy cmd8: unsupported");
+        $assert(init_done == 1'b0, "legacy cmd8: init not done");
+        $assert(req_ready == 1'b0, "legacy cmd8: no ready");
+        $finish();
+    }
+}
+
+#[test(test_tf_ctrl_ccs0)]
+module test_tf_ctrl_ccs0 {
+    const MaxWait: u32 = 50_000;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    inst dst: stream_if;
+
+    var sclk: logic;
+    var mosi: logic;
+    var miso: logic;
+    var cs_n: logic;
+
+    var req_ready: logic         ;
+    var init_done: logic         ;
+    var init_err : TfTypes::Error;
+    var done     : logic         ;
+    var err      : TfTypes::Error;
+
+    var img_lba : logic<32>;
+    var img_off : logic<9> ;
+    var img_data: logic<8> ;
+
+    inst dut: TfCtrl #(
+        InitDivider: 8,
+    ) (
+        i_clk      : clk      ,
+        i_rst      : rst      ,
+        i_req_valid: 1'b0     ,
+        i_req_lba  : 32'd0    ,
+        o_req_ready: req_ready,
+        o_init_done: init_done,
+        o_init_err : init_err ,
+        o_done     : done     ,
+        o_err      : err      ,
+        data       : dst      ,
+        o_sclk     : sclk     ,
+        o_mosi     : mosi     ,
+        o_cs_n     : cs_n     ,
+        i_miso     : miso     ,
+    );
+
+    inst card: TfCardModel (
+        i_clk            : clk     ,
+        i_rst            : rst     ,
+        i_sclk           : sclk    ,
+        i_cs_n           : cs_n    ,
+        i_mosi           : mosi    ,
+        o_miso           : miso    ,
+        i_cfg_legacy_cmd8: 1'b0    ,
+        i_cfg_ccs        : 1'b0    , // CCS=0: バイトアドレッシング旧世代
+        i_cfg_never_ready: 1'b0    ,
+        i_cfg_no_token   : 1'b0    ,
+        i_cfg_corrupt_crc: 1'b0    ,
+        o_img_lba        : img_lba ,
+        o_img_off        : img_off ,
+        i_img_data       : img_data,
+    );
+
+    assign img_data = img_lba[7:0] + img_off[7:0];
+
+    initial {
+        dst.ready  = 0;
+        rst.assert();
+
+        for _w in 0..MaxWait {
+            if init_err != TfTypes::Error::none {
+                break;
+            }
+            clk.next(1);
+        }
+        $assert(init_err == TfTypes::Error::unsupported, "ccs0: unsupported");
+        $assert(init_done == 1'b0, "ccs0: init not done");
+        $finish();
+    }
+}
+
+#[test(test_tf_ctrl_acmd41_timeout)]
+module test_tf_ctrl_acmd41_timeout {
+    const MaxWait: u32 = 100_000;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    inst dst: stream_if;
+
+    var sclk: logic;
+    var mosi: logic;
+    var miso: logic;
+    var cs_n: logic;
+
+    var req_ready: logic         ;
+    var init_done: logic         ;
+    var init_err : TfTypes::Error;
+    var done     : logic         ;
+    var err      : TfTypes::Error;
+
+    var img_lba : logic<32>;
+    var img_off : logic<9> ;
+    var img_data: logic<8> ;
+
+    inst dut: TfCtrl #(
+        InitDivider   : 8,
+        Acmd41MaxPolls: 4, // テスト短縮 (実機は 3000)
+    ) (
+        i_clk      : clk      ,
+        i_rst      : rst      ,
+        i_req_valid: 1'b0     ,
+        i_req_lba  : 32'd0    ,
+        o_req_ready: req_ready,
+        o_init_done: init_done,
+        o_init_err : init_err ,
+        o_done     : done     ,
+        o_err      : err      ,
+        data       : dst      ,
+        o_sclk     : sclk     ,
+        o_mosi     : mosi     ,
+        o_cs_n     : cs_n     ,
+        i_miso     : miso     ,
+    );
+
+    inst card: TfCardModel (
+        i_clk            : clk     ,
+        i_rst            : rst     ,
+        i_sclk           : sclk    ,
+        i_cs_n           : cs_n    ,
+        i_mosi           : mosi    ,
+        o_miso           : miso    ,
+        i_cfg_legacy_cmd8: 1'b0    ,
+        i_cfg_ccs        : 1'b1    ,
+        i_cfg_never_ready: 1'b1    , // ACMD41 が idle のまま
+        i_cfg_no_token   : 1'b0    ,
+        i_cfg_corrupt_crc: 1'b0    ,
+        o_img_lba        : img_lba ,
+        o_img_off        : img_off ,
+        i_img_data       : img_data,
+    );
+
+    assign img_data = img_lba[7:0] + img_off[7:0];
+
+    initial {
+        dst.ready  = 0;
+        rst.assert();
+
+        for _w in 0..MaxWait {
+            if init_err != TfTypes::Error::none {
+                break;
+            }
+            clk.next(1);
+        }
+        $assert(init_err == TfTypes::Error::timeout, "acmd41: timeout");
+        $assert(init_done == 1'b0, "acmd41: init not done");
+        $finish();
+    }
+}
+
+#[test(test_tf_ctrl_token_timeout)]
+module test_tf_ctrl_token_timeout {
+    const MaxWait: u32 = 100_000;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    inst dst: stream_if;
+
+    var sclk: logic;
+    var mosi: logic;
+    var miso: logic;
+    var cs_n: logic;
+
+    var req_valid: logic         ;
+    var req_ready: logic         ;
+    var init_done: logic         ;
+    var init_err : TfTypes::Error;
+    var done     : logic         ;
+    var err      : TfTypes::Error;
+
+    var img_lba : logic<32>;
+    var img_off : logic<9> ;
+    var img_data: logic<8> ;
+
+    inst dut: TfCtrl #(
+        InitDivider  : 8 ,
+        TokenMaxBytes: 16, // テスト短縮 (実機は 262144)
+    ) (
+        i_clk      : clk      ,
+        i_rst      : rst      ,
+        i_req_valid: req_valid,
+        i_req_lba  : 32'd0    ,
+        o_req_ready: req_ready,
+        o_init_done: init_done,
+        o_init_err : init_err ,
+        o_done     : done     ,
+        o_err      : err      ,
+        data       : dst      ,
+        o_sclk     : sclk     ,
+        o_mosi     : mosi     ,
+        o_cs_n     : cs_n     ,
+        i_miso     : miso     ,
+    );
+
+    inst card: TfCardModel (
+        i_clk            : clk     ,
+        i_rst            : rst     ,
+        i_sclk           : sclk    ,
+        i_cs_n           : cs_n    ,
+        i_mosi           : mosi    ,
+        o_miso           : miso    ,
+        i_cfg_legacy_cmd8: 1'b0    ,
+        i_cfg_ccs        : 1'b1    ,
+        i_cfg_never_ready: 1'b0    ,
+        i_cfg_no_token   : 1'b1    , // データトークンを送らない
+        i_cfg_corrupt_crc: 1'b0    ,
+        o_img_lba        : img_lba ,
+        o_img_off        : img_off ,
+        i_img_data       : img_data,
+    );
+
+    assign img_data = img_lba[7:0] + img_off[7:0];
+
+    initial {
+        req_valid  = 0;
+        dst.ready  = 1;
+        rst.assert();
+
+        for _w in 0..MaxWait {
+            if init_done == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        $assert(init_done == 1'b1, "token: init done");
+
+        req_valid = 1;
+        clk.next (1);
+        req_valid = 0;
+
+        for _w in 0..MaxWait {
+            if done == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        $assert(done == 1'b1, "token: done");
+        $assert(err == TfTypes::Error::timeout, "token: timeout error");
+
+        // エラー後も次要求を受け付けられる (idle 復帰)
+        for _w in 0..MaxWait {
+            if req_ready == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        $assert(req_ready == 1'b1, "token: ready after error");
+        $finish();
+    }
+}
+
+#[test(test_tf_ctrl_crc_error)]
+module test_tf_ctrl_crc_error {
+    const MaxWait: u32 = 100_000;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    inst dst: stream_if;
+
+    var sclk: logic;
+    var mosi: logic;
+    var miso: logic;
+    var cs_n: logic;
+
+    var req_valid: logic         ;
+    var req_ready: logic         ;
+    var init_done: logic         ;
+    var init_err : TfTypes::Error;
+    var done     : logic         ;
+    var err      : TfTypes::Error;
+
+    var img_lba : logic<32>;
+    var img_off : logic<9> ;
+    var img_data: logic<8> ;
+
+    inst dut: TfCtrl #(
+        InitDivider: 8,
+    ) (
+        i_clk      : clk      ,
+        i_rst      : rst      ,
+        i_req_valid: req_valid,
+        i_req_lba  : 32'd7    ,
+        o_req_ready: req_ready,
+        o_init_done: init_done,
+        o_init_err : init_err ,
+        o_done     : done     ,
+        o_err      : err      ,
+        data       : dst      ,
+        o_sclk     : sclk     ,
+        o_mosi     : mosi     ,
+        o_cs_n     : cs_n     ,
+        i_miso     : miso     ,
+    );
+
+    inst card: TfCardModel (
+        i_clk            : clk     ,
+        i_rst            : rst     ,
+        i_sclk           : sclk    ,
+        i_cs_n           : cs_n    ,
+        i_mosi           : mosi    ,
+        o_miso           : miso    ,
+        i_cfg_legacy_cmd8: 1'b0    ,
+        i_cfg_ccs        : 1'b1    ,
+        i_cfg_never_ready: 1'b0    ,
+        i_cfg_no_token   : 1'b0    ,
+        i_cfg_corrupt_crc: 1'b1    , // CRC16 上位バイトを破壊
+        o_img_lba        : img_lba ,
+        o_img_off        : img_off ,
+        i_img_data       : img_data,
+    );
+
+    assign img_data = img_lba[7:0] + img_off[7:0];
+
+    var expb: logic<8>;
+
+    initial {
+        req_valid  = 0;
+        dst.ready  = 1;
+        rst.assert();
+
+        for _w in 0..MaxWait {
+            if init_done == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+
+        req_valid = 1;
+        clk.next (1);
+        req_valid = 0;
+
+        // データ 512 バイトはストリームされる (CRC 検査は完了報告で通知)
+        expb = 8'd7;
+        for _n in 0..512 {
+            for _w in 0..MaxWait {
+                if dst.valid == 1'b1 {
+                    break;
+                }
+                clk.next(1);
+            }
+            $assert_continue(dst.data == expb, "crc: data byte");
+            clk.next        (1);
+            expb             = expb + 1;
+        }
+
+        for _w in 0..MaxWait {
+            if done == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        $assert(done == 1'b1, "crc: done");
+        $assert(err == TfTypes::Error::crc, "crc: crc error");
+        $finish();
+    }
+}
