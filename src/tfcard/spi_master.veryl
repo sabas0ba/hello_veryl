@@ -1,0 +1,320 @@
+/// SPI マスタ (mode 0，バイト単位転送，MSB first)
+///
+/// TF カード用: SCK idle Low，立上りでサンプル，立下りでシフト．
+/// バイト転送は valid/ready で受け付け，受信バイトは o_valid の
+/// 1 サイクルパルスで確定する．CS# は上位 (シーケンサ) が管理する．
+/// 分周比は転送開始時の i_fast で選択する (初期化 337.5 kHz / データ 13.5 MHz，
+/// docs/tfcard.md「クロック・SCK」)．
+///
+/// ```wavedrom
+/// {signal: [
+///   {name: 'o_sclk', wave: '0.101010101010101.0.'},
+///   {name: 'o_mosi', wave: '1=.=.=.=.=.=.=.=..1.', data: ['b7','b6','b5','b4','b3','b2','b1','b0']},
+///   {name: 'i_miso', wave: 'x=.=.=.=.=.=.=.=.x..', data: ['b7','b6','b5','b4','b3','b2','b1','b0']}
+/// ]}
+/// ```
+pub module SpiMaster #(
+    /// 初期化クロック分周比 (SCK = i_clk / InitDivider)．2 以上の偶数
+    param InitDivider: u32 = 80,
+    /// データ転送クロック分周比．2 以上の偶数かつ InitDivider 以下
+    param FastDivider: u32 = 2,
+) (
+    i_clk: input clock, /// クロック (27 MHz)
+    i_rst: input reset, /// リセット
+
+    i_fast : input  logic   , /// 1 で FastDivider を選択 (転送開始時に参照)
+    i_valid: input  logic   , /// 送信バイト有効
+    i_data : input  logic<8>, /// 送信バイト
+    o_ready: output logic   , /// 送信バイト受付可能
+    o_valid: output logic   , /// 受信バイト確定 (1 サイクルパルス)
+    o_data : output logic<8>, /// 受信バイト
+
+    o_sclk: output logic, /// SPI SCK (idle Low)
+    o_mosi: output logic, /// SPI MOSI (idle High)
+    i_miso: input  logic, /// SPI MISO
+) {
+    const InitHalfM1: u32 = InitDivider / 2 - 1;
+    const FastHalfM1: u32 = FastDivider / 2 - 1;
+    const CntWidth  : u32 = $clog2(InitDivider / 2);
+
+    var busy    : logic          ;
+    var use_fast: logic          ;
+    var half_cnt: logic<CntWidth>;
+    var bit_cnt : logic<3>       ;
+    var sh_tx   : logic<8>       ;
+    var sh_rx   : logic<8>       ;
+
+    // 半周期長 (経過サイクル数 - 1)．転送開始時に確定した分周比を参照する
+    var half_m1: logic<CntWidth>;
+    assign half_m1 = if use_fast ? FastHalfM1 : InitHalfM1;
+
+    always_ff (i_clk, i_rst) {
+        if_reset {
+            busy     = 0;
+            use_fast = 0;
+            half_cnt = 0;
+            bit_cnt  = 0;
+            sh_tx    = '1;
+            sh_rx    = 0;
+            o_ready  = 0;
+            o_valid  = 0;
+            o_data   = 0;
+            o_sclk   = 0;
+            o_mosi   = 1;
+        } else {
+            o_valid = 0;
+            if !busy {
+                if !o_ready {
+                    o_ready = 1;
+                } else if i_valid {
+                    // バイト転送開始: MSB を提示して半周期後に立上り
+                    o_ready  = 0;
+                    busy     = 1;
+                    use_fast = i_fast;
+                    half_cnt = 0;
+                    bit_cnt  = 0;
+                    sh_tx    = i_data;
+                    o_mosi   = i_data[7];
+                }
+            } else {
+                if half_cnt <: half_m1 {
+                    half_cnt = half_cnt + 1;
+                } else {
+                    half_cnt = 0;
+                    if !o_sclk {
+                        // SCK 立上り: このエッジ時点の MISO をサンプル
+                        o_sclk = 1;
+                        sh_rx  = {sh_rx[6:0], i_miso};
+                    } else {
+                        // SCK 立下り: 次ビット提示，最終ビットなら完了
+                        o_sclk = 0;
+                        if bit_cnt == 3'd7 {
+                            busy    = 0;
+                            o_valid = 1;
+                            o_data  = sh_rx;
+                            o_mosi  = 1;
+                        } else {
+                            bit_cnt = bit_cnt + 1;
+                            sh_tx   = {sh_tx[6:0], 1'b0};
+                            o_mosi  = sh_tx[6];
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test(test_spi_master_init_clk)]
+module test_spi_master_init_clk {
+    const InitDivider: u32 = 80;
+    const MaxWait    : u32 = 400;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    var fast: logic   ;
+    var vld : logic   ;
+    var dat : logic<8>;
+    var rdy : logic   ;
+    var ovld: logic   ;
+    var odat: logic<8>;
+    var sclk: logic   ;
+    var mosi: logic   ;
+    var miso: logic   ;
+
+    inst dut: SpiMaster (
+        i_clk  : clk ,
+        i_rst  : rst ,
+        i_fast : fast,
+        i_valid: vld ,
+        i_data : dat ,
+        o_ready: rdy ,
+        o_valid: ovld,
+        o_data : odat,
+        o_sclk : sclk,
+        o_mosi : mosi,
+        i_miso : miso,
+    );
+
+    var txb   : logic<8>  [2];
+    var rxb   : logic<8>  [2];
+    var period: logic<16>    ;
+
+    initial {
+        txb[0] = 8'ha5;
+        rxb[0] = 8'h3c;
+        txb[1] = 8'h0f;
+        rxb[1] = 8'hf0;
+
+        fast       = 0;
+        vld        = 0;
+        dat        = 0;
+        miso       = 1;
+        period     = 0;
+        rst.assert();
+
+        // アイドル: SCK Low / MOSI High
+        clk.next(2);
+        $assert (sclk == 1'b0, "idle: sclk low");
+        $assert (mosi == 1'b1, "idle: mosi high");
+
+        for n in 0..2 {
+            dat = txb[n];
+            vld = 1;
+            for _w in 0..MaxWait {
+                if rdy == 1'b1 {
+                    break;
+                }
+                clk.next(1);
+            }
+            clk.next(1); // accept edge
+            vld      = 0;
+            $assert (rdy == 1'b0, "byte %0d: busy", n);
+
+            for i in 0..8 {
+                // SCK Low 区間: MISO 提示と MOSI (MSB first) 検査
+                miso    = rxb[n][7 - i];
+                $assert(sclk == 1'b0, "byte %0d bit %0d: sck low phase", n, i);
+                $assert(mosi == txb[n][7 - i], "byte %0d bit %0d: mosi", n, i);
+                if i == 1 {
+                    period = 0;
+                }
+                // 立上り待ち
+                for _w in 0..MaxWait {
+                    clk.next(1);
+                    period   = period + 1;
+                    if sclk == 1'b1 {
+                        break;
+                    }
+                }
+                // 立下り待ち
+                for _w in 0..MaxWait {
+                    clk.next(1);
+                    period   = period + 1;
+                    if sclk == 1'b0 {
+                        break;
+                    }
+                }
+                if i == 1 {
+                    // ビット周期 = 分周比 (立下り直後から次の立下り直後まで)
+                    $assert(period == InitDivider, "byte %0d: bit period %0d", n, period);
+                }
+            }
+
+            for _w in 0..MaxWait {
+                if ovld == 1'b1 {
+                    break;
+                }
+                clk.next(1);
+            }
+            $assert(ovld == 1'b1, "byte %0d: rx valid", n);
+            $assert(odat == rxb[n], "byte %0d: rx data %02x", n, odat);
+            $assert(mosi == 1'b1, "byte %0d: mosi back to idle", n);
+            $assert(sclk == 1'b0, "byte %0d: sclk back to idle", n);
+        }
+
+        $finish();
+    }
+}
+
+#[test(test_spi_master_fast_clk)]
+module test_spi_master_fast_clk {
+    const FastDivider: u32 = 2;
+    const MaxWait    : u32 = 400;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    var fast: logic   ;
+    var vld : logic   ;
+    var dat : logic<8>;
+    var rdy : logic   ;
+    var ovld: logic   ;
+    var odat: logic<8>;
+    var sclk: logic   ;
+    var mosi: logic   ;
+    var miso: logic   ;
+
+    inst dut: SpiMaster (
+        i_clk  : clk ,
+        i_rst  : rst ,
+        i_fast : fast,
+        i_valid: vld ,
+        i_data : dat ,
+        o_ready: rdy ,
+        o_valid: ovld,
+        o_data : odat,
+        o_sclk : sclk,
+        o_mosi : mosi,
+        i_miso : miso,
+    );
+
+    var txb   : logic<8>  [2];
+    var rxb   : logic<8>  [2];
+    var period: logic<16>    ;
+
+    initial {
+        txb[0] = 8'h81;
+        rxb[0] = 8'h7e;
+        txb[1] = 8'hff;
+        rxb[1] = 8'h00;
+
+        fast       = 1;
+        vld        = 0;
+        dat        = 0;
+        miso       = 1;
+        period     = 0;
+        rst.assert();
+
+        for n in 0..2 {
+            dat = txb[n];
+            vld = 1;
+            for _w in 0..MaxWait {
+                if rdy == 1'b1 {
+                    break;
+                }
+                clk.next(1);
+            }
+            clk.next(1); // accept edge
+            vld      = 0;
+
+            for i in 0..8 {
+                miso    = rxb[n][7 - i];
+                $assert(sclk == 1'b0, "byte %0d bit %0d: sck low phase", n, i);
+                $assert(mosi == txb[n][7 - i], "byte %0d bit %0d: mosi", n, i);
+                if i == 1 {
+                    period = 0;
+                }
+                for _w in 0..MaxWait {
+                    clk.next(1);
+                    period   = period + 1;
+                    if sclk == 1'b1 {
+                        break;
+                    }
+                }
+                for _w in 0..MaxWait {
+                    clk.next(1);
+                    period   = period + 1;
+                    if sclk == 1'b0 {
+                        break;
+                    }
+                }
+                if i == 1 {
+                    $assert(period == FastDivider, "byte %0d: bit period %0d", n, period);
+                }
+            }
+
+            for _w in 0..MaxWait {
+                if ovld == 1'b1 {
+                    break;
+                }
+                clk.next(1);
+            }
+            $assert(ovld == 1'b1, "byte %0d: rx valid", n);
+            $assert(odat == rxb[n], "byte %0d: rx data %02x", n, odat);
+        }
+
+        $finish();
+    }
+}
