@@ -1,8 +1,8 @@
 # RTL 設計
 
 本文書は現行デザイン（Lチカ・UART エコー・LCD テキストコンソール）の設計を記述する．
-PSRAM サブシステムの設計は [psram.md](psram.md)，検証方針は
-[verification.md](verification.md) を参照．
+PSRAM サブシステムの設計は [psram.md](psram.md)，TF カードサブシステムは
+[tfcard.md](tfcard.md)，検証方針は [verification.md](verification.md) を参照．
 
 ## クロック・リセット方針
 
@@ -19,6 +19,7 @@ flowchart LR
     PC["PC (COMポート)"] -- uart_rx --> RX["Uart RX"]
     RX -- "stream_if (echo)" --> TX["Uart TX"]
     TX -- uart_tx --> PC
+    TFS["TfSpikeInit<br>(TFカード spike)"] -- "結果1行" --> TX
     RX -. "傍受 (valid && ready)" .-> CON["TextConsole<br>100列x30行 / BSRAM"]
     FONT["FontRom 8x16<br>(font/ から生成)"] --> CON
     VT["VideoTiming<br>800x480 DEモード"] --> CON
@@ -45,6 +46,8 @@ LED 割当（すべて active-low）:
 | ActivityLed | src/common/activity_led.veryl | UART TX/RX ラインの Low を 100 ms 引き伸ばすインジケータ（leds[5:4]） |
 | PsramSpikeBitbang | src/psram/spike_bitbang.veryl | PSRAM ch0 レジスタ読み出し spike（[psram.md](psram.md)） |
 | PsramClkGen | src/psram/clkgen.veryl | rPLL による clk_mem 54 MHz 生成（[psram.md](psram.md)） |
+| SpiMaster | src/tfcard/spi_master.veryl | SPI mode 0 マスタ，分周切替（[tfcard.md](tfcard.md)） |
+| TfSpikeInit | src/tfcard/spike_init.veryl | TF カード初期化 + セクタ 0 リード spike（[tfcard.md](tfcard.md)） |
 | stream_if | src/common/stream.veryl | valid/ready ハンドシェイクの汎用 stream interface |
 | Uart | src/uart/uart.veryl | 115200bps 8N1．RX は 2FF 同期 + 中央サンプリング，ノンブロッキング供給 |
 | VideoTiming | src/video/timing.veryl | LCD タイミング生成（datasheet 導出の 27MHz 直結 59.1Hz，HTotal=890 x VTotal=513） |
@@ -80,6 +83,8 @@ python .\scripts\gen_font_rom.py
 | lcd_r[4:0] | 75,74,73,72,71 | RGB565 |
 | lcd_g[5:0] | 70,69,68,57,56,55 | |
 | lcd_b[4:0] | 54,53,51,42,41 | |
+| tf_sclk / tf_mosi | 36 / 37 | TF カードスロット（SPI モード，[tfcard.md](tfcard.md)） |
+| tf_cs_n / tf_miso | 38 / 39 | 全ピン PULL_MODE=UP |
 
 ## References（ボード・デバイス）
 

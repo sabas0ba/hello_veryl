@@ -1,0 +1,206 @@
+// TfSpikeInit の L1 テスト (docs/tfcard.md「L1: 自作ビヘイビアモデルとテスト」)
+// TfCardModel を正常系設定 (CCS=1) で接続し，初期化完走 + セクタ 0 リードの
+// 報告行が期待値と一致することを検証する．
+
+#[test(test_tf_spike_init)]
+module test_tf_spike_init {
+    const MsgLen : u32 = 78;
+    const MaxWait: u32 = 200_000;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    inst msg_st: stream_if;
+
+    var sclk: logic;
+    var mosi: logic;
+    var miso: logic;
+    var cs_n: logic;
+
+    var img_lba : logic<32>;
+    var img_off : logic<9> ;
+    var img_data: logic<8> ;
+
+    inst dut: TfSpikeInit #(
+        Acmd41MaxPolls: 8 , // テスト短縮 (実機は 3000)
+        TokenMaxBytes : 64,
+    ) (
+        i_clk : clk   ,
+        i_rst : rst   ,
+        o_sclk: sclk  ,
+        o_mosi: mosi  ,
+        o_cs_n: cs_n  ,
+        i_miso: miso  ,
+        msg   : msg_st,
+    );
+
+    inst card: TfCardModel #(
+        NcrBytes     : 1,
+        Acmd41Polls  : 2,
+        DataWaitBytes: 2,
+    ) (
+        i_clk            : clk     ,
+        i_rst            : rst     ,
+        i_sclk           : sclk    ,
+        i_cs_n           : cs_n    ,
+        i_mosi           : mosi    ,
+        o_miso           : miso    ,
+        i_cfg_legacy_cmd8: 1'b0    ,
+        i_cfg_ccs        : 1'b1    ,
+        i_cfg_never_ready: 1'b0    ,
+        i_cfg_no_token   : 1'b0    ,
+        i_cfg_corrupt_crc: 1'b0    ,
+        o_img_lba        : img_lba ,
+        o_img_off        : img_off ,
+        i_img_data       : img_data,
+    );
+
+    // セクタ 0 のみ非ゼロの疎なディスクイメージ:
+    // 先頭 16 バイト = 10h..1Fh，MBR 署名 = 55AAh
+    function ImgByte (
+        lba: input logic<32>,
+        off: input logic<9> ,
+    ) -> logic<8> {
+        return if lba != 32'd0 ?
+            8'h00
+        : if off <: 9'd16 ?
+            {4'h1, off[3:0]}
+        : if off == 9'd510 ?
+            8'h55
+        : if off == 9'd511 ?
+            8'haa
+        :
+            8'h00
+        ;
+    }
+    assign img_data = ImgByte(img_lba, img_off);
+
+    function HexChar (
+        n: input logic<4>,
+    ) -> logic<8> {
+        return if n <: 4'd10 ? 8'h30 + {4'b0000, n} : 8'h37 + {4'b0000, n};
+    }
+
+    var exp: logic<8> [78];
+    var got: logic<8> [78];
+
+    initial {
+        // "TF R1=01,01,00,00 OCR=C0FF8000 S0=101112131415161718191A1B1C1D1E1F SIG=K E=-\r\n"
+        exp[0]  = 8'h54; // 'T'
+        exp[1]  = 8'h46; // 'F'
+        exp[2]  = 8'h20;
+        exp[3]  = 8'h52; // 'R'
+        exp[4]  = 8'h31; // '1'
+        exp[5]  = 8'h3d; // '='
+        exp[6]  = 8'h30; // r1_0 = 01
+        exp[7]  = 8'h31;
+        exp[8]  = 8'h2c; // ','
+        exp[9]  = 8'h30; // r1_8 = 01
+        exp[10] = 8'h31;
+        exp[11] = 8'h2c;
+        exp[12] = 8'h30; // r1_41 = 00
+        exp[13] = 8'h30;
+        exp[14] = 8'h2c;
+        exp[15] = 8'h30; // r1_58 = 00
+        exp[16] = 8'h30;
+        exp[17] = 8'h20;
+        exp[18] = 8'h4f; // 'O'
+        exp[19] = 8'h43; // 'C'
+        exp[20] = 8'h52; // 'R'
+        exp[21] = 8'h3d;
+        exp[22] = 8'h43; // OCR = C0FF8000
+        exp[23] = 8'h30;
+        exp[24] = 8'h46;
+        exp[25] = 8'h46;
+        exp[26] = 8'h38;
+        exp[27] = 8'h30;
+        exp[28] = 8'h30;
+        exp[29] = 8'h30;
+        exp[30] = 8'h20;
+        exp[31] = 8'h53; // 'S'
+        exp[32] = 8'h30; // '0'
+        exp[33] = 8'h3d;
+        for k in 0..16 {
+            exp[34 + 2 * k] = 8'h31; // '1' (上位ニブル)
+            exp[35 + 2 * k] = HexChar(k[3:0]);
+        }
+        exp[66] = 8'h20;
+        exp[67] = 8'h53; // 'S'
+        exp[68] = 8'h49; // 'I'
+        exp[69] = 8'h47; // 'G'
+        exp[70] = 8'h3d;
+        exp[71] = 8'h4b; // 'K'
+        exp[72] = 8'h20;
+        exp[73] = 8'h45; // 'E'
+        exp[74] = 8'h3d;
+        exp[75] = 8'h2d; // '-'
+        exp[76] = 8'h0d;
+        exp[77] = 8'h0a;
+
+        msg_st.ready = 1;
+        rst.assert  ();
+
+        for n in 0..MsgLen {
+            for _w in 0..MaxWait {
+                if msg_st.valid == 1'b1 {
+                    break;
+                }
+                clk.next(1);
+            }
+            $assert_continue(msg_st.valid == 1'b1, "msg byte valid");
+            got[n]           = msg_st.data;
+            clk.next        (1); // handshake
+        }
+
+        for n in 0..6 {
+            $assert_continue(got[n] == exp[n], "field: header");
+        }
+        for n in 6..9 {
+            $assert_continue(got[n] == exp[n], "field: r1_0");
+        }
+        for n in 9..12 {
+            $assert_continue(got[n] == exp[n], "field: r1_8");
+        }
+        for n in 12..15 {
+            $assert_continue(got[n] == exp[n], "field: r1_41");
+        }
+        for n in 15..17 {
+            $assert_continue(got[n] == exp[n], "field: r1_58");
+        }
+        for n in 17..22 {
+            $assert_continue(got[n] == exp[n], "field: ocr label");
+        }
+        for n in 22..30 {
+            $assert_continue(got[n] == exp[n], "field: ocr");
+        }
+        for n in 30..34 {
+            $assert_continue(got[n] == exp[n], "field: s0 label");
+        }
+        for n in 34..66 {
+            $assert_continue(got[n] == exp[n], "field: s0");
+        }
+        for n in 66..71 {
+            $assert_continue(got[n] == exp[n], "field: sig label");
+        }
+        for n in 71..72 {
+            $assert_continue(got[n] == exp[n], "field: sig");
+        }
+        for n in 72..75 {
+            $assert_continue(got[n] == exp[n], "field: e label");
+        }
+        for n in 75..76 {
+            $assert_continue(got[n] == exp[n], "field: ecode");
+        }
+        for n in 76..78 {
+            $assert_continue(got[n] == exp[n], "field: crlf");
+        }
+        // フィールド分けの取りこぼし防止 (全域一致)
+        for n in 0..MsgLen {
+            $assert_continue(got[n] == exp[n], "msg byte mismatch");
+        }
+
+        clk.next(1);
+        $assert (msg_st.valid == 1'b0, "msg end");
+        $finish ();
+    }
+}

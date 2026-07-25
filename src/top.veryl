@@ -1,19 +1,23 @@
 /// トップモジュール (Tang Nano 9K)
 ///
-/// UART エコー + テキストコンソール (LCD) + PSRAM spike + LED 表示の統合．
+/// UART エコー + テキストコンソール (LCD) + PSRAM spike + TF カード spike +
+/// LED 表示の統合．
 ///
 /// ```mermaid
 /// flowchart LR
 ///     PC["PC (COMポート)"] -- uart_rx --> RX["Uart RX"]
 ///     RX -- "echo" --> ARB["TX arbiter<br>(spike優先)"]
 ///     SPIKE["PsramSpikeBitbang"] -- "結果1行" --> ARB
+///     TFS["TfSpikeInit"] -- "結果1行" --> ARB
 ///     ARB --> TX["Uart TX"] -- uart_tx --> PC
 ///     ARB -. "傍受" .-> CON["TextConsole"] --> LCD["5inch LCD"]
 ///     SPIKE <--> RAM["内蔵 PSRAM ch0"]
+///     TFS <--> TF["TF カード (SPI)"]
 ///     PLL["PsramClkGen<br>(rPLL 54MHz)"] --> LEDS["leds"]
 /// ```
 ///
-/// LED 割当は docs/rtl.md，PSRAM サブシステムは docs/psram.md を参照．
+/// LED 割当は docs/rtl.md，PSRAM サブシステムは docs/psram.md，
+/// TF カードサブシステムは docs/tfcard.md を参照．
 pub module Top #(
     /// オシレータ周波数 [Hz]
     param OscFreq: u32 = 27_000_000,
@@ -33,6 +37,11 @@ pub module Top #(
     lcd_r    : output logic<5>, /// LCD R (RGB565)
     lcd_g    : output logic<6>, /// LCD G (RGB565)
     lcd_b    : output logic<5>, /// LCD B (RGB565)
+    // TF カードスロット (SPI モード，docs/tfcard.md)
+    tf_sclk: output logic, /// TF SCK
+    tf_mosi: output logic, /// TF MOSI (CMD)
+    tf_cs_n: output logic, /// TF CS# (DAT3)
+    tf_miso: input  logic, /// TF MISO (DAT0)
     // PSRAM (GW1NR-9 内蔵)．ポート名をマジックポート名に一致させることで
     // nextpnr が cst なしで内蔵パッドへ自動配置する (docs/psram.md)
     O_psram_ck     : output logic    <2> , /// PSRAM CK (ch1:ch0)
@@ -114,12 +123,28 @@ pub module Top #(
         );
     }
 
-    // TX arbiter: spike メッセージ優先．spike はリセット直後のみ送出するため
-    // エコーとの競合は実用上起きない (競合時はエコー側が待たされる)
-    assign tx_stream.valid   = spike_msg.valid || echo_stream.valid;
-    assign tx_stream.data    = if spike_msg.valid ? spike_msg.data : echo_stream.data;
+    // TF カード spike: リセット毎に初期化 + セクタ 0 リードの結果 1 行を送出
+    inst tf_msg: stream_if;
+
+    inst tf_spike: TfSpikeInit (
+        i_clk          ,
+        i_rst          ,
+        o_sclk: tf_sclk,
+        o_mosi: tf_mosi,
+        o_cs_n: tf_cs_n,
+        i_miso: tf_miso,
+        msg   : tf_msg ,
+    );
+
+    // TX arbiter: spike メッセージ優先 (PSRAM > TF > エコー)．spike は
+    // リセット直後のみ送出するためエコーとの競合は実用上起きない
+    // (競合時は下位側が待たされる)．各 spike は行単位で valid を保持する
+    // ため行の混線は起きない
+    assign tx_stream.valid   = spike_msg.valid || tf_msg.valid || echo_stream.valid;
+    assign tx_stream.data    = if spike_msg.valid ? spike_msg.data : if tf_msg.valid ? tf_msg.data : echo_stream.data;
     assign spike_msg.ready   = tx_stream.ready;
-    assign echo_stream.ready = tx_stream.ready && !spike_msg.valid;
+    assign tf_msg.ready      = tx_stream.ready && !spike_msg.valid;
+    assign echo_stream.ready = tx_stream.ready && !spike_msg.valid && !tf_msg.valid;
 
     // LCD: UART TXへ流れるバイト列を傍受してテキスト表示 (白文字/黒背景)
     var vt_de    : logic    ;
