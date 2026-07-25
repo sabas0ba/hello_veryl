@@ -1,0 +1,73 @@
+// TfCrc の既知ベクタテスト (docs/tfcard.md「L1: 自作ビヘイビアモデルとテスト」)
+//
+// CRC 実装はコントローラとビヘイビアモデルで共有しているため，両者の照合
+// (L1 テスト) では CRC 実装自体の誤りを検出できない (共通モード誤り)．
+// 本テストは実装と独立に知られている検査値で共有実装を固定する:
+//
+// - CMD0 (40 00 00 00 00) の CRC7 バイト = 95h (仕様書の例として著名)
+// - CMD8 (48 00 00 01 AA) の CRC7 バイト = 87h (同上)
+// - CMD17 addr=0 (51 00 00 00 00) の CRC7 バイト = 55h
+// - CRC16-CCITT (XModem，初期値 0) の標準検査値 "123456789" → 31C3h
+// - オール FF の 512 バイトブロック → 7FA1h (SD 系でよく知られた値)
+
+#[test(test_tf_crc)]
+module test_tf_crc {
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    var c7 : logic<7> ;
+    var c16: logic<16>;
+
+    var msg: logic<8> [9];
+
+    initial {
+        rst.assert();
+
+        // ---- CRC7: CMD0 ----
+        c7 = TfCrc::Crc7Byte(7'd0, 8'h40);
+        for _i in 0..4 {
+            c7 = TfCrc::Crc7Byte(c7, 8'h00);
+        }
+        $assert({c7, 1'b1} == 8'h95, "crc7 cmd0");
+
+        // ---- CRC7: CMD8 (arg = 000001AAh) ----
+        c7      = TfCrc::Crc7Byte(7'd0, 8'h48);
+        c7      = TfCrc::Crc7Byte(c7, 8'h00);
+        c7      = TfCrc::Crc7Byte(c7, 8'h00);
+        c7      = TfCrc::Crc7Byte(c7, 8'h01);
+        c7      = TfCrc::Crc7Byte(c7, 8'haa);
+        $assert({c7, 1'b1} == 8'h87, "crc7 cmd8");
+
+        // ---- CRC7: CMD17 (addr = 0) ----
+        c7 = TfCrc::Crc7Byte(7'd0, 8'h51);
+        for _i in 0..4 {
+            c7 = TfCrc::Crc7Byte(c7, 8'h00);
+        }
+        $assert({c7, 1'b1} == 8'h55, "crc7 cmd17");
+
+        // ---- CRC16: 標準検査値 "123456789" ----
+        msg[0] = 8'h31;
+        msg[1] = 8'h32;
+        msg[2] = 8'h33;
+        msg[3] = 8'h34;
+        msg[4] = 8'h35;
+        msg[5] = 8'h36;
+        msg[6] = 8'h37;
+        msg[7] = 8'h38;
+        msg[8] = 8'h39;
+        c16    = 0;
+        for i in 0..9 {
+            c16 = TfCrc::Crc16Byte(c16, msg[i]);
+        }
+        $assert(c16 == 16'h31c3, "crc16 check value");
+
+        // ---- CRC16: オール FF の 512 バイトブロック ----
+        c16 = 0;
+        for _i in 0..512 {
+            c16 = TfCrc::Crc16Byte(c16, 8'hff);
+        }
+        $assert(c16 == 16'h7fa1, "crc16 ff block");
+
+        $finish();
+    }
+}
