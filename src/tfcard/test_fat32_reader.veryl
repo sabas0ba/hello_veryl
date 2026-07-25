@@ -1,0 +1,618 @@
+// Fat32Reader の L1 テスト (docs/tfcard.md「L1: 自作ビヘイビアモデルとテスト」)
+// TfCtrl + TfCardModel + 生成ディスクイメージ (scripts/gen_tf_test_image.py) で
+// マウント・8.3 名照合・LFN/ラベル/削除済み/サブディレクトリのスキップ・
+// 断片化クラスタチェーン追跡・オフセット/長さ窓・エラー系を検証する．
+
+#[test(test_fat32_reader_main)]
+module test_fat32_reader_main {
+    const MaxWait: u32 = 400_000;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    inst blk_st: stream_if; // TfCtrl -> Fat32Reader
+    inst f_st  : stream_if; // Fat32Reader -> テストベンチ
+
+    var sclk: logic;
+    var mosi: logic;
+    var miso: logic;
+    var cs_n: logic;
+
+    var blk_req_valid: logic             ;
+    var blk_req_lba  : logic         <32>;
+    var blk_req_ready: logic             ;
+    var tf_init_done : logic             ;
+    var tf_init_err  : TfTypes::Error    ;
+    var blk_done     : logic             ;
+    var blk_err      : TfTypes::Error    ;
+
+    var req_valid : logic               ;
+    var req_name  : logic           <88>;
+    var req_offset: logic           <32>;
+    var req_len   : logic           <32>;
+    var req_ready : logic               ;
+    var f_done    : logic               ;
+    var f_err     : TfTypes::FsError    ;
+    var f_size    : logic           <32>;
+
+    var img_lba : logic<32>;
+    var img_off : logic<9> ;
+    var img_data: logic<8> ;
+
+    inst ctrl: TfCtrl #(
+        InitDivider: 8, // テスト短縮 (実機は 80 = 337.5 kHz)
+    ) (
+        i_clk      : clk          ,
+        i_rst      : rst          ,
+        i_req_valid: blk_req_valid,
+        i_req_lba  : blk_req_lba  ,
+        o_req_ready: blk_req_ready,
+        o_init_done: tf_init_done ,
+        o_init_err : tf_init_err  ,
+        o_done     : blk_done     ,
+        o_err      : blk_err      ,
+        data       : blk_st       ,
+        o_sclk     : sclk         ,
+        o_mosi     : mosi         ,
+        o_cs_n     : cs_n         ,
+        i_miso     : miso         ,
+    );
+
+    inst card: TfCardModel (
+        i_clk            : clk     ,
+        i_rst            : rst     ,
+        i_sclk           : sclk    ,
+        i_cs_n           : cs_n    ,
+        i_mosi           : mosi    ,
+        o_miso           : miso    ,
+        i_cfg_legacy_cmd8: 1'b0    ,
+        i_cfg_ccs        : 1'b1    ,
+        i_cfg_never_ready: 1'b0    ,
+        i_cfg_no_token   : 1'b0    ,
+        i_cfg_corrupt_crc: 1'b0    ,
+        o_img_lba        : img_lba ,
+        o_img_off        : img_off ,
+        i_img_data       : img_data,
+    );
+
+    assign img_data = TfTestImg::Byte(img_lba, img_off);
+
+    inst dut: Fat32Reader (
+        i_clk       : clk          ,
+        i_rst       : rst          ,
+        i_req_valid : req_valid    ,
+        i_req_name  : req_name     ,
+        i_req_offset: req_offset   ,
+        i_req_len   : req_len      ,
+        o_req_ready : req_ready    ,
+        o_done      : f_done       ,
+        o_err       : f_err        ,
+        o_file_size : f_size       ,
+        data        : f_st         ,
+        o_blk_valid : blk_req_valid,
+        o_blk_lba   : blk_req_lba  ,
+        i_blk_ready : blk_req_ready,
+        i_blk_done  : blk_done     ,
+        i_blk_err   : blk_err      ,
+        blk         : blk_st       ,
+    );
+
+    var hello: logic<8>  [23];
+    var expb : logic<8>      ;
+    var nrecv: logic<16>     ;
+
+    initial {
+        // "Hello, Veryl TF card!\r\n"
+        hello[0]  = 8'h48;
+        hello[1]  = 8'h65;
+        hello[2]  = 8'h6c;
+        hello[3]  = 8'h6c;
+        hello[4]  = 8'h6f;
+        hello[5]  = 8'h2c;
+        hello[6]  = 8'h20;
+        hello[7]  = 8'h56;
+        hello[8]  = 8'h65;
+        hello[9]  = 8'h72;
+        hello[10] = 8'h79;
+        hello[11] = 8'h6c;
+        hello[12] = 8'h20;
+        hello[13] = 8'h54;
+        hello[14] = 8'h46;
+        hello[15] = 8'h20;
+        hello[16] = 8'h63;
+        hello[17] = 8'h61;
+        hello[18] = 8'h72;
+        hello[19] = 8'h64;
+        hello[20] = 8'h21;
+        hello[21] = 8'h0d;
+        hello[22] = 8'h0a;
+
+        req_valid  = 0;
+        req_name   = 0;
+        req_offset = 0;
+        req_len    = 0;
+        f_st.ready = 1;
+        rst.assert();
+
+        for _w in 0..MaxWait {
+            if req_ready == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+
+        // ---- (1) HELLO.TXT 全読み: マウント + 8.3 名照合 + 小ファイル ----
+        req_name   = {8'h48, 8'h45, 8'h4c, 8'h4c, 8'h4f, 8'h20, 8'h20, 8'h20, 8'h54, 8'h58, 8'h54}; // "HELLO   TXT"
+        req_offset = 0;
+        req_len    = 32'hffff_ffff;
+        req_valid  = 1;
+        clk.next  (1);
+        req_valid  = 0;
+
+        for n in 0..23 {
+            for _w in 0..MaxWait {
+                if f_st.valid == 1'b1 {
+                    break;
+                }
+                clk.next(1);
+            }
+            $assert_continue(f_st.valid == 1'b1, "hello: data valid");
+            $assert_continue(f_st.data == hello[n], "hello: data byte");
+            clk.next        (1); // handshake
+        }
+        for _w in 0..MaxWait {
+            if f_done == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        $assert (f_done == 1'b1, "hello: done");
+        $assert (f_err == TfTypes::FsError::none, "hello: no error");
+        $assert (f_size == 32'd23, "hello: file size");
+        clk.next(1);
+        $assert (f_st.valid == 1'b0, "hello: no extra bytes");
+
+        // ---- (2) README.TXT 全読み: 断片化チェーン 3 -> 5 -> 4 の追跡 ----
+        for _w in 0..MaxWait {
+            if req_ready == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        req_name  = {8'h52, 8'h45, 8'h41, 8'h44, 8'h4d, 8'h45, 8'h20, 8'h20, 8'h54, 8'h58, 8'h54}; // "README  TXT"
+        req_valid = 1;
+        clk.next (1);
+        req_valid = 0;
+
+        expb  = 8'd7; // 内容 = (i*31+7) mod 256
+        nrecv = 0;
+        for _n in 0..2348 {
+            for _w in 0..MaxWait {
+                if f_st.valid == 1'b1 {
+                    break;
+                }
+                clk.next(1);
+            }
+            $assert_continue(f_st.data == expb, "readme: data byte");
+            clk.next        (1); // handshake
+            expb             = expb + 8'd31;
+            nrecv            = nrecv + 1;
+        }
+        for _w in 0..MaxWait {
+            if f_done == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        $assert(f_done == 1'b1, "readme: done");
+        $assert(f_err == TfTypes::FsError::none, "readme: no error");
+        $assert(f_size == 32'd2348, "readme: file size");
+        $assert(nrecv == 16'd2348, "readme: byte count");
+
+        // ---- (3) README.TXT offset=1500 len=300: 窓の切り出し ----
+        for _w in 0..MaxWait {
+            if req_ready == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        req_offset = 32'd1500;
+        req_len    = 32'd300;
+        req_valid  = 1;
+        clk.next  (1);
+        req_valid  = 0;
+
+        expb = 8'hab; // (1500*31+7) mod 256 = 171
+        for _n in 0..300 {
+            for _w in 0..MaxWait {
+                if f_st.valid == 1'b1 {
+                    break;
+                }
+                clk.next(1);
+            }
+            $assert_continue(f_st.data == expb, "window: data byte");
+            clk.next        (1);
+            expb             = expb + 8'd31;
+        }
+        for _w in 0..MaxWait {
+            if f_done == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        $assert (f_done == 1'b1, "window: done");
+        $assert (f_err == TfTypes::FsError::none, "window: no error");
+        clk.next(1);
+        $assert (f_st.valid == 1'b0, "window: no extra bytes");
+
+        // ---- (4) ワイルドカード "????????TXT": 最初の TXT (README) に一致 ----
+        for _w in 0..MaxWait {
+            if req_ready == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        req_name   = {8'h3f, 8'h3f, 8'h3f, 8'h3f, 8'h3f, 8'h3f, 8'h3f, 8'h3f, 8'h54, 8'h58, 8'h54};
+        req_offset = 0;
+        req_len    = 32'd1;
+        req_valid  = 1;
+        clk.next  (1);
+        req_valid  = 0;
+
+        for _w in 0..MaxWait {
+            if f_st.valid == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        $assert (f_st.data == 8'd7, "wildcard: first byte of README");
+        clk.next(1);
+        for _w in 0..MaxWait {
+            if f_done == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        $assert(f_done == 1'b1, "wildcard: done");
+        $assert(f_size == 32'd2348, "wildcard: README size");
+
+        // ---- (5) ファイルサイズ超のオフセット: 0 バイトで正常完了 ----
+        for _w in 0..MaxWait {
+            if req_ready == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        req_name   = {8'h52, 8'h45, 8'h41, 8'h44, 8'h4d, 8'h45, 8'h20, 8'h20, 8'h54, 8'h58, 8'h54};
+        req_offset = 32'd5000;
+        req_len    = 32'd10;
+        req_valid  = 1;
+        clk.next  (1);
+        req_valid  = 0;
+
+        for _w in 0..MaxWait {
+            if f_done == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        $assert(f_done == 1'b1, "eof: done");
+        $assert(f_err == TfTypes::FsError::none, "eof: no error");
+        $assert(f_st.valid == 1'b0, "eof: no bytes");
+
+        // ---- (6) 存在しない名前: not_found (終端 00h エントリで打ち切り) ----
+        for _w in 0..MaxWait {
+            if req_ready == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        req_name   = {8'h4e, 8'h4f, 8'h50, 8'h45, 8'h20, 8'h20, 8'h20, 8'h20, 8'h54, 8'h58, 8'h54}; // "NOPE    TXT"
+        req_offset = 0;
+        req_len    = 32'd1;
+        req_valid  = 1;
+        clk.next  (1);
+        req_valid  = 0;
+
+        for _w in 0..MaxWait {
+            if f_done == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        $assert(f_done == 1'b1, "notfound: done");
+        $assert(f_err == TfTypes::FsError::not_found, "notfound: error kind");
+        $finish();
+    }
+}
+
+#[test(test_fat32_reader_superfloppy)]
+module test_fat32_reader_superfloppy {
+    const MaxWait: u32 = 400_000;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    inst blk_st: stream_if;
+    inst f_st  : stream_if;
+
+    var sclk: logic;
+    var mosi: logic;
+    var miso: logic;
+    var cs_n: logic;
+
+    var blk_req_valid: logic             ;
+    var blk_req_lba  : logic         <32>;
+    var blk_req_ready: logic             ;
+    var tf_init_done : logic             ;
+    var tf_init_err  : TfTypes::Error    ;
+    var blk_done     : logic             ;
+    var blk_err      : TfTypes::Error    ;
+
+    var req_valid : logic               ;
+    var req_name  : logic           <88>;
+    var req_offset: logic           <32>;
+    var req_len   : logic           <32>;
+    var req_ready : logic               ;
+    var f_done    : logic               ;
+    var f_err     : TfTypes::FsError    ;
+    var f_size    : logic           <32>;
+
+    var img_lba : logic<32>;
+    var img_off : logic<9> ;
+    var img_data: logic<8> ;
+
+    inst ctrl: TfCtrl #(
+        InitDivider: 8,
+    ) (
+        i_clk      : clk          ,
+        i_rst      : rst          ,
+        i_req_valid: blk_req_valid,
+        i_req_lba  : blk_req_lba  ,
+        o_req_ready: blk_req_ready,
+        o_init_done: tf_init_done ,
+        o_init_err : tf_init_err  ,
+        o_done     : blk_done     ,
+        o_err      : blk_err      ,
+        data       : blk_st       ,
+        o_sclk     : sclk         ,
+        o_mosi     : mosi         ,
+        o_cs_n     : cs_n         ,
+        i_miso     : miso         ,
+    );
+
+    inst card: TfCardModel (
+        i_clk            : clk     ,
+        i_rst            : rst     ,
+        i_sclk           : sclk    ,
+        i_cs_n           : cs_n    ,
+        i_mosi           : mosi    ,
+        o_miso           : miso    ,
+        i_cfg_legacy_cmd8: 1'b0    ,
+        i_cfg_ccs        : 1'b1    ,
+        i_cfg_never_ready: 1'b0    ,
+        i_cfg_no_token   : 1'b0    ,
+        i_cfg_corrupt_crc: 1'b0    ,
+        o_img_lba        : img_lba ,
+        o_img_off        : img_off ,
+        i_img_data       : img_data,
+    );
+
+    // スーパーフロッピー形式 (MBR なし，セクタ 0 が BPB)
+    assign img_data = TfTestImg::SfByte(img_lba, img_off);
+
+    inst dut: Fat32Reader (
+        i_clk       : clk          ,
+        i_rst       : rst          ,
+        i_req_valid : req_valid    ,
+        i_req_name  : req_name     ,
+        i_req_offset: req_offset   ,
+        i_req_len   : req_len      ,
+        o_req_ready : req_ready    ,
+        o_done      : f_done       ,
+        o_err       : f_err        ,
+        o_file_size : f_size       ,
+        data        : f_st         ,
+        o_blk_valid : blk_req_valid,
+        o_blk_lba   : blk_req_lba  ,
+        i_blk_ready : blk_req_ready,
+        i_blk_done  : blk_done     ,
+        i_blk_err   : blk_err      ,
+        blk         : blk_st       ,
+    );
+
+    var hello: logic<8> [23];
+
+    initial {
+        // "Hello, Veryl TF card!\r\n"
+        hello[0]  = 8'h48;
+        hello[1]  = 8'h65;
+        hello[2]  = 8'h6c;
+        hello[3]  = 8'h6c;
+        hello[4]  = 8'h6f;
+        hello[5]  = 8'h2c;
+        hello[6]  = 8'h20;
+        hello[7]  = 8'h56;
+        hello[8]  = 8'h65;
+        hello[9]  = 8'h72;
+        hello[10] = 8'h79;
+        hello[11] = 8'h6c;
+        hello[12] = 8'h20;
+        hello[13] = 8'h54;
+        hello[14] = 8'h46;
+        hello[15] = 8'h20;
+        hello[16] = 8'h63;
+        hello[17] = 8'h61;
+        hello[18] = 8'h72;
+        hello[19] = 8'h64;
+        hello[20] = 8'h21;
+        hello[21] = 8'h0d;
+        hello[22] = 8'h0a;
+
+        req_valid  = 0;
+        req_name   = 0;
+        req_offset = 0;
+        req_len    = 0;
+        f_st.ready = 1;
+        rst.assert();
+
+        for _w in 0..MaxWait {
+            if req_ready == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+
+        req_name  = {8'h48, 8'h45, 8'h4c, 8'h4c, 8'h4f, 8'h20, 8'h20, 8'h20, 8'h54, 8'h58, 8'h54}; // "HELLO   TXT"
+        req_len   = 32'hffff_ffff;
+        req_valid = 1;
+        clk.next (1);
+        req_valid = 0;
+
+        for n in 0..23 {
+            for _w in 0..MaxWait {
+                if f_st.valid == 1'b1 {
+                    break;
+                }
+                clk.next(1);
+            }
+            $assert_continue(f_st.data == hello[n], "sf hello: data byte");
+            clk.next        (1);
+        }
+        for _w in 0..MaxWait {
+            if f_done == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        $assert(f_done == 1'b1, "sf hello: done");
+        $assert(f_err == TfTypes::FsError::none, "sf hello: no error");
+        $assert(f_size == 32'd23, "sf hello: file size");
+        $finish();
+    }
+}
+
+#[test(test_fat32_reader_no_fs)]
+module test_fat32_reader_no_fs {
+    const MaxWait: u32 = 400_000;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    inst blk_st: stream_if;
+    inst f_st  : stream_if;
+
+    var sclk: logic;
+    var mosi: logic;
+    var miso: logic;
+    var cs_n: logic;
+
+    var blk_req_valid: logic             ;
+    var blk_req_lba  : logic         <32>;
+    var blk_req_ready: logic             ;
+    var tf_init_done : logic             ;
+    var tf_init_err  : TfTypes::Error    ;
+    var blk_done     : logic             ;
+    var blk_err      : TfTypes::Error    ;
+
+    var req_valid : logic               ;
+    var req_name  : logic           <88>;
+    var req_offset: logic           <32>;
+    var req_len   : logic           <32>;
+    var req_ready : logic               ;
+    var f_done    : logic               ;
+    var f_err     : TfTypes::FsError    ;
+    var f_size    : logic           <32>;
+
+    var img_lba : logic<32>;
+    var img_off : logic<9> ;
+    var img_data: logic<8> ;
+
+    inst ctrl: TfCtrl #(
+        InitDivider: 8,
+    ) (
+        i_clk      : clk          ,
+        i_rst      : rst          ,
+        i_req_valid: blk_req_valid,
+        i_req_lba  : blk_req_lba  ,
+        o_req_ready: blk_req_ready,
+        o_init_done: tf_init_done ,
+        o_init_err : tf_init_err  ,
+        o_done     : blk_done     ,
+        o_err      : blk_err      ,
+        data       : blk_st       ,
+        o_sclk     : sclk         ,
+        o_mosi     : mosi         ,
+        o_cs_n     : cs_n         ,
+        i_miso     : miso         ,
+    );
+
+    inst card: TfCardModel (
+        i_clk            : clk     ,
+        i_rst            : rst     ,
+        i_sclk           : sclk    ,
+        i_cs_n           : cs_n    ,
+        i_mosi           : mosi    ,
+        o_miso           : miso    ,
+        i_cfg_legacy_cmd8: 1'b0    ,
+        i_cfg_ccs        : 1'b1    ,
+        i_cfg_never_ready: 1'b0    ,
+        i_cfg_no_token   : 1'b0    ,
+        i_cfg_corrupt_crc: 1'b0    ,
+        o_img_lba        : img_lba ,
+        o_img_off        : img_off ,
+        i_img_data       : img_data,
+    );
+
+    // 全ゼロのカード: MBR 署名なし → no_fs
+    assign img_data = 8'h00;
+
+    inst dut: Fat32Reader (
+        i_clk       : clk          ,
+        i_rst       : rst          ,
+        i_req_valid : req_valid    ,
+        i_req_name  : req_name     ,
+        i_req_offset: req_offset   ,
+        i_req_len   : req_len      ,
+        o_req_ready : req_ready    ,
+        o_done      : f_done       ,
+        o_err       : f_err        ,
+        o_file_size : f_size       ,
+        data        : f_st         ,
+        o_blk_valid : blk_req_valid,
+        o_blk_lba   : blk_req_lba  ,
+        i_blk_ready : blk_req_ready,
+        i_blk_done  : blk_done     ,
+        i_blk_err   : blk_err      ,
+        blk         : blk_st       ,
+    );
+
+    initial {
+        req_valid  = 0;
+        req_name   = {8'h3f, 8'h3f, 8'h3f, 8'h3f, 8'h3f, 8'h3f, 8'h3f, 8'h3f, 8'h3f, 8'h3f, 8'h3f};
+        req_offset = 0;
+        req_len    = 32'd1;
+        f_st.ready = 1;
+        rst.assert();
+
+        for _w in 0..MaxWait {
+            if req_ready == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        req_valid = 1;
+        clk.next (1);
+        req_valid = 0;
+
+        for _w in 0..MaxWait {
+            if f_done == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        $assert(f_done == 1'b1, "no_fs: done");
+        $assert(f_err == TfTypes::FsError::no_fs, "no_fs: error kind");
+        $finish();
+    }
+}

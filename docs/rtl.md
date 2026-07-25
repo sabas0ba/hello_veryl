@@ -48,6 +48,8 @@ LED 割当（すべて active-low）:
 | PsramClkGen | src/psram/clkgen.veryl | rPLL による clk_mem 54 MHz 生成（[psram.md](psram.md)） |
 | SpiMaster | src/tfcard/spi_master.veryl | SPI mode 0 マスタ，分周切替（[tfcard.md](tfcard.md)） |
 | TfSpikeInit | src/tfcard/spike_init.veryl | TF カード初期化 + セクタ 0 リード spike（[tfcard.md](tfcard.md)） |
+| TfCtrl | src/tfcard/tf_ctrl.veryl | TF カードブロックリードコントローラ v1（[tfcard.md](tfcard.md)） |
+| Fat32Reader | src/tfcard/fat32_reader.veryl | FAT32 リーダ v2（8.3 名照合・チェーン追跡，[tfcard.md](tfcard.md)） |
 | stream_if | src/common/stream.veryl | valid/ready ハンドシェイクの汎用 stream interface |
 | Uart | src/uart/uart.veryl | 115200bps 8N1．RX は 2FF 同期 + 中央サンプリング，ノンブロッキング供給 |
 | VideoTiming | src/video/timing.veryl | LCD タイミング生成（datasheet 導出の 27MHz 直結 59.1Hz，HTotal=890 x VTotal=513） |
