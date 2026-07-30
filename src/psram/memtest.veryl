@@ -5,8 +5,10 @@
 /// 誤りもデータ不一致として検出する．結果は ASCII 1 行の stream として送出:
 ///
 /// ```text
-/// PSRAM INIT=1 MEMTEST=PASS ERR=0000
+/// PSRAM INIT=1 MEMTEST=PASS ERR=0000 K=00000 RD=00000000
 /// ```
+///
+/// K/RD は最初の不一致の語番号と読み値 (診断用．PASS 時は 0)
 ///
 /// 初期化状態 (i_init_done/ok) は clk_mem ドメインの準静的フラグを
 /// 2FF 同期して参照する．
@@ -24,7 +26,7 @@ pub module PsramMemtest #(
 
     msg: modport stream_if::source, /// 結果メッセージ (リセット毎に 1 行)
 ) {
-    const MsgLen: u32 = 36;
+    const MsgLen: u32 = 56;
 
     // 準静的フラグの 2FF 同期 (立ち上がり後は変化しない)
     var init_done_sync: logic<2>;
@@ -61,6 +63,8 @@ pub module PsramMemtest #(
     var k       : logic<20>;
     var err_cnt : logic<16>;
     var send_idx: logic<6> ;
+    var first_k : logic<20>; // 最初の不一致の語番号
+    var first_rd: logic<32>; // 最初の不一致の読み値
 
     let pass: logic = err_cnt == 0;
 
@@ -73,7 +77,7 @@ pub module PsramMemtest #(
     assign m_axi.arprot.non_secure         = 0;
     assign m_axi.arprot.privileged         = 0;
 
-    // "PSRAM INIT=x MEMTEST=XXXX ERR=xxxx\r\n"
+    // "PSRAM INIT=x MEMTEST=XXXX ERR=xxxx K=xxxxx RD=xxxxxxxx\r\n"
     assign msg.data = case send_idx {
         0      : 8'h50, // 'P'
         1      : 8'h53, // 'S'
@@ -109,8 +113,28 @@ pub module PsramMemtest #(
         31     : psram_pkg::HexChar(err_cnt[11:8]),
         32     : psram_pkg::HexChar(err_cnt[7:4]),
         33     : psram_pkg::HexChar(err_cnt[3:0]),
-        34     : 8'h0d, // CR
-        35     : 8'h0a, // LF
+        34     : 8'h20,
+        35     : 8'h4b, // 'K'
+        36     : 8'h3d, // '='
+        37     : psram_pkg::HexChar({3'b000, first_k[19:16]}),
+        38     : psram_pkg::HexChar(first_k[15:12]),
+        39     : psram_pkg::HexChar(first_k[11:8]),
+        40     : psram_pkg::HexChar(first_k[7:4]),
+        41     : psram_pkg::HexChar(first_k[3:0]),
+        42     : 8'h20,
+        43     : 8'h52, // 'R'
+        44     : 8'h44, // 'D'
+        45     : 8'h3d, // '='
+        46     : psram_pkg::HexChar(first_rd[31:28]),
+        47     : psram_pkg::HexChar(first_rd[27:24]),
+        48     : psram_pkg::HexChar(first_rd[23:20]),
+        49     : psram_pkg::HexChar(first_rd[19:16]),
+        50     : psram_pkg::HexChar(first_rd[15:12]),
+        51     : psram_pkg::HexChar(first_rd[11:8]),
+        52     : psram_pkg::HexChar(first_rd[7:4]),
+        53     : psram_pkg::HexChar(first_rd[3:0]),
+        54     : 8'h0d, // CR
+        55     : 8'h0a, // LF
         default: 8'h00,
     };
 
@@ -120,6 +144,8 @@ pub module PsramMemtest #(
             k             = 0;
             err_cnt       = 0;
             send_idx      = 0;
+            first_k       = 0;
+            first_rd      = 0;
             msg.valid     = 0;
             m_axi.awvalid = 0;
             m_axi.awaddr  = 0;
@@ -181,6 +207,10 @@ pub module PsramMemtest #(
             if m_axi.rvalid {
                 m_axi.rready = 0;
                 if m_axi.rdata != Pattern(k) {
+                    if err_cnt == 0 {
+                        first_k  = k;
+                        first_rd = m_axi.rdata;
+                    }
                     err_cnt = err_cnt + 1;
                 }
                 if k == Words - 1 {
