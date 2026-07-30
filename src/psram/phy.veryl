@@ -56,27 +56,39 @@ pub module PsramPhy (
     var rwds_b_q : 'mem logic   ;
     var rwds_oe_q: 'mem logic   ;
 
+    // OE (ODDR TX 入力) のみ追加で 1 段遅延させる．apicula の ODDR 実装は
+    // TX→Q1(OEN) 経路の FF 段数がデータ (D0/D1→Q0) 経路より 1 段少なく，
+    // そのままではパッドの OEN イベントがデータより 1 サイクル先行して
+    // 最終バイトが High-Z で失われる (bit-bang 実機測定で K=1 を確定，
+    // docs/psram.md 実験(x)〜(x3))．外部 FF 1 段で段数を再均衡させる
+    var dq_oe_q2  : 'mem logic;
+    var rwds_oe_q2: 'mem logic;
+
     always_ff (i_clk, i_rst) {
         if_reset {
-            ck_en_q   = 0;
-            cs_n_q    = 1;
-            reset_n_q = 0;
-            dq_a_q    = 0;
-            dq_b_q    = 0;
-            dq_oe_q   = 0;
-            rwds_a_q  = 0;
-            rwds_b_q  = 0;
-            rwds_oe_q = 0;
+            ck_en_q    = 0;
+            cs_n_q     = 1;
+            reset_n_q  = 0;
+            dq_a_q     = 0;
+            dq_b_q     = 0;
+            dq_oe_q    = 0;
+            rwds_a_q   = 0;
+            rwds_b_q   = 0;
+            rwds_oe_q  = 0;
+            dq_oe_q2   = 0;
+            rwds_oe_q2 = 0;
         } else {
-            ck_en_q   = i_ck_en;
-            cs_n_q    = i_cs_n;
-            reset_n_q = i_reset_n;
-            dq_a_q    = i_dq_a;
-            dq_b_q    = i_dq_b;
-            dq_oe_q   = i_dq_oe;
-            rwds_a_q  = i_rwds_a;
-            rwds_b_q  = i_rwds_b;
-            rwds_oe_q = i_rwds_oe;
+            ck_en_q    = i_ck_en;
+            cs_n_q     = i_cs_n;
+            reset_n_q  = i_reset_n;
+            dq_a_q     = i_dq_a;
+            dq_b_q     = i_dq_b;
+            dq_oe_q    = i_dq_oe;
+            rwds_a_q   = i_rwds_a;
+            rwds_b_q   = i_rwds_b;
+            rwds_oe_q  = i_rwds_oe;
+            dq_oe_q2   = dq_oe_q;
+            rwds_oe_q2 = rwds_oe_q;
         }
     }
 
@@ -123,7 +135,7 @@ pub module PsramPhy (
     var dq_t: 'mem logic<8>;
     var dq_i: 'mem logic<8>;
 
-    let dq_oen: 'mem logic = ~dq_oe_q; // OEN=1 で High-Z (UG289)
+    let dq_oen: 'mem logic = ~dq_oe_q2; // OEN=1 で High-Z (UG289)．q2 は段数再均衡 (上記)
 
     for i in 0..8 :g_dq {
         inst u_oddr: $sv::ODDR (
@@ -153,7 +165,7 @@ pub module PsramPhy (
     var rwds_t: 'mem logic;
     var rwds_i: 'mem logic;
 
-    let rwds_oen: 'mem logic = ~rwds_oe_q;
+    let rwds_oen: 'mem logic = ~rwds_oe_q2;
 
     inst u_rwds_oddr: $sv::ODDR (
         CLK: i_clk   ,
