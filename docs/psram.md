@@ -428,6 +428,13 @@ PSRAM INIT=1 MEMTEST=PASS ERR=0000
   （HyperRamRegReadModel を 4 位相 CK へオーバーサンプル接続し，
   初期化シーケンスと CA の A/B 位相割当を検証）を追加
 
+**54 MHz 化（2026-07-31）**: PSRAM サブシステム（phy/ctrl・ブリッジ mem 側）を
+i_clk（27 MHz）から clk_mem（rPLL 54 MHz）駆動へ変更し **CK 13.5 MHz**（帯域
+2 倍）で実機 memtest 全通過を確認した．ブリッジ内 CdcHandshake の実クロック
+交差（27↔54 MHz）もこの構成で実機検証された．`TimeoutCyc=24`（74 ns/CK で
+1.8 µs < tCSM）．STA は clk_mem Fmax 106 MHz > 54 MHz（nextpnr --freq 27 の
+一律評価だが実測 Fmax で確認）
+
 #### apicula ODDR 実挙動の調査（実験 w 系，2026-07-30）
 
 DDR phy 復帰に向け，IOLOGIC の bitstream 実挙動を fuse 解析と
@@ -494,6 +501,25 @@ CK パルス:                 ^1    ^2    ^3   （データより約 2.5 サイ�
 3. バースト末尾の D1 欠落は OE/データ保持の 2 サイクル延長で回避する
 4. 並行して upstream（apicula）へ ODDR 実挙動の報告を検討する
    （本節の測定データを添付可能）
+
+**遅延補償 DDR phy の試行（実験 w10 系，2026-07-31，未解決のため保留）**:
+
+上記方針の補償（D1=byte A(1 段)/D0=byte B(2 段) の再マップ，ck_en 遅延，
+CS#/RESET# ファブリック化，OE 閉端延長）を実装し 27 MHz で試行した．
+
+- ループバック再測定（w10d）: **再マップは意図どおり機能**し，ペア (A,B) が
+  同一サイクルの正しい半サイクル（A=立上り側/B=立下り側）に整列，CK ゲートの
+  立上り 90° が byte A スロット中央に一致することを確認．CK マークは
+  データより 1 サイクル先行（→ ck_en_q5 が整列解）
+- しかし memtest は ck_en_q3/q4/q5（CS#/OE も整合させて）いずれも
+  INIT=0/RD=FFFFFFFF（RAM 全無応答）．ループバック上の整列と実 RAM の
+  受信の間に未特定の不一致が残る（候補: 実 CK パッド（OBUF）とプローブ
+  経路（IOBUF+IDDR）の遅延差，CS# とデータの相対など未測定の自由度）
+- 時間対効果から DDR は保留とし，**SDR phy の clk_mem 54 MHz 駆動
+  （CK 13.5 MHz，帯域 2 倍）へ切替**して実機 PASS を確認した
+  （「SDR fallback phy と実機 PASS」節の 54 MHz 化）．
+  再開時は本節の測定ハーネス（w9d/w10d 方式）で CS#・CK 実パッドを含む
+  全信号の同時観測から始めるのが良い
 
 ### spike 段2 実機結果（2026-07-22）
 
