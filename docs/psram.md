@@ -428,6 +428,73 @@ PSRAM INIT=1 MEMTEST=PASS ERR=0000
   （HyperRamRegReadModel を 4 位相 CK へオーバーサンプル接続し，
   初期化シーケンスと CA の A/B 位相割当を検証）を追加
 
+#### apicula ODDR 実挙動の調査（実験 w 系，2026-07-30）
+
+DDR phy 復帰に向け，IOLOGIC の bitstream 実挙動を fuse 解析と
+チップ内ループバック（一時デバッグモジュール，UART 報告）で調査した．
+ログは build/psram_probe/（gitignore 領域），一時 RTL は判定後に削除済み．
+
+**静的解析（w1）**:
+
+- gowin_unpack で SIP パッド版/通常ピン版の bitstream を復元比較．
+  ODDR 13 個は両者で復元されるが IDDR は両者とも 0 個
+  → unpack の IOLOGIC 復号が `OUTMODE` 優先の elif 構造のため，
+  **同一パッドに ODDR+IDDR が同居すると IDDR が表示されない**（表示上の問題）
+- gowin_pack の計装で IDDR も INMODE=IDDRX1 ほかの fuse を出力していること，
+  ODDR+IDDR 同居時の個別 OR エンコードが属性和集合での一括計算と一致する
+  ことを確認（pack のモード fuse は正常）
+- PLL の PHASE/DUTY fuse も表どおり（unpack の PSDA_SEL="0111" 復元は
+  PHASE=4..7 が高位ビット fuse を共有することによる復号縮退で，
+  bitstream は設計値 PHASE=4 = +90° を保持）
+
+**ループバック実証（w2 系，DQ パッド上，RAM は RESET#=0/CS#=1 で非活性）**:
+
+| 実験 | 構成 | 結果 |
+| --- | --- | --- |
+| w2 | ODDR+IDDR 同一パッド / IDDR 単体 / ODDR 単体（27 MHz osc） | 全経路動作 |
+| w2b | 同上，IOLOGIC クロックを rPLL CLKOUT 54 MHz へ | 全経路動作 |
+| w2c | さらに CLKOUTP 駆動 ODDR クロック転送を追加（2 クロック混在） | 全経路動作 |
+| w9 | DQ 全 8 bit 静的パターン（A5/5A） | 全 bit 正常（半サイクル入替枠で取得） |
+
+**DDR phy 実機スイープ（すべて INIT=0/ERR=0400 で FAIL）**:
+54 MHz + OE 再均衡（w3）／27 MHz 半速（w4）／PSDA=0000／
+CK をファブリック LUT ゲート化（w6）／OE 補正 K=2, K=-1（w7）
+
+**転回点（w8）**: 出力専用パッド（CK/CK#/CS#/RESET#）をファブリック駆動へ
+変更し DQ/RWDS のみ IOLOGIC とした構成で **INIT=1** を初達成．ただし
+memtest は全滅し，診断追加（memtest の K/RD 報告）で
+`K=00000 RD=005F005F` = **全メモリリードが IR0 の値を返す**ことを観測．
+
+**根本原因（w9d/w9e，CK ゲート出力を RWDS パッド経由で同一フレーム観測）**:
+
+```
+DQ 半サイクル列:  Z Z Z Z 00 00 00 00 11 22 33 44 55 66 77 88 99 99 99 99 Z
+CK パルス:                 ^1    ^2    ^3   （データより約 2.5 サイクル先行）
+```
+
+- **apicula ODDR のデータ/OE 経路はファブリック基準で約 2.5 サイクル遅延**
+  （文書仕様の 1 サイクルと乖離）．CK 経路（ファブリック / CLKOUTP 直系）が
+  先行するため，RAM は CA 窓を先取りし先頭バイトが High-Z（FF）となる．
+  FF は CA47:46:45=111（レジスタ空間リニアリード）と解釈され，全アクセスが
+  IR0 リード化する — INIT=1（偶然成立）・RD=005F005F・書き込み消失・
+  ERR=0400 のすべてを説明する
+- 定常状態の直列化順序は正しい（11,22,...,99）が，D0 は立下り半サイクル・
+  D1 は次の立上り半サイクルに現れる（半サイクルずれた枠）
+- バースト末尾で最後の D1 バイトが欠落し最終 D0 が 4 半サイクル反復される
+  （TX 遷移が入力サンプリングを先に停止する挙動とみられる）
+- 旧実験 (a)(b)(e)(h1) はすべて OE 未修正状態での実施で交絡していた．
+  また「K=1」の OE 段数補正は CA 送出には有効（w8 で CA 成立）
+
+**帰結と DDR 復帰の方針**:
+
+1. 出力専用制御パッド（CK/CK#/CS#/RESET#）はファブリック駆動とする
+   （w8 実証済み．CK は CLKOUTP の LUT ゲートでグリッチフリーに生成可能）
+2. DQ/RWDS の ODDR は実測遅延（約 2.5 サイクル・半サイクル枠）を前提に
+   ck_en を +2 サイクル遅延・PSDA を再選定して補償する（要実機スイープ）
+3. バースト末尾の D1 欠落は OE/データ保持の 2 サイクル延長で回避する
+4. 並行して upstream（apicula）へ ODDR 実挙動の報告を検討する
+   （本節の測定データを添付可能）
+
 ### spike 段2 実機結果（2026-07-22）
 
 - leds[1]（clk_mem 54 MHz 換算 1 Hz）が leds[0]（27 MHz 基準 1 Hz）と同周期で
@@ -487,4 +554,4 @@ PSRAM INIT=1 MEMTEST=PASS ERR=0000
 | sby の同梱確認 | pin 済み OSS CAD Suite 2026-07-20 での同梱未確認 | **解決（2026-07-22）**: sby と SMT ソルバ群の同梱を確認（[verification.md](verification.md)） |
 | 内蔵ダイの仕様差 | W955D8MBYA 相当は非公式情報 | IR0 の実機読み出しで確認し，本文書に結果を記録 |
 | CR0 デフォルト値 | 電源投入時のレイテンシ初期値に依存した初期化順序 | **解決（2026-07-22）**: POR デフォルトは固定 2x・6 クロック（8F1Fh）．CR0 書き込み前でもレイテンシは決定的（「プロトコル仕様」節） |
-| apicula IOLOGIC bitstream | DDR phy（ODDR/IDDR）が実機で不動作．SDR fallback（CK 6.75 MHz）は PASS のため IOLOGIC の bitstream 実挙動にほぼ確定 | apicula 実例調査（gowin_unpack fuse 比較・upstream examples 突合）の後に DDR phy 復帰と帯域回復を検討 |
+| apicula ODDR 実挙動 | データ/OE 経路が約 2.5 サイクル遅延し CK 経路と乖離（**根本原因特定済み 2026-07-30**，「apicula ODDR 実挙動の調査」節） | 制御パッドのファブリック化 + ck_en 遅延補償で DDR 復帰可能な見込み（要実機スイープ）．upstream への報告を検討 |
