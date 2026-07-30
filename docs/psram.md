@@ -211,6 +211,10 @@ CR0[3]=1 を維持する（CR0 書き込み値 8FEFh）．
 FSM 側の SDR インタフェース（1 サイクル = 1 CK，A=立上り側 / B=立下り側）を
 DDR パッド信号へ変換する．
 
+**注（2026-07-30）**: L4 切り分けの結果（「SDR fallback phy と実機 PASS」節），
+現行 Top は本 DDR phy ではなく `PsramPhySdr`（後述）を使用する．本 DDR phy は
+apicula IOLOGIC の実例調査後の復帰候補としてソースと verif 検査を残置している．
+
 - Gowin プリミティブ ODDR / IDDR / IOBUF を `$sv::` 名前空間で明示
   インスタンス化する（blackbox スタブ `src/gowin_prims.sv`，UG289 準拠）
 - **全出力パッド（CK/CK#/CS#/RESET#/DQ/RWDS）を ODDR 経由**とし，出力
@@ -372,10 +376,57 @@ PSRAM IR0=005F IR1=000F CR0=8F1F L=0B W=1
     bitstream 実挙動**．gowin_pack は IOLOGIC の INIT 属性を未処理として
     スキップしており（`XXX IOLOGIC` メッセージ，値はデフォルト 0 のため
     それ自体は無害の可能性），apicula の GW1N-9C IOLOGIC 対応の実績確認が必要
-  - 次の判定実験（未実施）: ODDR/IDDR を使わない half-rate SDR fallback phy
-    （CK 27 MHz をファブリック生成，spike 方式の一般化）．これが動けば
+  - 次の判定実験: ODDR/IDDR を使わない SDR fallback phy
+    （CK をファブリック生成，spike 方式の一般化）．これが動けば
     「ロジック正・IOLOGIC bitstream 化が原因」とほぼ確定し，apicula の
     実例調査（gowin_unpack での fuse 比較・upstream examples 突合）へ進む
+    → **実施済み（下記，実機 PASS）**
+- **追加の切り分け実験（2026-07-24 深夜〜2026-07-30）**:
+  - (x)〜(x3) OE 段数測定: bit-bang 比較測定で ODDR の TX→Q1(OEN) 経路の
+    FF 段数がデータ (D0/D1→Q0) 経路より **1 段少ない（K=1）ことを実機確定**．
+    OEN イベントがデータより 1 サイクル先行し最終バイトが High-Z で失われる
+    ため，phy 側に OE 専用の追加 1 段（dq_oe_q2 / rwds_oe_q2）を入れて
+    再均衡する（恒久修正として phy.veryl へ採用済み）．ただしこの修正
+    単独では INIT=0/ERR=0400 は解消しなかった
+  - (y) clk_mem 27 MHz（半速）ビルド / (z1) D0/D1 半サイクル入替仮説ビルド:
+    セッション中断により実機結果は未記録（変更は撤去済み．(z1) は実験 (b)
+    で単独原因としては棄却済みの仮説の再検証だった）
+  - (z2) CLKOUTP 生死判定（2026-07-30 実施）: CLKOUTP でトグル FF を駆動し
+    27 MHz 側で 2FF 同期・エッジ計数する一時デバッグ構成（パッド・IOLOGIC
+    不使用）で `PLLP N=FE6B`（65536 サイクル窓中 65131 遷移 ≈ 毎サイクル
+    検出）→ **CLKOUTP は生存・トグル**．実験 (e) の棄却結果と整合し，
+    容疑は IOLOGIC bitstream 実挙動のまま
+
+#### SDR fallback phy と実機 PASS（2026-07-30）
+
+上記の判定実験を恒久実装として行い，実機で memtest 全通過を得た:
+
+```
+PSRAM INIT=1 MEMTEST=PASS ERR=0000
+```
+
+- 構成: `PsramPhySdr` / `PsramPhySdrCore`（src/psram/phy_sdr.veryl）．
+  ODDR/IDDR（IOLOGIC）を使わず，ファブリック FF と IOBUF のみで HyperBus を
+  駆動する．1 CK = i_clk（27 MHz）の 4 位相（CK 6.75 MHz）で，DQ/RWDS は
+  CK エッジに対し 90°（1 位相 = 37 ns）オフセットで駆動し，リードは CK
+  エッジの 1 位相後に平 FF で取り込む（spike 段 1 と同一の電気的条件の一般化．
+  FSM へは 1 SDR サイクル遅れで (A,B) ペアを提示 — ctrl のペア検出は遅延不変）
+- `PsramCtrl` へ位相イネーブル `i_en` を追加し 1/4 レートで歩調を合わせる
+  （「1 サイクル = 1 CK」の意味を保存．既存 L1 テストは i_en=1 で不変）．
+  全速 CdcHandshake との req/rsp 授受は `o_req_ready` / `o_rsp_valid` を
+  i_en で修飾して同期させる（非イネーブルサイクルでの取りこぼし・二重送信
+  防止．ctrl.veryl / top.veryl のコメント参照）
+- サブシステム全体を i_clk 単一ドメインへ変更（rPLL は LED 表示のみに残置）．
+  `TimeoutCyc=24` へ短縮（タイムアウト経路でも CS# Low ≤ 3.6 µs < tCSM 4 µs）
+- 実機結果: CR0 書き込み（IL=3）を含む初期化・IR0 自己診断・1024 語の
+  ライト/リード照合が全通過（帯域は DDR 54 MHz 比 1/16 の実験構成）
+- **L4 帰結**: コントローラ/ブリッジ/memtest/プロトコル解釈は実機で正しく，
+  DDR 版の失敗要因は **ODDR/IDDR/IOBUF(OEN=ODDR Q1) の bitstream 実挙動に
+  ほぼ確定**．DDR phy への復帰は apicula の実例調査（gowin_unpack での
+  fuse 比較・upstream examples 突合，IOLOGIC INIT 未処理の確認）の後に検討する
+- L1: パッドレベル統合テスト `test_psram_phy_sdr_init`
+  （HyperRamRegReadModel を 4 位相 CK へオーバーサンプル接続し，
+  初期化シーケンスと CA の A/B 位相割当を検証）を追加
 
 ### spike 段2 実機結果（2026-07-22）
 
@@ -424,6 +475,7 @@ PSRAM IR0=005F IR1=000F CR0=8F1F L=0B W=1
 | 5 | `test: add hyperram behavioral model and controller tests` | HyperRAM モデルとネイティブテスト |
 | 6 | `test: add formal properties for psram controller` | formal ハーネス（試験導入） |
 | 7 | `feat: add psram memtest` | 実機デモ（UART/LCD 報告） |
+| 8 | `feat: add sdr fallback phy` | IOLOGIC 切り分けの恒久実装．実機 memtest PASS 構成（「SDR fallback phy と実機 PASS」節） |
 
 ## 残課題・リスク
 
@@ -435,3 +487,4 @@ PSRAM IR0=005F IR1=000F CR0=8F1F L=0B W=1
 | sby の同梱確認 | pin 済み OSS CAD Suite 2026-07-20 での同梱未確認 | **解決（2026-07-22）**: sby と SMT ソルバ群の同梱を確認（[verification.md](verification.md)） |
 | 内蔵ダイの仕様差 | W955D8MBYA 相当は非公式情報 | IR0 の実機読み出しで確認し，本文書に結果を記録 |
 | CR0 デフォルト値 | 電源投入時のレイテンシ初期値に依存した初期化順序 | **解決（2026-07-22）**: POR デフォルトは固定 2x・6 クロック（8F1Fh）．CR0 書き込み前でもレイテンシは決定的（「プロトコル仕様」節） |
+| apicula IOLOGIC bitstream | DDR phy（ODDR/IDDR）が実機で不動作．SDR fallback（CK 6.75 MHz）は PASS のため IOLOGIC の bitstream 実挙動にほぼ確定 | apicula 実例調査（gowin_unpack fuse 比較・upstream examples 突合）の後に DDR phy 復帰と帯域回復を検討 |

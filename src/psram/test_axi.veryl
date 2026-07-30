@@ -58,6 +58,7 @@ module test_psram_axi {
     ) (
         i_clk      : clk      ,
         i_rst      : rst      ,
+        i_en       : 1'b1     ,
         i_req_valid: req_valid,
         o_req_ready: req_ready,
         i_req      : req      ,

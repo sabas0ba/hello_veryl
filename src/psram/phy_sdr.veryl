@@ -1,0 +1,226 @@
+/// PSRAM SDR fallback 物理層 (docs/psram.md「SDR fallback phy」)
+///
+/// IOLOGIC (ODDR/IDDR) を一切使わず，ファブリック FF のみで HyperBus を
+/// 駆動する低速 phy．L4 切り分け (IOLOGIC bitstream 実挙動の疑い) と
+/// 動作実績のあるビットバング方式 (spike 段 1，CK 6.75 MHz) の一般化を
+/// 兼ねる．PsramPhy と同一の FSM 側 SDR インタフェースを持ち，
+/// PsramCtrl (i_en 付き) をそのまま接続できる．
+///
+/// 1 SDR サイクル (= 1 CK) を i_clk の 4 位相で構成する (i_clk 27 MHz →
+/// CK 6.75 MHz)．FSM は o_en (位相 3) のサイクルのみ状態更新し，
+/// FSM 出力は位相 0..3 の間安定している:
+///
+/// - 位相 0→1 エッジ: CS#/RESET#/byte A/OE をパッド FF へロード
+/// - 位相 1→2 エッジ: CK 立上り (i_ck_en=1 のとき)．byte A に対し 90° 遅れ
+/// - 位相 2→3 エッジ: byte B をロード + リード byte A 取り込み + FSM への提示
+/// - 位相 3→0 エッジ: CK 立下り．byte B に対し 90° 遅れ
+///
+/// リード取り込みは CK エッジの 1 位相 (37 ns) 後に平 FF でサンプルする
+/// (RAM の tCKD 後で安定)．FSM へは 1 SDR サイクル遅れで (A, B) ペアを
+/// 提示する (PsramCtrl のペア検出は遅延不変)．
+///
+/// コア (PsramPhySdrCore, プリミティブなし・L1 テスト可) と IOBUF ラッパ
+/// (PsramPhySdr) に分割する．
+pub module PsramPhySdrCore (
+    i_clk: input clock,
+    i_rst: input reset,
+
+    o_en: output logic, /// FSM 状態更新イネーブル (位相 3 で 1)
+
+    // FSM 側 (SDR，PsramPhy と同一)
+    i_ck_en  : input  logic   , /// CK 駆動 (1 で 1 CK パルス)
+    i_cs_n   : input  logic   , /// CS#
+    i_reset_n: input  logic   , /// RESET#
+    i_dq_a   : input  logic<8>, /// DQ 送出 byte A (CK 立上り側)
+    i_dq_b   : input  logic<8>, /// DQ 送出 byte B (CK 立下り側)
+    i_dq_oe  : input  logic   , /// DQ 出力イネーブル
+    i_rwds_a : input  logic   , /// RWDS 送出 A (ライトマスク)
+    i_rwds_b : input  logic   , /// RWDS 送出 B
+    i_rwds_oe: input  logic   , /// RWDS 出力イネーブル
+    o_dq_a   : output logic<8>, /// DQ 取り込み (立上り)
+    o_dq_b   : output logic<8>, /// DQ 取り込み (立下り)
+    o_rwds_a : output logic   , /// RWDS 取り込み (立上り)
+    o_rwds_b : output logic   , /// RWDS 取り込み (立下り)
+
+    // パッド値 (IOBUF 手前の平信号)
+    o_ck     : output logic   ,
+    o_ck_n   : output logic   ,
+    o_cs_n   : output logic   ,
+    o_reset_n: output logic   ,
+    o_dq     : output logic<8>,
+    o_dq_oe  : output logic   ,
+    i_dq     : input  logic<8>,
+    o_rwds   : output logic   ,
+    o_rwds_oe: output logic   ,
+    i_rwds   : input  logic   ,
+) {
+    var ph: logic<2>; // 位相カウンタ (0..3)
+
+    always_ff (i_clk, i_rst) {
+        if_reset {
+            ph = 0;
+        } else {
+            ph = ph + 1;
+        }
+    }
+
+    assign o_en = ph == 3;
+
+    // 出力パッド FF (case の分岐 = そのエッジでロードされる値)
+    always_ff (i_clk, i_rst) {
+        if_reset {
+            o_ck      = 0;
+            o_ck_n    = 1;
+            o_cs_n    = 1;
+            o_reset_n = 0;
+            o_dq      = 0;
+            o_dq_oe   = 0;
+            o_rwds    = 0;
+            o_rwds_oe = 0;
+        } else {
+            case ph {
+                0: { // →位相 1: 制御と byte A を駆動
+                    o_cs_n    = i_cs_n;
+                    o_reset_n = i_reset_n;
+                    o_dq      = i_dq_a;
+                    o_dq_oe   = i_dq_oe;
+                    o_rwds    = i_rwds_a;
+                    o_rwds_oe = i_rwds_oe;
+                }
+                1: { // →位相 2: CK 立上り
+                    o_ck   = i_ck_en;
+                    o_ck_n = ~i_ck_en;
+                }
+                2: { // →位相 3: byte B を駆動
+                    o_dq   = i_dq_b;
+                    o_rwds = i_rwds_b;
+                }
+                3: { // →位相 0: CK 立下り (差動アイドルへ復帰)
+                    o_ck   = 0;
+                    o_ck_n = 1;
+                }
+            }
+        }
+    }
+
+    // リード取り込み: CK エッジの 1 位相後にサンプルし，位相 2→3 エッジで
+    // 1 SDR サイクル前の (A, B) ペアを FSM へ提示する (cap_dq_a は同エッジで
+    // 上書きされるが，ノンブロッキング代入のため提示側は旧値を読む)
+    var cap_dq_a  : logic<8>;
+    var cap_dq_b  : logic<8>;
+    var cap_rwds_a: logic   ;
+    var cap_rwds_b: logic   ;
+
+    always_ff (i_clk, i_rst) {
+        if_reset {
+            cap_dq_a   = 0;
+            cap_dq_b   = 0;
+            cap_rwds_a = 0;
+            cap_rwds_b = 0;
+            o_dq_a     = 0;
+            o_dq_b     = 0;
+            o_rwds_a   = 0;
+            o_rwds_b   = 0;
+        } else {
+            if ph == 2 { // →位相 3: 立上り側 (byte A) 取り込み + ペア提示
+                cap_dq_a   = i_dq;
+                cap_rwds_a = i_rwds;
+                o_dq_a     = cap_dq_a;
+                o_dq_b     = cap_dq_b;
+                o_rwds_a   = cap_rwds_a;
+                o_rwds_b   = cap_rwds_b;
+            }
+            if ph == 0 { // →位相 1: 立下り側 (byte B) 取り込み
+                cap_dq_b   = i_dq;
+                cap_rwds_b = i_rwds;
+            }
+        }
+    }
+}
+
+/// PsramPhySdrCore の IOBUF ラッパ (Top 統合用)
+pub module PsramPhySdr (
+    i_clk: input clock,
+    i_rst: input reset,
+
+    o_en: output logic, /// FSM 状態更新イネーブル
+
+    // FSM 側 (SDR，PsramPhy と同一)
+    i_ck_en  : input  logic   ,
+    i_cs_n   : input  logic   ,
+    i_reset_n: input  logic   ,
+    i_dq_a   : input  logic<8>,
+    i_dq_b   : input  logic<8>,
+    i_dq_oe  : input  logic   ,
+    i_rwds_a : input  logic   ,
+    i_rwds_b : input  logic   ,
+    i_rwds_oe: input  logic   ,
+    o_dq_a   : output logic<8>,
+    o_dq_b   : output logic<8>,
+    o_rwds_a : output logic   ,
+    o_rwds_b : output logic   ,
+
+    // パッド側 (ch0．Top でマジックポートへ接続する)
+    o_pad_ck     : output logic       ,
+    o_pad_ck_n   : output logic       ,
+    o_pad_cs_n   : output logic       ,
+    o_pad_reset_n: output logic       ,
+    io_pad_dq    : inout  tri logic<8>,
+    io_pad_rwds  : inout  tri logic   ,
+) {
+    var dq_o   : logic<8>;
+    var dq_oe  : logic   ;
+    var dq_i   : logic<8>;
+    var rwds_o : logic   ;
+    var rwds_oe: logic   ;
+    var rwds_i : logic   ;
+
+    inst u_core: PsramPhySdrCore (
+        i_clk                   ,
+        i_rst                   ,
+        o_en                    ,
+        i_ck_en                 ,
+        i_cs_n                  ,
+        i_reset_n               ,
+        i_dq_a                  ,
+        i_dq_b                  ,
+        i_dq_oe                 ,
+        i_rwds_a                ,
+        i_rwds_b                ,
+        i_rwds_oe               ,
+        o_dq_a                  ,
+        o_dq_b                  ,
+        o_rwds_a                ,
+        o_rwds_b                ,
+        o_ck     : o_pad_ck     ,
+        o_ck_n   : o_pad_ck_n   ,
+        o_cs_n   : o_pad_cs_n   ,
+        o_reset_n: o_pad_reset_n,
+        o_dq     : dq_o         ,
+        o_dq_oe  : dq_oe        ,
+        i_dq     : dq_i         ,
+        o_rwds   : rwds_o       ,
+        o_rwds_oe: rwds_oe      ,
+        i_rwds   : rwds_i       ,
+    );
+
+    // DQ x8 / RWDS: IOBUF のみ (OEN=1 で High-Z; UG289)
+    let dq_oen  : logic = ~dq_oe;
+    let rwds_oen: logic = ~rwds_oe;
+
+    for i in 0..8 :g_dq {
+        inst u_iobuf: $sv::IOBUF (
+            I  : dq_o[i]     ,
+            OEN: dq_oen      ,
+            IO : io_pad_dq[i],
+            O  : dq_i[i]     ,
+        );
+    }
+
+    inst u_rwds_iobuf: $sv::IOBUF (
+        I  : rwds_o     ,
+        OEN: rwds_oen   ,
+        IO : io_pad_rwds,
+        O  : rwds_i     ,
+    );
+}

@@ -35,6 +35,12 @@ pub module PsramCtrl #(
 ) (
     i_clk: input clock,
     i_rst: input reset,
+    /// 位相イネーブル．1 のサイクルのみ状態更新する (1 サイクル = 1 CK の関係を
+    /// 保ったまま SDR fallback phy の 1/4 レートで駆動するため．全速 phy では 1 固定)．
+    /// 注意: req/rsp を全速の相手 (CdcHandshake) と結ぶ場合，o_req_ready と
+    /// o_rsp_valid は i_en で修飾して渡すこと (非イネーブルサイクルでの
+    /// 取りこぼし・二重送信防止．Top の配線参照)
+    i_en: input logic,
 
     // 要求/応答 (単一アウトスタンディング．AXI 側とは async_handshake で結ぶ)
     i_req_valid: input  logic           ,
@@ -170,216 +176,218 @@ pub module PsramCtrl #(
             o_rwds_a      = 0;
             o_rwds_b      = 0;
             o_rwds_oe     = 0;
-        } else if state == State::reset_pulse {
-            if wait_cnt <: ResetPulseCycles - 1 {
-                wait_cnt = wait_cnt + 1;
-            } else {
-                o_reset_n = 1;
-                wait_cnt  = 0;
-                state     = State::tvcs_wait;
-            }
-        } else if state == State::tvcs_wait {
-            if wait_cnt <: TvcsCycles - 1 {
-                wait_cnt = wait_cnt + 1;
-            } else if WriteCr0 {
-                // 初期化: CR0 書き込みから開始
-                seq         = Seq::init_cr0;
-                txn_ca      = CaCr0Write;
-                txn_read    = 0;
-                txn_reg_wr  = 1;
-                txn_wdata   = Cr0Value;
-                txn_wmask_a = 0;
-                txn_wmask_b = 0;
-                state       = State::txn;
-                cyc         = 0;
-                o_cs_n      = 0;
-            } else {
-                // CR0 書き込みをスキップし IR0 自己診断へ (POR: 固定 2x, IL=6)
-                seq         = Seq::init_ir0;
-                txn_ca      = CaIr0Read;
-                txn_read    = 1;
-                txn_reg_wr  = 0;
-                det_done    = 0;
-                det_timeout = 0;
-                state       = State::txn;
-                cyc         = 0;
-                o_cs_n      = 0;
-            }
-        } else if state == State::txn {
-            cyc = cyc + 1;
-            // 既定値 (各サイクルで上書き)
-            o_ck_en   = 0;
-            o_dq_oe   = 0;
-            o_rwds_oe = 0;
+        } else if i_en {
+            if state == State::reset_pulse {
+                if wait_cnt <: ResetPulseCycles - 1 {
+                    wait_cnt = wait_cnt + 1;
+                } else {
+                    o_reset_n = 1;
+                    wait_cnt  = 0;
+                    state     = State::tvcs_wait;
+                }
+            } else if state == State::tvcs_wait {
+                if wait_cnt <: TvcsCycles - 1 {
+                    wait_cnt = wait_cnt + 1;
+                } else if WriteCr0 {
+                    // 初期化: CR0 書き込みから開始
+                    seq         = Seq::init_cr0;
+                    txn_ca      = CaCr0Write;
+                    txn_read    = 0;
+                    txn_reg_wr  = 1;
+                    txn_wdata   = Cr0Value;
+                    txn_wmask_a = 0;
+                    txn_wmask_b = 0;
+                    state       = State::txn;
+                    cyc         = 0;
+                    o_cs_n      = 0;
+                } else {
+                    // CR0 書き込みをスキップし IR0 自己診断へ (POR: 固定 2x, IL=6)
+                    seq         = Seq::init_ir0;
+                    txn_ca      = CaIr0Read;
+                    txn_read    = 1;
+                    txn_reg_wr  = 0;
+                    det_done    = 0;
+                    det_timeout = 0;
+                    state       = State::txn;
+                    cyc         = 0;
+                    o_cs_n      = 0;
+                }
+            } else if state == State::txn {
+                cyc = cyc + 1;
+                // 既定値 (各サイクルで上書き)
+                o_ck_en   = 0;
+                o_dq_oe   = 0;
+                o_rwds_oe = 0;
 
-            // cyc は旧値 = 「これから始まる wire サイクル - 1」．
-            // CA は wire サイクル 1..3 (旧値 0..2 のエッジで駆動)
-            if cyc <: CaStartCyc + 2 {
-                o_ck_en = 1;
-                o_dq_oe = 1;
-            }
-            o_dq_a = case cyc {
-                0      : txn_ca[47:40],
-                1      : txn_ca[31:24],
-                2      : txn_ca[15:8],
-                default: 8'h00,
-            };
-            o_dq_b = case cyc {
-                0      : txn_ca[39:32],
-                1      : txn_ca[23:16],
-                2      : txn_ca[7:0],
-                default: 8'h00,
-            };
-
-            if txn_reg_wr {
-                // ゼロレイテンシ書き込み: cyc4 でデータ 1 語
-                if cyc == RegWrDataCyc - 1 {
+                // cyc は旧値 = 「これから始まる wire サイクル - 1」．
+                // CA は wire サイクル 1..3 (旧値 0..2 のエッジで駆動)
+                if cyc <: CaStartCyc + 2 {
                     o_ck_en = 1;
                     o_dq_oe = 1;
-                    o_dq_a  = txn_wdata[15:8];
-                    o_dq_b  = txn_wdata[7:0];
-                } else if cyc == RegWrDataCyc {
-                    o_cs_n  = 1;
-                    state   = State::gap;
-                    gap_cnt = 0;
                 }
-            } else if !txn_read {
-                // メモリライト (固定 2x レイテンシ)
-                if cyc >: CaStartCyc + 1 && cyc <: WrDataCyc - 1 {
-                    o_ck_en = 1; // レイテンシクロック (wire 4..WrDataCyc-1)
-                }
-                if cyc == WrDataCyc - 1 {
-                    o_ck_en   = 1;
-                    o_dq_oe   = 1;
-                    o_dq_a    = txn_wdata[15:8];
-                    o_dq_b    = txn_wdata[7:0];
-                    o_rwds_oe = 1;
-                    o_rwds_a  = txn_wmask_a;
-                    o_rwds_b  = txn_wmask_b;
-                } else if cyc == WrDataCyc {
-                    o_cs_n  = 1;
-                    state   = State::gap;
-                    gap_cnt = 0;
-                }
-            } else {
-                // リード: RWDS 修飾のペア検出まで CK を回す
-                if !det_done {
-                    o_ck_en = 1;
-                }
-                if cyc >: DetectStartCyc - 1 && !det_done {
-                    if det_p_valid && det_p_rwds && !i_rwds_a {
-                        det_data = {det_p_dq, i_dq_a};
-                        det_done = 1;
-                    } else if i_rwds_a && !i_rwds_b {
-                        det_data = {i_dq_a, i_dq_b};
-                        det_done = 1;
-                    } else if cyc == TimeoutCyc {
-                        det_data    = '1;
-                        det_timeout = 1;
-                        det_done    = 1;
+                o_dq_a = case cyc {
+                    0      : txn_ca[47:40],
+                    1      : txn_ca[31:24],
+                    2      : txn_ca[15:8],
+                    default: 8'h00,
+                };
+                o_dq_b = case cyc {
+                    0      : txn_ca[39:32],
+                    1      : txn_ca[23:16],
+                    2      : txn_ca[7:0],
+                    default: 8'h00,
+                };
+
+                if txn_reg_wr {
+                    // ゼロレイテンシ書き込み: cyc4 でデータ 1 語
+                    if cyc == RegWrDataCyc - 1 {
+                        o_ck_en = 1;
+                        o_dq_oe = 1;
+                        o_dq_a  = txn_wdata[15:8];
+                        o_dq_b  = txn_wdata[7:0];
+                    } else if cyc == RegWrDataCyc {
+                        o_cs_n  = 1;
+                        state   = State::gap;
+                        gap_cnt = 0;
                     }
-                    det_p_rwds  = i_rwds_b;
-                    det_p_dq    = i_dq_b;
-                    det_p_valid = 1;
+                } else if !txn_read {
+                    // メモリライト (固定 2x レイテンシ)
+                    if cyc >: CaStartCyc + 1 && cyc <: WrDataCyc - 1 {
+                        o_ck_en = 1; // レイテンシクロック (wire 4..WrDataCyc-1)
+                    }
+                    if cyc == WrDataCyc - 1 {
+                        o_ck_en   = 1;
+                        o_dq_oe   = 1;
+                        o_dq_a    = txn_wdata[15:8];
+                        o_dq_b    = txn_wdata[7:0];
+                        o_rwds_oe = 1;
+                        o_rwds_a  = txn_wmask_a;
+                        o_rwds_b  = txn_wmask_b;
+                    } else if cyc == WrDataCyc {
+                        o_cs_n  = 1;
+                        state   = State::gap;
+                        gap_cnt = 0;
+                    }
+                } else {
+                    // リード: RWDS 修飾のペア検出まで CK を回す
+                    if !det_done {
+                        o_ck_en = 1;
+                    }
+                    if cyc >: DetectStartCyc - 1 && !det_done {
+                        if det_p_valid && det_p_rwds && !i_rwds_a {
+                            det_data = {det_p_dq, i_dq_a};
+                            det_done = 1;
+                        } else if i_rwds_a && !i_rwds_b {
+                            det_data = {i_dq_a, i_dq_b};
+                            det_done = 1;
+                        } else if cyc == TimeoutCyc {
+                            det_data    = '1;
+                            det_timeout = 1;
+                            det_done    = 1;
+                        }
+                        det_p_rwds  = i_rwds_b;
+                        det_p_dq    = i_dq_b;
+                        det_p_valid = 1;
+                    }
+                    if det_done {
+                        // 1 サイクル置いて CS# を上げる
+                        o_cs_n  = 1;
+                        state   = State::gap;
+                        gap_cnt = 0;
+                    }
                 }
-                if det_done {
-                    // 1 サイクル置いて CS# を上げる
-                    o_cs_n  = 1;
-                    state   = State::gap;
-                    gap_cnt = 0;
-                }
-            }
-        } else if state == State::gap {
-            // トランザクション間の CS# High (tRWR / tCSHI)
-            det_p_valid = 0;
-            det_p_rwds  = 0;
-            if gap_cnt <: GapCycles - 1 {
-                gap_cnt = gap_cnt + 1;
-            } else if seq == Seq::init_cr0 {
-                // 次: IR0 読み出し (自己診断)
-                seq         = Seq::init_ir0;
-                txn_ca      = CaIr0Read;
-                txn_read    = 1;
-                txn_reg_wr  = 0;
-                det_done    = 0;
-                det_timeout = 0;
-                state       = State::txn;
-                cyc         = 0;
-                o_cs_n      = 0;
-            } else if seq == Seq::init_ir0 {
-                o_init_ok   = det_data == Ir0Expected && !det_timeout;
-                o_init_done = 1;
-                o_req_ready = 1;
-                state       = State::idle;
-            } else if seq == Seq::op_h0 {
-                if txn_read {
-                    rdata_h0 = det_data;
-                }
-                if need_h1 {
-                    seq         = Seq::op_h1;
-                    txn_ca      = MemCa(cur_req.we, {cur_req.addr, 1'b1});
-                    txn_read    = ~cur_req.we;
+            } else if state == State::gap {
+                // トランザクション間の CS# High (tRWR / tCSHI)
+                det_p_valid = 0;
+                det_p_rwds  = 0;
+                if gap_cnt <: GapCycles - 1 {
+                    gap_cnt = gap_cnt + 1;
+                } else if seq == Seq::init_cr0 {
+                    // 次: IR0 読み出し (自己診断)
+                    seq         = Seq::init_ir0;
+                    txn_ca      = CaIr0Read;
+                    txn_read    = 1;
                     txn_reg_wr  = 0;
-                    txn_wdata   = cur_req.wdata[31:16];
-                    txn_wmask_a = ~cur_req.wstrb[3];
-                    txn_wmask_b = ~cur_req.wstrb[2];
                     det_done    = 0;
                     det_timeout = 0;
                     state       = State::txn;
                     cyc         = 0;
                     o_cs_n      = 0;
-                } else {
+                } else if seq == Seq::init_ir0 {
+                    o_init_ok   = det_data == Ir0Expected && !det_timeout;
+                    o_init_done = 1;
+                    o_req_ready = 1;
+                    state       = State::idle;
+                } else if seq == Seq::op_h0 {
+                    if txn_read {
+                        rdata_h0 = det_data;
+                    }
+                    if need_h1 {
+                        seq         = Seq::op_h1;
+                        txn_ca      = MemCa(cur_req.we, {cur_req.addr, 1'b1});
+                        txn_read    = ~cur_req.we;
+                        txn_reg_wr  = 0;
+                        txn_wdata   = cur_req.wdata[31:16];
+                        txn_wmask_a = ~cur_req.wstrb[3];
+                        txn_wmask_b = ~cur_req.wstrb[2];
+                        det_done    = 0;
+                        det_timeout = 0;
+                        state       = State::txn;
+                        cyc         = 0;
+                        o_cs_n      = 0;
+                    } else {
+                        state       = State::rsp;
+                        o_rsp_valid = 1;
+                    }
+                } else { // Seq::op_h1
+                    if txn_read {
+                        rdata_h1 = det_data;
+                    }
                     state       = State::rsp;
                     o_rsp_valid = 1;
                 }
-            } else { // Seq::op_h1
-                if txn_read {
-                    rdata_h1 = det_data;
+            } else if state == State::idle {
+                if i_req_valid && o_req_ready {
+                    cur_req     = i_req;
+                    o_req_ready = 0;
+                    // 半語 0 から実行 (ライトで両半語マスクなら即応答)
+                    if req_need_h0 {
+                        seq         = Seq::op_h0;
+                        txn_ca      = MemCa(i_req.we, {i_req.addr, 1'b0});
+                        txn_read    = ~i_req.we;
+                        txn_reg_wr  = 0;
+                        txn_wdata   = i_req.wdata[15:0];
+                        txn_wmask_a = ~i_req.wstrb[1];
+                        txn_wmask_b = ~i_req.wstrb[0];
+                        det_done    = 0;
+                        det_timeout = 0;
+                        state       = State::txn;
+                        cyc         = 0;
+                        o_cs_n      = 0;
+                    } else if req_need_h1 {
+                        seq         = Seq::op_h1;
+                        txn_ca      = MemCa(i_req.we, {i_req.addr, 1'b1});
+                        txn_read    = ~i_req.we;
+                        txn_reg_wr  = 0;
+                        txn_wdata   = i_req.wdata[31:16];
+                        txn_wmask_a = ~i_req.wstrb[3];
+                        txn_wmask_b = ~i_req.wstrb[2];
+                        det_done    = 0;
+                        det_timeout = 0;
+                        state       = State::txn;
+                        cyc         = 0;
+                        o_cs_n      = 0;
+                    } else {
+                        state       = State::rsp;
+                        o_rsp_valid = 1;
+                    }
                 }
-                state       = State::rsp;
-                o_rsp_valid = 1;
-            }
-        } else if state == State::idle {
-            if i_req_valid && o_req_ready {
-                cur_req     = i_req;
-                o_req_ready = 0;
-                // 半語 0 から実行 (ライトで両半語マスクなら即応答)
-                if req_need_h0 {
-                    seq         = Seq::op_h0;
-                    txn_ca      = MemCa(i_req.we, {i_req.addr, 1'b0});
-                    txn_read    = ~i_req.we;
-                    txn_reg_wr  = 0;
-                    txn_wdata   = i_req.wdata[15:0];
-                    txn_wmask_a = ~i_req.wstrb[1];
-                    txn_wmask_b = ~i_req.wstrb[0];
-                    det_done    = 0;
-                    det_timeout = 0;
-                    state       = State::txn;
-                    cyc         = 0;
-                    o_cs_n      = 0;
-                } else if req_need_h1 {
-                    seq         = Seq::op_h1;
-                    txn_ca      = MemCa(i_req.we, {i_req.addr, 1'b1});
-                    txn_read    = ~i_req.we;
-                    txn_reg_wr  = 0;
-                    txn_wdata   = i_req.wdata[31:16];
-                    txn_wmask_a = ~i_req.wstrb[3];
-                    txn_wmask_b = ~i_req.wstrb[2];
-                    det_done    = 0;
-                    det_timeout = 0;
-                    state       = State::txn;
-                    cyc         = 0;
-                    o_cs_n      = 0;
-                } else {
-                    state       = State::rsp;
-                    o_rsp_valid = 1;
+            } else { // State::rsp
+                if o_rsp_valid && i_rsp_ready {
+                    o_rsp_valid = 0;
+                    o_req_ready = 1;
+                    state       = State::idle;
                 }
-            }
-        } else { // State::rsp
-            if o_rsp_valid && i_rsp_ready {
-                o_rsp_valid = 0;
-                o_req_ready = 1;
-                state       = State::idle;
             }
         }
     }
