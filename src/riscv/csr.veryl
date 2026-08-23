@@ -1,0 +1,150 @@
+/// M モードの CSR ファイルとトラップ制御 (docs/riscv.md「ISA スコープ」)
+///
+/// 実装するのは M モードのみ．S/U モード・PMP・デバッグトリガは持たない．
+///
+/// | 番号 | 名前 | 実装範囲 |
+/// | --- | --- | --- |
+/// | 0x300 | mstatus | MIE(3) / MPIE(7) のみ．MPP は 11 固定 |
+/// | 0x301 | misa | 読み出し専用．MXL=1, I, M |
+/// | 0x304 | mie | MTIE(7) のみ |
+/// | 0x305 | mtvec | direct モードのみ (下位 2 bit は 0 固定) |
+/// | 0x340 | mscratch | 全 32 bit |
+/// | 0x341 | mepc | 下位 2 bit は 0 固定 |
+/// | 0x342 | mcause | 全 32 bit |
+/// | 0x343 | mtval | 全 32 bit |
+/// | 0x344 | mip | MTIP(7) は読み出し専用 (タイマから) |
+/// | 0xF11-0xF14 | mvendorid/marchid/mimpid/mhartid | 読み出し 0 |
+///
+/// 未実装 CSR へのアクセスと，読み出し専用 CSR への書き込みは
+/// `o_illegal` を立てる (コア側が不正命令例外にする)．
+pub module RvCsr (
+    i_clk: input clock, /// クロック
+    i_rst: input reset, /// リセット
+
+    // CSR 命令
+    i_valid  : input  logic    , /// CSR 命令を実行する
+    i_addr   : input  logic<12>, /// CSR 番号
+    i_op     : input  logic<2> , /// 01=RW / 10=RS / 11=RC
+    i_wdata  : input  logic<32>, /// 書き込み値 (rs1 または uimm)
+    i_wen    : input  logic    , /// 書き込みを行う (RW，または rs1/uimm != 0)
+    o_rdata  : output logic<32>, /// 読み出し値
+    o_illegal: output logic    , /// 未実装 CSR / 読み出し専用への書き込み
+
+    // トラップ
+    i_trap      : input  logic    , /// トラップ発生
+    i_trap_cause: input  logic<32>, /// mcause へ書く値
+    i_trap_pc   : input  logic<32>, /// mepc へ書く値
+    i_trap_tval : input  logic<32>, /// mtval へ書く値
+    i_mret      : input  logic    , /// MRET 実行
+    o_tvec      : output logic<32>, /// トラップベクタ (mtvec)
+    o_epc       : output logic<32>, /// 復帰先 (mepc)
+
+    // 割り込み
+    i_timer_irq  : input  logic, /// CLINT からのタイマ割り込み
+    o_irq_pending: output logic, /// 受理可能な割り込みがある
+) {
+    const CsrMstatus : logic<12> = 12'h300;
+    const CsrMisa    : logic<12> = 12'h301;
+    const CsrMie     : logic<12> = 12'h304;
+    const CsrMtvec   : logic<12> = 12'h305;
+    const CsrMscratch: logic<12> = 12'h340;
+    const CsrMepc    : logic<12> = 12'h341;
+    const CsrMcause  : logic<12> = 12'h342;
+    const CsrMtval   : logic<12> = 12'h343;
+    const CsrMip     : logic<12> = 12'h344;
+    const CsrMvendor : logic<12> = 12'hf11;
+    const CsrMarch   : logic<12> = 12'hf12;
+    const CsrMimp    : logic<12> = 12'hf13;
+    const CsrMhartid : logic<12> = 12'hf14;
+
+    // misa: MXL=1 (RV32)，I と M を立てる
+    const MisaValue: logic<32> = 32'h4000_1100;
+
+    var mstatus_mie : logic    ;
+    var mstatus_mpie: logic    ;
+    var mie_mtie    : logic    ;
+    var mtvec       : logic<32>;
+    var mscratch    : logic<32>;
+    var mepc        : logic<32>;
+    var mcause      : logic<32>;
+    var mtval       : logic<32>;
+
+    let mip_mtip: logic = i_timer_irq;
+
+    // 読み出し値 (組合せ)
+    let rdata: logic<32> = case i_addr {
+        CsrMstatus : {19'b0, 2'b11, 3'b0, mstatus_mpie, 3'b0, mstatus_mie, 3'b0},
+        CsrMisa    : MisaValue,
+        CsrMie     : {24'b0, mie_mtie, 7'b0},
+        CsrMtvec   : mtvec,
+        CsrMscratch: mscratch,
+        CsrMepc    : mepc,
+        CsrMcause  : mcause,
+        CsrMtval   : mtval,
+        CsrMip     : {24'b0, mip_mtip, 7'b0},
+        default    : 32'b0,
+    };
+
+    // 実装している CSR か
+    let known: logic = i_addr == CsrMstatus || i_addr == CsrMisa || i_addr == CsrMie || i_addr == CsrMtvec || i_addr
+        == CsrMscratch || i_addr == CsrMepc || i_addr == CsrMcause || i_addr == CsrMtval || i_addr == CsrMip || i_addr
+        == CsrMvendor || i_addr == CsrMarch || i_addr == CsrMimp || i_addr == CsrMhartid;
+
+    // 読み出し専用 (上位 2 bit が 11) への書き込みは不正
+    let read_only: logic = i_addr[11:10] == 2'b11;
+
+    assign o_rdata   = rdata;
+    assign o_illegal = i_valid && (!known || (i_wen && read_only));
+
+    // 書き込む値 (RW はそのまま，RS はセット，RC はクリア)
+    let wval: logic<32> = case i_op {
+        2'b01  : i_wdata,
+        2'b10  : rdata | i_wdata,
+        default: rdata & ~i_wdata,
+    };
+
+    assign o_tvec = mtvec;
+    assign o_epc  = mepc;
+
+    // 割り込みは mstatus.MIE と mie.MTIE の双方が立っているときだけ受理する
+    assign o_irq_pending = mstatus_mie && mie_mtie && mip_mtip;
+
+    always_ff (i_clk, i_rst) {
+        if_reset {
+            mstatus_mie  = 0;
+            mstatus_mpie = 0;
+            mie_mtie     = 0;
+            mtvec        = 0;
+            mscratch     = 0;
+            mepc         = 0;
+            mcause       = 0;
+            mtval        = 0;
+        } else {
+            if i_trap {
+                // トラップ: 復帰情報を退避し MIE を落とす
+                mepc         = {i_trap_pc[31:2], 2'b00};
+                mcause       = i_trap_cause;
+                mtval        = i_trap_tval;
+                mstatus_mpie = mstatus_mie;
+                mstatus_mie  = 0;
+            } else if i_mret {
+                mstatus_mie  = mstatus_mpie;
+                mstatus_mpie = 1;
+            } else if i_valid && i_wen && known && !read_only {
+                case i_addr {
+                    CsrMstatus: {
+                        mstatus_mie  = wval[3];
+                        mstatus_mpie = wval[7];
+                    }
+                    CsrMie     : mie_mtie = wval[7];
+                    CsrMtvec   : mtvec    = {wval[31:2], 2'b00};
+                    CsrMscratch: mscratch = wval;
+                    CsrMepc    : mepc     = {wval[31:2], 2'b00};
+                    CsrMcause  : mcause   = wval;
+                    CsrMtval   : mtval    = wval;
+                    default    : {}
+                }
+            }
+        }
+    }
+}

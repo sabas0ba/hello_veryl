@@ -1,0 +1,110 @@
+/// コアの簡易メモリプロトコルを AXI4-Lite マスタへ変換する
+/// (docs/riscv.md「メモリマップ」)
+///
+/// コア側は RvMem / RvMmio と同じ握手（`i_valid` を上げ，完了サイクルに
+/// `o_done` が 1）．AXI 側は単一アウトスタンディングで，
+/// ライトは AW と W を同時に出して B 応答で完了，リードは AR を出して
+/// R 応答で完了とする．
+///
+/// アドレスは下位 `AddrW` bit のみを AXI へ渡す（窓内オフセット）．
+///
+/// 完了後は `wait_low` で `i_valid` が下がるのを待つ．コアは `o_done` を見てから
+/// 次サイクルに `i_valid` を下ろすため，これがないと同じ要求を 2 回発行してしまう
+/// （RvMem は `accept = i_valid && !pending` で同じ効果を得ている）．
+pub module RvAxiMaster #(
+    /// AXI 側のアドレス幅（PSRAM ch0 は 22 bit = 4 MB）
+    param AddrW: u32 = 22,
+) (
+    i_clk: input clock, /// クロック
+    i_rst: input reset, /// リセット
+
+    i_valid: input  logic    , /// アクセス要求
+    i_addr : input  logic<32>, /// バイトアドレス
+    i_write: input  logic    , /// 1 でストア
+    i_wdata: input  logic<32>, /// ストアデータ
+    i_wstrb: input  logic<4> , /// バイトイネーブル
+    o_done : output logic    , /// 完了（1 サイクル）
+    o_rdata: output logic<32>, /// リードデータ
+
+    m_axi: modport $std::axi4_lite_if::<$std::axi4_lite_pkg::<22, 4, 1>>::master, /// AXI4-Lite マスタ
+) {
+    enum State: logic<2> {
+        idle,
+        wr,
+        rd,
+        wait_low,
+    }
+
+    var state: State;
+
+    assign m_axi.awprot.instruction_access = 0;
+    assign m_axi.awprot.non_secure         = 0;
+    assign m_axi.awprot.privileged         = 0;
+    assign m_axi.arprot.instruction_access = 0;
+    assign m_axi.arprot.non_secure         = 0;
+    assign m_axi.arprot.privileged         = 0;
+
+    always_ff (i_clk, i_rst) {
+        if_reset {
+            state         = State::idle;
+            o_done        = 0;
+            o_rdata       = 0;
+            m_axi.awvalid = 0;
+            m_axi.awaddr  = 0;
+            m_axi.wvalid  = 0;
+            m_axi.wdata   = 0;
+            m_axi.wstrb   = 0;
+            m_axi.bready  = 0;
+            m_axi.arvalid = 0;
+            m_axi.araddr  = 0;
+            m_axi.rready  = 0;
+        } else {
+            o_done = 0;
+
+            if state == State::idle {
+                if i_valid {
+                    if i_write {
+                        m_axi.awaddr  = i_addr[AddrW - 1:0];
+                        m_axi.awvalid = 1;
+                        m_axi.wdata   = i_wdata;
+                        m_axi.wstrb   = i_wstrb;
+                        m_axi.wvalid  = 1;
+                        m_axi.bready  = 1;
+                        state         = State::wr;
+                    } else {
+                        m_axi.araddr  = i_addr[AddrW - 1:0];
+                        m_axi.arvalid = 1;
+                        m_axi.rready  = 1;
+                        state         = State::rd;
+                    }
+                }
+            } else if state == State::wr {
+                if m_axi.awvalid && m_axi.awready {
+                    m_axi.awvalid = 0;
+                }
+                if m_axi.wvalid && m_axi.wready {
+                    m_axi.wvalid = 0;
+                }
+                if m_axi.bvalid && m_axi.bready {
+                    m_axi.bready = 0;
+                    o_done       = 1;
+                    state        = State::wait_low;
+                }
+            } else if state == State::rd {
+                if m_axi.arvalid && m_axi.arready {
+                    m_axi.arvalid = 0;
+                }
+                if m_axi.rvalid && m_axi.rready {
+                    m_axi.rready = 0;
+                    o_rdata      = m_axi.rdata;
+                    o_done       = 1;
+                    state        = State::wait_low;
+                }
+            } else if state == State::wait_low {
+                if !i_valid {
+                    state = State::idle;
+                }
+            }
+        }
+    }
+}

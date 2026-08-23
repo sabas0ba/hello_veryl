@@ -18,7 +18,13 @@
 /// - 0x20-0x7E: カーソル位置へ表示しカーソル前進 (右端で折り返し)
 /// - LF (0x0A): 改行 (行頭復帰 + 行送り)
 /// - CR (0x0D): 行頭復帰
+/// - FF (0x0C): カーソルを左上へ戻す (スクロール位置も先頭へ戻す．画面は消さない)
 /// - その他: 無視
+///
+/// FF は全画面を毎フレーム上書きするアニメーション用途のためにある．
+/// 消去を伴わないのは，消去中 (CellCount サイクル) の文字入力が無視され，
+/// UART のバイト間隔より長くなって取りこぼすため．送り手が各行を桁数ぶん
+/// 埋める前提で，残像が出ないようにする．
 ///
 /// 最下行での行送りはリングバッファ的に 1 行スクロールする (base_row 前進 +
 /// 新最下行のクリア)．クリア中 (Cols サイクル) の文字入力は無視されるが，
@@ -68,6 +74,7 @@ pub module TextConsole #(
     let is_printable: logic = (i_char >= 8'h20) && (i_char <= 8'h7e);
     let is_lf       : logic = i_char == 8'h0a;
     let is_cr       : logic = i_char == 8'h0d;
+    let is_ff       : logic = i_char == 8'h0c;
 
     // 論理行 -> 物理行 (mod Rows)
     var wr_row_sum: logic<RowW + 1>;
@@ -134,6 +141,10 @@ pub module TextConsole #(
                 }
             } else if is_cr {
                 cur_col = 0;
+            } else if is_ff {
+                cur_col  = 0;
+                cur_row  = 0;
+                base_row = 0;
             } else if is_printable {
                 if cur_col <: Cols - 1 {
                     cur_col = cur_col + 1;

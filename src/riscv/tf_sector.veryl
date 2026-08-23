@@ -1,0 +1,145 @@
+/// TF カードのセクタリーダ（RvCore の周辺機器．docs/riscv.md「TF カードからのブート」）
+///
+/// `TfCtrl` に 512 バイトのセクタバッファを付けたもの．ソフトウェアは
+/// LBA を指定して 1 セクタ読み，バッファをワード単位で読み出す．
+/// FAT32 の解釈はソフトウェア側で行う（`Fat32Reader` は LUT を 2200 使い，
+/// コアと同居できないため．「TF カードからのブート」節）．
+///
+/// 使い方:
+///
+/// 1. 状態語の bit1（init_done）が 1 になるのを待つ
+/// 2. LBA を書き，開始パルスを送る
+/// 3. 状態語の bit0（busy）が 0 に戻るのを待ち，bit7:5（err）を確認する
+/// 4. バッファを 128 ワード読む
+///
+/// 受信バイトは 4 バイトずつリトルエンディアンでワードに組んで書き込む．
+/// バッファは読み書きのポートが分かれているため，読み出し中の再読み込みでも
+/// 破綻しないが，ソフトウェアは busy を見て待つ前提とする．
+pub module RvTfSector #(
+    /// 初期化クロック分周比（`TfCtrl` へそのまま渡す．テストで短縮する）
+    param InitDivider: u32 = 80,
+) (
+    i_clk: input clock, /// クロック
+    i_rst: input reset, /// リセット
+
+    // 制御（RvMmio のレジスタから）
+    i_start : input  logic    , /// 1 サイクルパルス．セクタ読み出しを開始する
+    i_lba   : input  logic<32>, /// 読み出す論理ブロックアドレス
+    o_status: output logic<32>, /// bit0 busy / bit1 init_done / bit4:2 init_err / bit7:5 err
+
+    // セクタバッファの読み出し（RvMem と同じ握手）
+    i_valid: input  logic    , /// アクセス要求
+    i_addr : input  logic<32>, /// バイトアドレス（下位 9 bit がバッファ内オフセット）
+    o_done : output logic    , /// 完了（1 サイクル）
+    o_rdata: output logic<32>, /// リードデータ
+
+    o_sclk: output logic, /// TF SCK
+    o_mosi: output logic, /// TF MOSI
+    o_cs_n: output logic, /// TF CS#
+    i_miso: input  logic, /// TF MISO
+) {
+    inst data: stream_if;
+
+    var req_valid: logic             ;
+    var lba      : logic         <32>;
+    var busy     : logic             ;
+    var err_l    : TfTypes::Error    ;
+
+    var req_ready: logic         ;
+    var init_done: logic         ;
+    var init_err : TfTypes::Error;
+    var blk_done : logic         ;
+    var blk_err  : TfTypes::Error;
+
+    inst tf: TfCtrl #(
+        InitDivider: InitDivider,
+    ) (
+        i_clk                 ,
+        i_rst                 ,
+        i_req_valid: req_valid,
+        i_req_lba  : lba      ,
+        o_req_ready: req_ready,
+        o_init_done: init_done,
+        o_init_err : init_err ,
+        o_done     : blk_done ,
+        o_err      : blk_err  ,
+        data       : data     ,
+        o_sclk                ,
+        o_mosi                ,
+        o_cs_n                ,
+        i_miso                ,
+    );
+
+    assign o_status = {16'b0, 8'b0, err_l, init_err, init_done, busy};
+
+    // 受信バイトはこちらで必ず引き取る（TfCtrl は 512 バイトを流し切る）
+    assign data.ready = 1;
+
+    var wbuf: logic<32>;
+    var bcnt: logic<9> ;
+
+    let byte_hs: logic     = data.valid && data.ready;
+    let nwbuf  : logic<32> = {data.data, wbuf[31:8]}; // 先着バイトが下位へ落ちる
+    let word_we: logic     = byte_hs && bcnt[1:0] == 2'b11;
+
+    always_ff (i_clk, i_rst) {
+        if_reset {
+            req_valid = 0;
+            lba       = 0;
+            busy      = 0;
+            wbuf      = 0;
+            bcnt      = 0;
+            err_l     = TfTypes::Error::none;
+        } else {
+            if i_start && !busy {
+                lba       = i_lba;
+                req_valid = 1;
+                busy      = 1;
+                bcnt      = 0;
+            }
+            if req_valid && req_ready {
+                req_valid = 0;
+            }
+            if byte_hs {
+                wbuf = nwbuf;
+                bcnt = bcnt + 1;
+            }
+            if blk_done {
+                busy  = 0;
+                err_l = blk_err;
+            }
+        }
+    }
+
+    var pending: logic;
+
+    let accept: logic = i_valid && !pending;
+
+    always_ff (i_clk, i_rst) {
+        if_reset {
+            pending = 0;
+        } else {
+            pending = accept;
+        }
+    }
+
+    assign o_done = pending;
+
+    // 512 バイト = 128 ワード
+    inst sector_ram: $std::ram #(
+        WORD_SIZE : 128 ,
+        DATA_WIDTH: 32  ,
+        BUFFER_OUT: true,
+    ) (
+        i_clk              ,
+        i_rst              ,
+        i_clr : 0          ,
+        i_mea : 1          ,
+        i_wea : word_we    ,
+        i_adra: bcnt[8:2]  ,
+        i_da  : nwbuf      ,
+        i_meb : accept     ,
+        i_adrb: i_addr[8:2],
+        o_qb  : o_rdata    ,
+    );
+}

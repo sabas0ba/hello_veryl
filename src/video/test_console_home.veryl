@@ -1,0 +1,117 @@
+// FF (0x0C) によるカーソルホームのテスト
+//
+// 全画面を毎フレーム上書きするアニメーション用途で使う制御文字．
+// カーソル (cur_col / cur_row) とスクロールオフセット (base_row) の
+// 両方が先頭へ戻ることを，両者を区別できる手順で確認する．
+//
+// 手順: 論理行 1 へ 'A' を置き，1 行スクロールさせる．スクロール後は
+// base_row = 1 なので 'A' は画面行 0 に見える．FF 後に base_row が 0 へ
+// 戻れば 'A' は画面行 1 へ移動する．
+#[test(test_console_home)]
+module test_console_home {
+    const Cols: u32 = 100;
+    const Rows: u32 = 30;
+
+    const InitWait: u32 = Cols * Rows + 10;
+    const CharGap : u32 = 200; // scroll_clear (Cols サイクル) より十分長い
+    const PixLat  : u32 = 2;
+    // 論理行 1 から最下行 (Rows-1) まで送り，さらに 1 回でスクロールする
+    const LfCount: u32 = Rows - 1;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    var char_valid: logic    ;
+    var char      : logic<8> ;
+    var de        : logic    ;
+    var hsync     : logic    ;
+    var vsync     : logic    ;
+    var pos_x     : logic<10>;
+    var pos_y     : logic<9> ;
+    var o_de      : logic    ;
+    var o_hsync   : logic    ;
+    var o_vsync   : logic    ;
+    var o_pixel   : logic    ;
+
+    inst dut: TextConsole #(
+        Cols: Cols,
+        Rows: Rows,
+    ) (
+        i_clk       : clk       ,
+        i_rst       : rst       ,
+        i_char_valid: char_valid,
+        i_char      : char      ,
+        i_de        : de        ,
+        i_hsync     : hsync     ,
+        i_vsync     : vsync     ,
+        i_pos_x     : pos_x     ,
+        i_pos_y     : pos_y     ,
+        o_de                    ,
+        o_hsync                 ,
+        o_vsync                 ,
+        o_pixel                 ,
+    );
+
+    function put (
+        c: input logic<8>,
+    ) {
+        char       = c;
+        char_valid = 1;
+        clk.next  (1);
+        char_valid = 0;
+        clk.next  (CharGap);
+    }
+
+    initial {
+        char_valid = 0;
+        char       = 0;
+        de         = 1;
+        hsync      = 1;
+        vsync      = 1;
+        pos_x      = 0;
+        pos_y      = 0;
+        rst.assert();
+        clk.next  (InitWait);
+
+        // 論理行 1 へ 'A'．'A' は row3 の col3 が前景
+        put(8'h0a);
+        put(8'h41);
+
+        pos_x            = 3;
+        pos_y            = 19; // 画面行 1 の row3
+        clk.next        (PixLat);
+        $assert_continue(o_pixel == 1'b1, "'A' は画面行 1");
+
+        // 最下行まで送り，最後の 1 回で 1 行スクロールさせる
+        for _n in 0..LfCount {
+            put(8'h0a);
+        }
+
+        pos_x            = 3;
+        pos_y            = 3; // 画面行 0
+        clk.next        (PixLat);
+        $assert_continue(o_pixel == 1'b1, "スクロール後 'A' は画面行 0");
+
+        // FF: base_row が 0 へ戻り，'A' は画面行 1 へ戻る
+        put(8'h0c);
+
+        pos_x            = 3;
+        pos_y            = 3;
+        clk.next        (PixLat);
+        $assert_continue(o_pixel == 1'b0, "FF 後の画面行 0 は空 (base_row リセット)");
+        pos_x            = 3;
+        pos_y            = 19;
+        clk.next        (PixLat);
+        $assert_continue(o_pixel == 1'b1, "FF 後 'A' は画面行 1");
+
+        // カーソルも (0,0)．'A' を書くと画面行 0 の先頭セルに出る
+        put(8'h41);
+
+        pos_x            = 3;
+        pos_y            = 3;
+        clk.next        (PixLat);
+        $assert_continue(o_pixel == 1'b1, "FF 後のカーソルは (0,0)");
+
+        $finish();
+    }
+}

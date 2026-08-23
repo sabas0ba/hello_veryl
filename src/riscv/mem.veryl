@@ -1,0 +1,85 @@
+/// RvCore 用のワードメモリ (docs/riscv.md「メモリマップ」)
+///
+/// 32 bit ワード x Words．バイトイネーブル付きで，SB / SH のために
+/// 8 bit 幅の RAM を 4 面並べる（`$std::ram` はバイトイネーブルを持たないため）．
+///
+/// レイテンシは 1 サイクル（`BUFFER_OUT: true` で BSRAM の登録読み出しになる）。
+/// プロトコル:
+///
+/// - コアが `i_valid` を上げ，アドレス等を保持する
+/// - メモリは受理した次のサイクルに `o_done` を 1 サイクル上げ，
+///   リードならこのとき `o_rdata` が有効
+/// - コアは `o_done` で `i_valid` を下ろす（同一サイクルに次の要求は出さない）
+///
+/// `i_dbg_*` はテストベンチからの直接書き込み（プログラムのプリロード）用で，
+/// 合成時は 0 固定にする．`i_dbg_we` の間はコアの要求を受け付けないため，
+/// コアはリセット解除後でも `o_done` 待ちで停止したままプリロードできる．
+pub module RvMem #(
+    /// 語数（32 bit ワード）
+    param Words: u32 = 1024,
+) (
+    i_clk: input clock, /// クロック
+    i_rst: input reset, /// リセット
+
+    i_valid: input  logic    , /// アクセス要求
+    i_addr : input  logic<32>, /// バイトアドレス
+    i_write: input  logic    , /// 1 でストア
+    i_wdata: input  logic<32>, /// ストアデータ（バイトレーンへ整列済み）
+    i_wstrb: input  logic<4> , /// バイトイネーブル
+    o_done : output logic    , /// 完了（1 サイクル）
+    o_rdata: output logic<32>, /// リードデータ（o_done のサイクルで有効）
+
+    i_dbg_we   : input logic    , /// テストベンチからの直接書き込み
+    i_dbg_word : input logic<32>, /// 書き込むワード番号
+    i_dbg_wdata: input logic<32>, /// 書き込むデータ
+) {
+    const AddrW: u32 = $clog2(Words);
+
+    let word_adr: logic<AddrW> = i_addr[AddrW + 1:2];
+    let dbg_adr : logic<AddrW> = i_dbg_word[AddrW - 1:0];
+
+    // 受理は「要求があり，直前のサイクルで受理していない」とき
+    var pending: logic;
+
+    // プリロード中はコアの要求を受け付けない（コアは o_done 待ちで自然に停止する）
+    let accept: logic = i_valid && !pending && !i_dbg_we;
+
+    always_ff (i_clk, i_rst) {
+        if_reset {
+            pending = 0;
+        } else {
+            pending = accept;
+        }
+    }
+
+    assign o_done = pending;
+
+    // 書き込みポート: 受理サイクルのみ有効（重複書き込みを避ける）
+    let wr_adr: logic<AddrW> = if i_dbg_we ? dbg_adr : word_adr;
+
+    var rd_byte: logic<8> [4];
+
+    for i in 0..4 :g_lane {
+        let we: logic    = i_dbg_we || (accept && i_write && i_wstrb[i]);
+        let da: logic<8> = if i_dbg_we ? i_dbg_wdata[8 * i+:8] : i_wdata[8 * i+:8];
+
+        inst ram: $std::ram #(
+            WORD_SIZE : Words,
+            DATA_WIDTH: 8    ,
+            BUFFER_OUT: true ,
+        ) (
+            i_clk             ,
+            i_rst             ,
+            i_clr : 0         ,
+            i_mea : 1         ,
+            i_wea : we        ,
+            i_adra: wr_adr    ,
+            i_da  : da        ,
+            i_meb : accept    ,
+            i_adrb: word_adr  ,
+            o_qb  : rd_byte[i],
+        );
+    }
+
+    assign o_rdata = {rd_byte[3], rd_byte[2], rd_byte[1], rd_byte[0]};
+}

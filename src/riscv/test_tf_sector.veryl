@@ -1,0 +1,142 @@
+// RvTfSector の L1 テスト (docs/riscv.md「TF カードからのブート」)
+//
+// TfCardModel からセクタを 1 つ読み，バッファをワード単位で読み出して
+// バイト順（リトルエンディアン）とアドレス対応を確認する．
+#[test(test_rv_tf_sector)]
+module test_rv_tf_sector {
+    const MaxWait: u32 = 50_000;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    var sclk: logic;
+    var mosi: logic;
+    var miso: logic;
+    var cs_n: logic;
+
+    var start : logic    ;
+    var lba   : logic<32>;
+    var status: logic<32>;
+
+    var rd_valid: logic    ;
+    var rd_addr : logic<32>;
+    var rd_done : logic    ;
+    var rd_data : logic<32>;
+
+    inst dut: RvTfSector #(
+        InitDivider: 8, // テスト短縮 (実機は 80 = 337.5 kHz)
+    ) (
+        i_clk   : clk     ,
+        i_rst   : rst     ,
+        i_start : start   ,
+        i_lba   : lba     ,
+        o_status: status  ,
+        i_valid : rd_valid,
+        i_addr  : rd_addr ,
+        o_done  : rd_done ,
+        o_rdata : rd_data ,
+        o_sclk  : sclk    ,
+        o_mosi  : mosi    ,
+        o_cs_n  : cs_n    ,
+        i_miso  : miso    ,
+    );
+
+    var img_lba : logic<32>;
+    var img_off : logic<9> ;
+    var img_data: logic<8> ;
+
+    inst card: TfCardModel #(
+        NcrBytes     : 1,
+        Acmd41Polls  : 2,
+        DataWaitBytes: 2,
+    ) (
+        i_clk            : clk     ,
+        i_rst            : rst     ,
+        i_sclk           : sclk    ,
+        i_cs_n           : cs_n    ,
+        i_mosi           : mosi    ,
+        o_miso           : miso    ,
+        i_cfg_legacy_cmd8: 1'b0    ,
+        i_cfg_ccs        : 1'b1    ,
+        i_cfg_never_ready: 1'b0    ,
+        i_cfg_no_token   : 1'b0    ,
+        i_cfg_corrupt_crc: 1'b0    ,
+        o_img_lba        : img_lba ,
+        o_img_off        : img_off ,
+        i_img_data       : img_data,
+    );
+
+    // ディスクイメージ: byte = LBA 下位 + オフセット下位 (mod 256)
+    assign img_data = img_lba[7:0] + img_off[7:0];
+
+    // 読み出したワードの期待値 (LBA=7)．先着バイトが下位に来る
+    const Lba: logic<8> = 8'd7;
+
+    var b0  : logic<8> ;
+    var b1  : logic<8> ;
+    var b2  : logic<8> ;
+    var b3  : logic<8> ;
+    var want: logic<32>;
+
+    function read_word (
+        widx: input logic<32>,
+    ) {
+        rd_addr  = widx * 4;
+        rd_valid = 1;
+        for _w in 0..MaxWait {
+            clk.next(1);
+            if rd_done == 1'b1 {
+                break;
+            }
+        }
+        rd_valid = 0;
+    }
+
+    initial {
+        start      = 0;
+        lba        = 0;
+        rd_valid   = 0;
+        rd_addr    = 0;
+        rst.assert();
+
+        for _w in 0..MaxWait {
+            if status[1] == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        $assert(status[1] == 1'b1, "初期化完了 (init_done)");
+        $assert(status[4:2] == 3'd0, "初期化エラーなし");
+        $assert(status[0] == 1'b0, "初期状態は busy でない");
+
+        // ---- LBA=7 を 1 セクタ読む ----
+        lba      = 32'd7;
+        start    = 1;
+        clk.next(1);
+        start    = 0;
+
+        $assert_continue(status[0] == 1'b1, "開始後は busy");
+
+        for _w in 0..MaxWait {
+            if status[0] == 1'b0 {
+                break;
+            }
+            clk.next(1);
+        }
+        $assert(status[0] == 1'b0, "読み出し完了で busy が下りる");
+        $assert(status[7:5] == 3'd0, "読み出しエラーなし");
+
+        // ---- バッファの検証 ----
+        for i in 0..128 {
+            read_word       (i);
+            b0               = Lba + (i * 4 + 0);
+            b1               = Lba + (i * 4 + 1);
+            b2               = Lba + (i * 4 + 2);
+            b3               = Lba + (i * 4 + 3);
+            want             = {b3, b2, b1, b0};
+            $assert_continue(rd_data == want, "セクタバッファのワード");
+        }
+
+        $finish();
+    }
+}

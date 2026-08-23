@@ -1,0 +1,149 @@
+/// RV32M の乗除算ユニット (docs/riscv.md「ISA スコープ」)
+///
+/// `i_start` の 1 サイクルパルスで起動し，完了サイクルに `o_done` を 1 にする．
+/// 多サイクルコアから見ると RvMem と同じ「要求 → 完了」の形になる．
+///
+/// - 乗算は 1 サイクル．符号付き / 符号なしの組み合わせは絶対値を取ってから
+///   符号なし乗算し，結果の符号を戻す（MULHSU があるため被乗数と乗数で
+///   符号の扱いが異なる）
+/// - 除算は復元法で 32 反復．ハードウェア除算器は持たない
+///
+/// ゼロ除算とオーバフローの扱いは RISC-V 仕様に従う．
+///
+/// | 条件 | DIV | DIVU | REM | REMU |
+/// | --- | --- | --- | --- | --- |
+/// | 除数 0 | -1 | 2^32-1 | 被除数 | 被除数 |
+/// | -2^31 / -1 | -2^31 | — | 0 | — |
+pub module RvMulDiv (
+    i_clk: input clock, /// クロック
+    i_rst: input reset, /// リセット
+
+    i_start : input  logic    , /// 起動 (1 サイクルパルス)
+    i_funct3: input  logic<3> , /// 命令の funct3
+    i_a     : input  logic<32>, /// rs1
+    i_b     : input  logic<32>, /// rs2
+    o_result: output logic<32>, /// 結果
+    o_done  : output logic    , /// 完了 (1 サイクル)
+) {
+    const FnMul   : logic<3> = 3'b000;
+    const FnMulh  : logic<3> = 3'b001;
+    const FnMulhsu: logic<3> = 3'b010;
+    const FnMulhu : logic<3> = 3'b011;
+    const FnDiv   : logic<3> = 3'b100;
+    const FnDivu  : logic<3> = 3'b101;
+    const FnRem   : logic<3> = 3'b110;
+    const FnRemu  : logic<3> = 3'b111;
+
+    enum State: logic<2> {
+        idle,
+        div_run,
+        finish,
+    }
+
+    var state  : State    ;
+    var funct3 : logic<3> ;
+    var cnt    : logic<6> ;
+    var divisor: logic<32>;
+    var quo    : logic<32>;
+    var rem    : logic<33>;
+    var dvd    : logic<32>; // 被除数の絶対値 (上位から 1 bit ずつ取り出す)
+    var q_neg  : logic    ; // 商の符号を反転する
+    var r_neg  : logic    ; // 剰余の符号を反転する
+    var by_zero: logic    ;
+    var a_saved: logic<32>;
+
+    // ---- 乗算 (組合せ) ----
+    // MULH は両方符号付き，MULHSU は rs1 のみ符号付き，MUL / MULHU は符号なし扱い
+    // (MUL の下位 32 bit は符号の解釈によらない)
+    let a_signed: logic = i_funct3 == FnMulh || i_funct3 == FnMulhsu;
+    let b_signed: logic = i_funct3 == FnMulh;
+
+    let a_is_neg: logic = a_signed && i_a[31];
+    let b_is_neg: logic = b_signed && i_b[31];
+
+    let a_abs: logic<32> = if a_is_neg ? ~i_a + 1 : i_a;
+    let b_abs: logic<32> = if b_is_neg ? ~i_b + 1 : i_b;
+
+    let prod_u: logic<64> = {32'b0, a_abs} * {32'b0, b_abs};
+    let prod  : logic<64> = if a_is_neg ^ b_is_neg ? ~prod_u + 1 : prod_u;
+
+    // ---- 除算の前処理 ----
+    let div_signed: logic     = i_funct3 == FnDiv || i_funct3 == FnRem;
+    let da_neg    : logic     = div_signed && i_a[31];
+    let db_neg    : logic     = div_signed && i_b[31];
+    let da_abs    : logic<32> = if da_neg ? ~i_a + 1 : i_a;
+    let db_abs    : logic<32> = if db_neg ? ~i_b + 1 : i_b;
+
+    // 反復 1 段ぶん: 剰余を 1 bit 左シフトして被除数の最上位を入れ，除数を引けるなら引く
+    let rem_sh : logic<33> = {rem[31:0], dvd[31]};
+    let rem_sub: logic<33> = rem_sh - {1'b0, divisor};
+    let can_sub: logic     = rem_sh >= {1'b0, divisor};
+
+    always_ff (i_clk, i_rst) {
+        if_reset {
+            state    = State::idle;
+            funct3   = 0;
+            cnt      = 0;
+            divisor  = 0;
+            quo      = 0;
+            rem      = 0;
+            dvd      = 0;
+            q_neg    = 0;
+            r_neg    = 0;
+            by_zero  = 0;
+            a_saved  = 0;
+            o_result = 0;
+            o_done   = 0;
+        } else {
+            o_done = 0;
+
+            if state == State::idle {
+                if i_start {
+                    funct3  = i_funct3;
+                    a_saved = i_a;
+                    if i_funct3[2] == 1'b0 {
+                        // 乗算は 1 サイクルで確定する
+                        o_result = if i_funct3 == FnMul ? prod[31:0] : prod[63:32];
+                        o_done   = 1;
+                    } else {
+                        divisor = db_abs;
+                        dvd     = da_abs;
+                        quo     = 0;
+                        rem     = 0;
+                        cnt     = 0;
+                        by_zero = i_b == 0;
+                        // 商は符号が異なるとき負，剰余は被除数の符号に従う
+                        q_neg = da_neg ^ db_neg;
+                        r_neg = da_neg;
+                        state = State::div_run;
+                    }
+                }
+            } else if state == State::div_run {
+                if can_sub {
+                    rem = rem_sub;
+                    quo = {quo[30:0], 1'b1};
+                } else {
+                    rem = rem_sh;
+                    quo = {quo[30:0], 1'b0};
+                }
+                dvd = {dvd[30:0], 1'b0};
+                if cnt == 31 {
+                    state = State::finish;
+                } else {
+                    cnt = cnt + 1;
+                }
+            } else if state == State::finish {
+                if by_zero {
+                    // 仕様: DIV は -1，DIVU は 2^32-1，REM / REMU は被除数
+                    o_result = if funct3 == FnDiv || funct3 == FnDivu ? 32'hffff_ffff : a_saved;
+                } else if funct3 == FnDiv || funct3 == FnDivu {
+                    o_result = if q_neg ? ~quo + 1 : quo;
+                } else {
+                    o_result = if r_neg ? ~rem[31:0] + 1 : rem[31:0];
+                }
+                o_done = 1;
+                state  = State::idle;
+            }
+        }
+    }
+}

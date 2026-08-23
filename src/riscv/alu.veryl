@@ -1,0 +1,41 @@
+/// RV32I の ALU (docs/riscv.md「マイクロアーキテクチャ」)
+///
+/// 組合せ回路．シフト量は第 2 入力の下位 5 bit を使う
+/// (RV32 では SLL/SRL/SRA・SLLI/SRLI/SRAI とも shamt は 5 bit)．
+///
+/// 符号付き比較 (SLT) は符号ビットが異なる場合に第 1 入力の符号ビットが
+/// そのまま答えになる性質を使い，符号が同じ場合のみ符号なし比較へ帰着させる．
+/// 算術右シフト (SRA) は符号ビットで 64 bit へ拡張してから論理右シフトし，
+/// 下位 32 bit を採る．
+pub module RvAlu (
+    i_op: input  RvPkg::AluOp    , /// 演算種別
+    i_a : input  logic       <32>, /// 第 1 入力
+    i_b : input  logic       <32>, /// 第 2 入力
+    o_y : output logic       <32>, /// 結果
+) {
+    let shamt: logic<5> = i_b[4:0];
+
+    let ltu: logic = i_a <: i_b;
+    // 符号が異なるなら負の側が小さい = i_a の符号ビットが答え
+    let lts: logic = if i_a[31] != i_b[31] ? i_a[31] : ltu;
+
+    let sra_ext: logic<64> = {i_a[31] repeat 32, i_a};
+    let sra_sh : logic<64> = sra_ext >> shamt;
+
+    always_comb {
+        o_y = case i_op {
+            RvPkg::AluOp::add  : i_a + i_b,
+            RvPkg::AluOp::sub  : i_a - i_b,
+            RvPkg::AluOp::sll  : i_a << shamt,
+            RvPkg::AluOp::slt  : {1'b0 repeat 31, lts},
+            RvPkg::AluOp::sltu : {1'b0 repeat 31, ltu},
+            RvPkg::AluOp::bxor : i_a ^ i_b,
+            RvPkg::AluOp::srl  : i_a >> shamt,
+            RvPkg::AluOp::sra  : sra_sh[31:0],
+            RvPkg::AluOp::bor  : i_a | i_b,
+            RvPkg::AluOp::band : i_a & i_b,
+            RvPkg::AluOp::passb: i_b,
+            default            : i_a + i_b,
+        };
+    }
+}

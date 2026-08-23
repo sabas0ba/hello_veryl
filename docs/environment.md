@@ -74,6 +74,13 @@ Veryl 拡張（0.20.2 固定）と veryl-ls がコンテナ内で動作する（
 | OSS CAD Suite（コンテナ内） | 2026-07-20 | SHA-256 `ba680b02915b...2ea2a53` | <https://github.com/YosysHQ/oss-cad-suite-build/releases/download/2026-07-20/oss-cad-suite-linux-x64-20260720.tgz> |
 | OSS CAD Suite（Windows, 書き込み用） | 2026-07-20 | SHA-256 `03ab812dcd2e...fed5893` | <https://github.com/YosysHQ/oss-cad-suite-build/releases/download/2026-07-20/oss-cad-suite-windows-x64-20260720.exe> |
 
+apt で導入するパッケージ（unzip / gcc / libc6-dev / git / poppler-utils /
+gcc-riscv64-unknown-elf / binutils-riscv64-unknown-elf）はバージョンを固定せず，
+digest 固定した base image の apt スナップショットに従う．Debian は更新時に旧版を
+ミラーから外すため，版数を固定するとかえってビルドが壊れやすい．2026-08-23 時点の
+実測値は RISC-V GCC 14.2.0+19 / binutils 2.44（`-march=rv32i -mabi=ilp32` の
+multilib あり，[riscv.md](riscv.md)）．
+
 完全なハッシュ値は `container/Containerfile`・`scripts/setup-toolchain.ps1` に記載し，
 各スクリプトが取得時に検証する（不一致で中断）．GitHub Releases API / Docker Hub の
 digest と照合済み．上流に署名はなく digest も配布物と同一オリジンのため，この pin が
@@ -85,7 +92,9 @@ digest と照合済み．上流に署名はなく digest も配布物と同一�
 src/           Veryl ソース
   common/        stream_if
   uart/          UART TX/RX
-  video/         VideoTiming / TextConsole / FontRom (生成物)
+  video/         VideoTiming / TextConsole / FontRom (生成物) / ImageScanout
+  psram/         PSRAM サブシステム（phy / ctrl / AXI ブリッジ / アービタ）
+  tfcard/        TF カードサブシステム（SpiMaster / TfCtrl / Fat32Reader / デモ）
   top.veryl, blink.veryl
 docs/          設計・検証文書（datasheets/ は git 管理外）
 verif/         合成後検査（psram_phy/: phy の PnR 後ネットリスト照合）

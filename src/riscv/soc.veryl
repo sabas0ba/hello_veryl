@@ -1,0 +1,189 @@
+/// RV32I ソフトコアの SoC (docs/riscv.md「メモリマップ」)
+///
+/// コア・ブート ROM・データ RAM・MMIO をアドレスデコードで束ねる．
+///
+/// | 範囲 | 内容 |
+/// | --- | --- |
+/// | `0x0000_0000`–`0x0000_1FFF` | ブート ROM（8 KB 相当，リードのみ） |
+/// | `0x0000_2000`–`0x0000_3FFF` | データ RAM（RamWords x 4 byte，最大 8 KB） |
+/// | `0x1000_0000`–`0x103F_FFFF` | PSRAM ch0（AXI4-Lite マスタとして外へ出す） |
+/// | `0x2000_0000`–`0x2000_0FFF` | MMIO レジスタ（UART / LED / TOHOST / タイマ / TF） |
+/// | `0x2000_1000`–`0x2000_11FF` | TF カードのセクタバッファ（512 バイト，リードのみ） |
+///
+/// デコードは `addr[29]` で MMIO，`addr[28]` で PSRAM，
+/// 残りを `addr[13]` で ROM / RAM に分ける．
+/// MMIO 内は `addr[12]` でレジスタとセクタバッファに分ける．
+/// コアは完了まで `o_mem_addr` を保持するため，組合せデコードで足りる．
+///
+/// PSRAM サブシステム本体（PLL / phy / ctrl / ブリッジ）はクロックドメインが
+/// 異なるため SoC の外に置き，ここでは AXI4-Lite マスタ端子だけを出す．
+pub module RvSoc #(
+    /// データ RAM の語数（`addr[13]` で選ぶので最大 2048 語 = 8 KB）
+    param RamWords: u32 = 512,
+    /// TF カードの初期化クロック分周比（`TfCtrl` へ渡す．テストで短縮する）
+    param TfInitDivider: u32 = 80,
+) (
+    i_clk: input clock, /// クロック
+    i_rst: input reset, /// リセット
+
+    tx: modport stream_if::source, /// UART TX へ
+    rx: modport stream_if::sink  , /// UART RX から
+
+    m_psram: modport $std::axi4_lite_if::<$std::axi4_lite_pkg::<22, 4, 1>>::master, /// PSRAM へ（AXI4-Lite）
+
+    o_leds        : output logic<6> , /// LED（active-high）
+    o_tohost_valid: output logic    , /// 終了通知
+    o_tohost      : output logic<32>, /// 終了コード
+    o_pc          : output logic<32>, /// 現在の PC（観測用）
+    o_trap        : output logic    , /// トラップ受理（観測用）
+    o_cause       : output logic<32>, /// トラップ原因（観測用）
+    o_illegal     : output logic    , /// 不正命令例外を起こした（診断用）
+
+    o_tf_sclk: output logic, /// TF SCK
+    o_tf_mosi: output logic, /// TF MOSI
+    o_tf_cs_n: output logic, /// TF CS#
+    i_tf_miso: input  logic, /// TF MISO
+) {
+    var timer_irq: logic    ;
+    var mem_valid: logic    ;
+    var mem_addr : logic<32>;
+    var mem_write: logic    ;
+    var mem_wdata: logic<32>;
+    var mem_wstrb: logic<4> ;
+    var mem_done : logic    ;
+    var mem_rdata: logic<32>;
+
+    inst core: RvCore (
+        i_clk                 ,
+        i_rst                 ,
+        o_mem_valid: mem_valid,
+        o_mem_addr : mem_addr ,
+        o_mem_write: mem_write,
+        o_mem_wdata: mem_wdata,
+        o_mem_wstrb: mem_wstrb,
+        i_mem_done : mem_done ,
+        i_mem_rdata: mem_rdata,
+        i_timer_irq: timer_irq,
+        o_pc       : o_pc     ,
+        o_trap     : o_trap   ,
+        o_cause    : o_cause  ,
+        o_illegal  : o_illegal,
+    );
+
+    let sel_mmio: logic = mem_addr[29];
+    // MMIO 内の分割: レジスタ / TF セクタバッファ
+    let sel_tfbuf  : logic = sel_mmio && mem_addr[12];
+    let sel_mmioreg: logic = sel_mmio && !mem_addr[12];
+    let sel_psram  : logic = !mem_addr[29] && mem_addr[28];
+    let sel_local  : logic = !mem_addr[29] && !mem_addr[28];
+    let sel_ram    : logic = sel_local && mem_addr[13];
+    let sel_rom    : logic = sel_local && !mem_addr[13];
+
+    var rom_done : logic    ;
+    var rom_rdata: logic<32>;
+
+    inst rom: RvRom (
+        i_clk                        ,
+        i_rst                        ,
+        i_valid: mem_valid && sel_rom,
+        i_addr : mem_addr            ,
+        o_done : rom_done            ,
+        o_rdata: rom_rdata           ,
+    );
+
+    var ram_done : logic    ;
+    var ram_rdata: logic<32>;
+
+    inst ram: RvMem #(
+        Words: RamWords,
+    ) (
+        i_clk                            ,
+        i_rst                            ,
+        i_valid    : mem_valid && sel_ram,
+        i_addr     : mem_addr            ,
+        i_write    : mem_write           ,
+        i_wdata    : mem_wdata           ,
+        i_wstrb    : mem_wstrb           ,
+        o_done     : ram_done            ,
+        o_rdata    : ram_rdata           ,
+        i_dbg_we   : 1'b0                ,
+        i_dbg_word : 32'b0               ,
+        i_dbg_wdata: 32'b0               ,
+    );
+
+    var tf_start : logic    ;
+    var tf_lba   : logic<32>;
+    var tf_status: logic<32>;
+    var tf_done  : logic    ;
+    var tf_rdata : logic<32>;
+
+    var mmio_done : logic    ;
+    var mmio_rdata: logic<32>;
+
+    inst mmio: RvMmio (
+        i_clk                                   ,
+        i_rst                                   ,
+        i_valid       : mem_valid && sel_mmioreg,
+        i_addr        : mem_addr                ,
+        i_write       : mem_write               ,
+        i_wdata       : mem_wdata               ,
+        o_done        : mmio_done               ,
+        o_rdata       : mmio_rdata              ,
+        tx            : tx                      ,
+        rx            : rx                      ,
+        o_leds        : o_leds                  ,
+        o_tohost_valid: o_tohost_valid          ,
+        o_tohost      : o_tohost                ,
+        o_timer_irq   : timer_irq               ,
+        o_tf_start    : tf_start                ,
+        o_tf_lba      : tf_lba                  ,
+        i_tf_status   : tf_status               ,
+    );
+
+    inst tfsec: RvTfSector #(
+        InitDivider: TfInitDivider,
+    ) (
+        i_clk                           ,
+        i_rst                           ,
+        i_start : tf_start              ,
+        i_lba   : tf_lba                ,
+        o_status: tf_status             ,
+        i_valid : mem_valid && sel_tfbuf,
+        i_addr  : mem_addr              ,
+        o_done  : tf_done               ,
+        o_rdata : tf_rdata              ,
+        o_sclk  : o_tf_sclk             ,
+        o_mosi  : o_tf_mosi             ,
+        o_cs_n  : o_tf_cs_n             ,
+        i_miso  : i_tf_miso             ,
+    );
+
+    var psram_done : logic    ;
+    var psram_rdata: logic<32>;
+
+    inst psram_axi: RvAxiMaster (
+        i_clk                          ,
+        i_rst                          ,
+        i_valid: mem_valid && sel_psram,
+        i_addr : mem_addr              ,
+        i_write: mem_write             ,
+        i_wdata: mem_wdata             ,
+        i_wstrb: mem_wstrb             ,
+        o_done : psram_done            ,
+        o_rdata: psram_rdata           ,
+        m_axi  : m_psram               ,
+    );
+
+    assign mem_done  = rom_done || ram_done || mmio_done || psram_done || tf_done;
+    assign mem_rdata = if sel_rom ?
+        rom_rdata
+    : if sel_ram ?
+        ram_rdata
+    : if sel_psram ?
+        psram_rdata
+    : if sel_tfbuf ?
+        tf_rdata
+    :
+        mmio_rdata
+    ;
+}

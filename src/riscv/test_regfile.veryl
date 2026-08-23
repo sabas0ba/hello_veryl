@@ -1,0 +1,91 @@
+// RvRegFile の L1 テスト (docs/riscv.md「検証」)
+//
+// 読み出しは 1 サイクル遅れる (メモリマクロ実装のため)．
+// リセットではレジスタの内容は初期化されない (RISC-V 仕様も初期値を定めない)
+// ため，値の検証はすべて書き込み後に行う．
+
+#[test(test_rv_regfile)]
+module test_rv_regfile {
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    var rs1  : logic<5> ;
+    var rs2  : logic<5> ;
+    var rd1  : logic<32>;
+    var rd2  : logic<32>;
+    var we   : logic    ;
+    var rd   : logic<5> ;
+    var wdata: logic<32>;
+
+    inst dut: RvRegFile (
+        i_clk  : clk  ,
+        i_rst  : rst  ,
+        i_rs1  : rs1  ,
+        o_rd1  : rd1  ,
+        i_rs2  : rs2  ,
+        o_rd2  : rd2  ,
+        i_we   : we   ,
+        i_rd   : rd   ,
+        i_wdata: wdata,
+    );
+
+    initial {
+        we         = 0;
+        rd         = 0;
+        wdata      = 0;
+        rs1        = 0;
+        rs2        = 0;
+        rst.assert();
+
+        // x1 へ書き込み
+        we       = 1;
+        rd       = 5'd1;
+        wdata    = 32'hdead_beef;
+        clk.next(1);
+        we       = 0;
+
+        // 読み出しアドレスを与えた次のサイクルに値が確定する
+        rs1              = 5'd1;
+        clk.next        (2);
+        $assert_continue(rd1 == 32'hdead_beef, "x1 書き込み後の読み出し");
+
+        // x31 へ別の値を書き，2 ポート同時読み出しを確認
+        we               = 1;
+        rd               = 5'd31;
+        wdata            = 32'h1234_5678;
+        clk.next        (1);
+        we               = 0;
+        rs2              = 5'd31;
+        clk.next        (2);
+        $assert_continue(rd1 == 32'hdead_beef, "x1 は保持");
+        $assert_continue(rd2 == 32'h1234_5678, "x31 書き込み後の読み出し");
+
+        // x0 への書き込みは無効 (読み出しは常に 0)
+        we               = 1;
+        rd               = 5'd0;
+        wdata            = 32'hffff_ffff;
+        clk.next        (1);
+        we               = 0;
+        rs1              = 5'd0;
+        clk.next        (2);
+        $assert_continue(rd1 == 32'h0, "x0 は書き込んでも 0");
+
+        // we=0 では書き込まれない
+        we               = 0;
+        rd               = 5'd1;
+        wdata            = 32'h0000_0000;
+        clk.next        (2);
+        rs1              = 5'd1;
+        clk.next        (2);
+        $assert_continue(rd1 == 32'hdead_beef, "we=0 では更新しない");
+
+        // 同一レジスタを 2 ポートから読む
+        rs1              = 5'd1;
+        rs2              = 5'd1;
+        clk.next        (2);
+        $assert_continue(rd1 == 32'hdead_beef, "同一レジスタ port1");
+        $assert_continue(rd2 == 32'hdead_beef, "同一レジスタ port2");
+
+        $finish();
+    }
+}

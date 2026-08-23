@@ -1,0 +1,32 @@
+/// ソフトコアのブート ROM (docs/riscv.md「ブートフロー」)
+///
+/// `RvBootRom`（scripts/gen_riscv_boot.py が software/hello.S から生成）を
+/// 登録読み出しで返す．握手は RvMem と同じで，要求の次サイクルに `o_done`．
+/// case 式の ROM は yosys が BSRAM へ推論する（FontRom と同じ方式）．
+pub module RvRom (
+    i_clk: input clock, /// クロック
+    i_rst: input reset, /// リセット
+
+    i_valid: input  logic    , /// アクセス要求
+    i_addr : input  logic<32>, /// バイトアドレス
+    o_done : output logic    , /// 完了（1 サイクル）
+    o_rdata: output logic<32>, /// リードデータ
+) {
+    var pending: logic;
+
+    let accept: logic = i_valid && !pending;
+
+    always_ff (i_clk, i_rst) {
+        if_reset {
+            pending = 0;
+            o_rdata = 0;
+        } else {
+            pending = accept;
+            if accept {
+                o_rdata = RvBootRom::Word(i_addr[17:2]);
+            }
+        }
+    }
+
+    assign o_done = pending;
+}

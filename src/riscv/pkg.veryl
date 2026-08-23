@@ -1,0 +1,167 @@
+/// RISC-V コアの共有型定義 (docs/riscv.md「ISA スコープ」)
+///
+/// 命令符号化は RISC-V Instruction Set Manual
+/// (release riscv-isa-release-fcd15c1-2026-08-18，docs/riscv.md 一次資料表) の
+/// RV32I 基本整数命令セットの表に従う．
+pub package RvPkg {
+    /// ALU 演算種別
+    enum AluOp: logic<4> {
+        /// 加算 (ADD/ADDI，アドレス計算，PC 相対)
+        add,
+        /// 減算 (SUB)
+        sub,
+        /// 論理左シフト (SLL/SLLI)
+        sll,
+        /// 符号付き比較 (SLT/SLTI)
+        slt,
+        /// 符号なし比較 (SLTU/SLTIU)
+        sltu,
+        /// 排他的論理和 (XOR/XORI)
+        bxor,
+        /// 論理右シフト (SRL/SRLI)
+        srl,
+        /// 算術右シフト (SRA/SRAI)
+        sra,
+        /// 論理和 (OR/ORI)
+        bor,
+        /// 論理積 (AND/ANDI)
+        band,
+        /// b をそのまま通す (LUI)
+        passb,
+    }
+
+    /// 分岐条件 (funct3 と同じ符号)
+    enum BranchOp: logic<3> {
+        /// BEQ
+        beq = 3'b000,
+        /// BNE
+        bne = 3'b001,
+        /// BLT
+        blt = 3'b100,
+        /// BGE
+        bge = 3'b101,
+        /// BLTU
+        bltu = 3'b110,
+        /// BGEU
+        bgeu = 3'b111,
+    }
+
+    /// ALU の第 1 入力の選択
+    enum SrcA: logic<1> {
+        /// レジスタ rs1
+        rs1,
+        /// 命令の PC (AUIPC / JAL の PC 相対計算)
+        pc,
+    }
+
+    /// ALU の第 2 入力の選択
+    enum SrcB: logic<1> {
+        /// レジスタ rs2
+        rs2,
+        /// 即値
+        imm,
+    }
+
+    /// レジスタ書き込み値の選択
+    enum WbSel: logic<2> {
+        /// ALU の結果
+        alu,
+        /// メモリ読み出し値
+        mem,
+        /// 次命令のアドレス (JAL / JALR のリンク)
+        pc4,
+        /// CSR の読み出し値
+        csr,
+    }
+
+    /// SYSTEM 命令の種別
+    enum SysOp: logic<3> {
+        /// SYSTEM 以外
+        none,
+        /// CSR 読み書き
+        csr,
+        /// ECALL
+        ecall,
+        /// EBREAK
+        ebreak,
+        /// MRET
+        mret,
+    }
+
+    /// メモリアクセス幅・符号 (funct3 と同じ符号)
+    enum MemOp: logic<3> {
+        /// 8 bit 符号拡張 (LB) / 8 bit ストア (SB)
+        b = 3'b000,
+        /// 16 bit 符号拡張 (LH) / 16 bit ストア (SH)
+        h = 3'b001,
+        /// 32 bit (LW / SW)
+        w = 3'b010,
+        /// 8 bit ゼロ拡張 (LBU)
+        bu = 3'b100,
+        /// 16 bit ゼロ拡張 (LHU)
+        hu = 3'b101,
+    }
+
+    /// デコード結果
+    struct Decoded {
+        /// 書き込み先レジスタ番号
+        rd: logic<5>,
+        /// 読み出しレジスタ番号 1
+        rs1: logic<5>,
+        /// 読み出しレジスタ番号 2
+        rs2: logic<5>,
+        /// 符号拡張済み即値 (命令形式に応じて選択済み)
+        imm: logic<32>,
+        /// ALU 演算
+        alu_op: AluOp,
+        /// ALU 第 1 入力
+        src_a: SrcA,
+        /// ALU 第 2 入力
+        src_b: SrcB,
+        /// レジスタ書き込み値の選択
+        wb_sel: WbSel,
+        /// レジスタ書き込みを行う
+        reg_write: logic,
+        /// メモリ読み出し (ロード)
+        mem_read: logic,
+        /// メモリ書き込み (ストア)
+        mem_write: logic,
+        /// メモリアクセス幅・符号
+        mem_op: MemOp,
+        /// 条件分岐命令
+        branch: logic,
+        /// 分岐条件
+        branch_op: BranchOp,
+        /// 無条件ジャンプ (JAL / JALR)
+        jump: logic,
+        /// ジャンプ先を rs1 + imm とする (JALR)．0 なら PC + imm (JAL)
+        jalr: logic,
+        /// M 拡張の乗除算命令
+        muldiv: logic,
+        /// 乗除算の種別 (funct3)
+        md_op: logic<3>,
+        /// SYSTEM 命令の種別
+        sys_op: SysOp,
+        /// CSR 操作 (01=RW / 10=RS / 11=RC)
+        csr_op: logic<2>,
+        /// CSR の書き込み元が即値 (uimm) である
+        csr_imm: logic,
+        /// CSR 番号
+        csr_addr: logic<12>,
+        /// 未定義命令
+        illegal: logic,
+    }
+
+    // ---- opcode (命令[6:0]) ----
+    const OpLui   : logic<7> = 7'b0110111;
+    const OpAuipc : logic<7> = 7'b0010111;
+    const OpJal   : logic<7> = 7'b1101111;
+    const OpJalr  : logic<7> = 7'b1100111;
+    const OpBranch: logic<7> = 7'b1100011;
+    const OpLoad  : logic<7> = 7'b0000011;
+    const OpStore : logic<7> = 7'b0100011;
+    const OpImm   : logic<7> = 7'b0010011;
+    const OpReg   : logic<7> = 7'b0110011;
+    const OpFence : logic<7> = 7'b0001111;
+    const OpSystem: logic<7> = 7'b1110011;
+}

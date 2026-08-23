@@ -1,0 +1,168 @@
+/// RV32I ソフトコアのブリングアップ用トップ (docs/riscv.md パッチ計画 #6)
+///
+/// 既存の Top（UART エコー + LCD + PSRAM + TF カード）とは別のビットストリームで，
+/// ソフトコアだけを動かす最小構成．LUT 予算の都合で両者は同居できないため，
+/// ペリフェラルをソフトウェアへ移すまでの間はこのトップで検証する
+/// （docs/riscv.md「残課題・リスク」の LUT 予算）．
+///
+/// ```mermaid
+/// flowchart LR
+///     ROM["RvBootRom<br>(software/hello.S)"] --> SOC
+///     SOC["RvSoc<br>RvCore + ROM + RAM + MMIO"] -- "stream_if" --> TX["Uart TX"] -- uart_tx --> PC["PC (COMポート)"]
+///     SOC -- "AXI4-Lite" --> PS["PsramSubsystem<br>rPLL + SDR phy + ctrl + bridge"] <--> RAM["内蔵 PSRAM ch0"]
+///     TX -. "傍受 (valid && ready)" .-> CON["TextConsole"] --> LCD["5inch LCD"]
+///     SOC --> LEDS["leds (active-low)"]
+/// ```
+pub module TopRv #(
+    /// オシレータ周波数 [Hz]
+    param OscFreq: u32 = 27_000_000,
+    /// LED 数
+    param NumLeds: u32 = 6,
+) (
+    i_clk  : input  clock         , /// 27 MHz オシレータ
+    i_rst  : input  reset         , /// S1 ボタン (active-low)
+    leds   : output logic<NumLeds>, /// LED (active-low)
+    uart_tx: output logic         , /// UART TX
+    uart_rx: input  logic         , /// UART RX (未使用．読み捨てる)
+    // LCD (5inch 800x480 RGB565, DE モード)．UART TX を傍受して表示する
+    lcd_clk  : output logic   , /// LCD ピクセルクロック (反転出力)
+    lcd_de   : output logic   , /// LCD データイネーブル
+    lcd_hsync: output logic   , /// LCD 水平同期 (負極性)
+    lcd_vsync: output logic   , /// LCD 垂直同期 (負極性)
+    lcd_r    : output logic<5>, /// LCD R (RGB565)
+    lcd_g    : output logic<6>, /// LCD G (RGB565)
+    lcd_b    : output logic<5>, /// LCD B (RGB565)
+    // PSRAM (GW1NR-9 内蔵)．ポート名をマジックポート名に一致させることで
+    // nextpnr が cst なしで内蔵パッドへ自動配置する (docs/psram.md)
+    O_psram_ck     : output logic    <2> , /// PSRAM CK (ch1:ch0)
+    O_psram_ck_n   : output logic    <2> , /// PSRAM CK# (差動)
+    O_psram_cs_n   : output logic    <2> , /// PSRAM CS#
+    O_psram_reset_n: output logic    <2> , /// PSRAM RESET#
+    IO_psram_dq    : inout  tri logic<16>, /// PSRAM DQ (ch0=下位8bit)
+    IO_psram_rwds  : inout  tri logic<2> , /// PSRAM RWDS (ch0=bit0)
+    // TF カード (SPI モード)．MMIO のセクタリーダから駆動する
+    tf_sclk: output logic, /// TF SCK
+    tf_mosi: output logic, /// TF MOSI
+    tf_cs_n: output logic, /// TF CS#
+    tf_miso: input  logic, /// TF MISO
+) {
+    inst ps_axi: $std::axi4_lite_if::<$std::axi4_lite_pkg::<22, 4, 1>>;
+
+    assign ps_axi.awid = 0;
+    assign ps_axi.arid = 0;
+    inst tx_stream: stream_if;
+    inst rx_stream: stream_if;
+
+    inst uart: Uart #(
+        InClkFreq: OscFreq,
+        BaudRate : 115200 ,
+    ) (
+        i_clk               ,
+        i_rst               ,
+        uart_tx             ,
+        uart_rx             ,
+        tx_stream: tx_stream,
+        rx_stream: rx_stream,
+    );
+
+    var soc_leds     : logic<6> ;
+    var _tohost_valid: logic    ;
+    var _tohost      : logic<32>;
+    var _pc          : logic<32>;
+    var _trap        : logic    ;
+    var _cause       : logic<32>;
+    var illegal      : logic    ;
+
+    inst soc: RvSoc #(
+        RamWords: 2048,
+    ) (
+        i_clk                        ,
+        i_rst                        ,
+        tx            : tx_stream    ,
+        rx            : rx_stream    ,
+        m_psram       : ps_axi       ,
+        o_leds        : soc_leds     ,
+        o_tohost_valid: _tohost_valid,
+        o_tohost      : _tohost      ,
+        o_pc          : _pc          ,
+        o_trap        : _trap        ,
+        o_cause       : _cause       ,
+        o_illegal     : illegal      ,
+        o_tf_sclk     : tf_sclk      ,
+        o_tf_mosi     : tf_mosi      ,
+        o_tf_cs_n     : tf_cs_n      ,
+        i_tf_miso     : tf_miso      ,
+    );
+
+    var _ps_init_done: logic;
+    var _ps_init_ok  : logic;
+    var _ps_pll_lock : logic;
+
+    inst psram: PsramSubsystem (
+        i_clk                         ,
+        i_rst                         ,
+        s_axi          : ps_axi       ,
+        o_init_done    : _ps_init_done,
+        o_init_ok      : _ps_init_ok  ,
+        o_pll_lock     : _ps_pll_lock ,
+        O_psram_ck                    ,
+        O_psram_ck_n                  ,
+        O_psram_cs_n                  ,
+        O_psram_reset_n               ,
+        IO_psram_dq                   ,
+        IO_psram_rwds                 ,
+    );
+
+    // LCD: UART TX へ流れるバイト列を傍受してテキスト表示する (白文字 / 黒背景)．
+    // 実機で UART を繋がなくても出力が読めるようにするための観測手段で，
+    // 既存 Top と同じ構成 (docs/rtl.md)
+    var vt_de    : logic    ;
+    var vt_hsync : logic    ;
+    var vt_vsync : logic    ;
+    var vt_pos_x : logic<10>;
+    var vt_pos_y : logic<9> ;
+    var _vt_frame: logic    ;
+    var px       : logic    ;
+
+    inst video_timing: VideoTiming (
+        i_clk           ,
+        i_rst           ,
+        de   : vt_de    ,
+        hsync: vt_hsync ,
+        vsync: vt_vsync ,
+        frame: _vt_frame,
+        pos_x: vt_pos_x ,
+        pos_y: vt_pos_y ,
+    );
+
+    // handshake 成立サイクルを傍受する (TX へ流れる全バイト)
+    let snoop_valid: logic = tx_stream.valid && tx_stream.ready;
+
+    inst console: TextConsole (
+        i_clk                       ,
+        i_rst                       ,
+        i_char_valid: snoop_valid   ,
+        i_char      : tx_stream.data,
+        i_de        : vt_de         ,
+        i_hsync     : vt_hsync      ,
+        i_vsync     : vt_vsync      ,
+        i_pos_x     : vt_pos_x      ,
+        i_pos_y     : vt_pos_y      ,
+        o_de        : lcd_de        ,
+        o_hsync     : lcd_hsync     ,
+        o_vsync     : lcd_vsync     ,
+        o_pixel     : px            ,
+    );
+
+    // 文字前景 = 白，背景 = 黒
+    assign lcd_r = if px ? 5'h1f : 0;
+    assign lcd_g = if px ? 6'h3f : 0;
+    assign lcd_b = if px ? 5'h1f : 0;
+
+    // パネルは DCLK 立上りでデータをラッチするため，反転出力でデータ遷移と
+    // サンプリングエッジを半周期ずらす
+    assign lcd_clk = ~i_clk;
+
+    // LED は active-low．未定義命令で停止した場合は全点灯にして異常を示す
+    assign leds = if illegal ? 6'b000000 : ~soc_leds;
+}

@@ -1,0 +1,84 @@
+// Tang Nano 9K (GW1NR-LV9QN88PC6/I5) — TopRv (RV32I ソフトコア) 用
+// 既存 Top 用は tangnano9k.cst．こちらは clk/rst/LED/UART のみを使う
+// Pin assignments per Sipeed official examples (TangNano-9K-example/led, /uart)
+// i_clk   : 27 MHz onboard oscillator
+// i_rst   : S1 button, active-low (matches Veryl default reset: async active-low)
+// leds    : 6 onboard LEDs, active-low
+// uart_tx : FPGA TX -> BL702 -> PC (USB-CDC serial)
+// uart_rx : PC -> BL702 -> FPGA RX
+
+IO_LOC  "i_clk" 52;
+IO_PORT "i_clk" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+
+IO_LOC  "i_rst" 4;
+IO_PORT "i_rst" PULL_MODE=UP;
+
+IO_LOC  "leds[0]" 10;
+IO_PORT "leds[0]" PULL_MODE=UP DRIVE=8;
+IO_LOC  "leds[1]" 11;
+IO_PORT "leds[1]" PULL_MODE=UP DRIVE=8;
+IO_LOC  "leds[2]" 13;
+IO_PORT "leds[2]" PULL_MODE=UP DRIVE=8;
+IO_LOC  "leds[3]" 14;
+IO_PORT "leds[3]" PULL_MODE=UP DRIVE=8;
+IO_LOC  "leds[4]" 15;
+IO_PORT "leds[4]" PULL_MODE=UP DRIVE=8;
+IO_LOC  "leds[5]" 16;
+IO_PORT "leds[5]" PULL_MODE=UP DRIVE=8;
+
+IO_LOC  "uart_tx" 17;
+IO_PORT "uart_tx" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+IO_LOC  "uart_rx" 18;
+IO_PORT "uart_rx" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+
+// LCD (Sipeed公式 lcd_4.3/src/Tang_nano_9K_LCD.cst 準拠)
+IO_LOC  "lcd_clk" 35;
+IO_PORT "lcd_clk" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=24;
+IO_LOC  "lcd_de" 33;
+IO_PORT "lcd_de" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=24;
+IO_LOC  "lcd_vsync" 34;
+IO_PORT "lcd_vsync" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=24;
+IO_LOC  "lcd_hsync" 40;
+IO_PORT "lcd_hsync" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=24;
+IO_LOC  "lcd_b[4]" 41;
+IO_PORT "lcd_b[4]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=24;
+IO_LOC  "lcd_b[3]" 42;
+IO_PORT "lcd_b[3]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=24;
+IO_LOC  "lcd_b[2]" 51;
+IO_PORT "lcd_b[2]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=24;
+IO_LOC  "lcd_b[1]" 53;
+IO_PORT "lcd_b[1]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=24;
+IO_LOC  "lcd_b[0]" 54;
+IO_PORT "lcd_b[0]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=24;
+IO_LOC  "lcd_g[5]" 55;
+IO_PORT "lcd_g[5]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=24;
+IO_LOC  "lcd_g[4]" 56;
+IO_PORT "lcd_g[4]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=24;
+IO_LOC  "lcd_g[3]" 57;
+IO_PORT "lcd_g[3]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=24;
+IO_LOC  "lcd_g[2]" 68;
+IO_PORT "lcd_g[2]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=24;
+IO_LOC  "lcd_g[1]" 69;
+IO_PORT "lcd_g[1]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=24;
+IO_LOC  "lcd_g[0]" 70;
+IO_PORT "lcd_g[0]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=24;
+IO_LOC  "lcd_r[4]" 71;
+IO_PORT "lcd_r[4]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=24;
+IO_LOC  "lcd_r[3]" 72;
+IO_PORT "lcd_r[3]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=24;
+IO_LOC  "lcd_r[2]" 73;
+IO_PORT "lcd_r[2]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=24;
+IO_LOC  "lcd_r[1]" 74;
+IO_PORT "lcd_r[1]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=24;
+IO_LOC  "lcd_r[0]" 75;
+IO_PORT "lcd_r[0]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=24;
+
+// TF card slot, SPI mode (tangnano9k.cst と同じピン．docs/tfcard.md)
+IO_LOC  "tf_sclk" 36;
+IO_PORT "tf_sclk" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+IO_LOC  "tf_mosi" 37;
+IO_PORT "tf_mosi" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+IO_LOC  "tf_cs_n" 38;
+IO_PORT "tf_cs_n" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+IO_LOC  "tf_miso" 39;
+IO_PORT "tf_miso" IO_TYPE=LVCMOS33 PULL_MODE=UP;
