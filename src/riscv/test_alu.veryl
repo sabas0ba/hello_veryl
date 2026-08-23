@@ -1,0 +1,125 @@
+// RvAlu の L1 テスト (docs/riscv.md「検証」)
+// 各演算の代表値と境界 (符号付き比較・算術右シフト・シフト量の 5 bit 切り出し) を検証する．
+
+#[test(test_rv_alu)]
+module test_rv_alu {
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    var op: RvPkg::AluOp    ;
+    var a : logic       <32>;
+    var b : logic       <32>;
+    var y : logic       <32>;
+
+    inst dut: RvAlu (
+        i_op: op,
+        i_a : a ,
+        i_b : b ,
+        o_y : y ,
+    );
+
+    initial {
+        rst.assert();
+
+        // add: 2 の補数で桁あふれは折り返す
+        op               = RvPkg::AluOp::add;
+        a                = 32'h0000_0001;
+        b                = 32'h0000_0002;
+        clk.next        (1);
+        $assert_continue(y == 32'h0000_0003, "add");
+        a                = 32'hffff_ffff;
+        b                = 32'h0000_0001;
+        clk.next        (1);
+        $assert_continue(y == 32'h0000_0000, "add 折り返し");
+
+        // sub
+        op               = RvPkg::AluOp::sub;
+        a                = 32'h0000_0000;
+        b                = 32'h0000_0001;
+        clk.next        (1);
+        $assert_continue(y == 32'hffff_ffff, "sub 借り");
+
+        // sll: シフト量は b の下位 5 bit のみ (0x21 -> 1)
+        op               = RvPkg::AluOp::sll;
+        a                = 32'h0000_0001;
+        b                = 32'h0000_0021;
+        clk.next        (1);
+        $assert_continue(y == 32'h0000_0002, "sll shamt=b[4:0]");
+        b                = 32'h0000_001f;
+        clk.next        (1);
+        $assert_continue(y == 32'h8000_0000, "sll 31");
+
+        // srl: 論理右シフト (符号は伸びない)
+        op               = RvPkg::AluOp::srl;
+        a                = 32'h8000_0000;
+        b                = 32'h0000_001f;
+        clk.next        (1);
+        $assert_continue(y == 32'h0000_0001, "srl 31");
+
+        // sra: 算術右シフト (符号が伸びる)
+        op               = RvPkg::AluOp::sra;
+        a                = 32'h8000_0000;
+        b                = 32'h0000_001f;
+        clk.next        (1);
+        $assert_continue(y == 32'hffff_ffff, "sra 負値 31");
+        a                = 32'h7fff_ffff;
+        clk.next        (1);
+        $assert_continue(y == 32'h0000_0000, "sra 正値 31");
+        a                = 32'hffff_fff0;
+        b                = 32'h0000_0004;
+        clk.next        (1);
+        $assert_continue(y == 32'hffff_ffff, "sra -16 >> 4");
+
+        // slt: 符号付き比較
+        op               = RvPkg::AluOp::slt;
+        a                = 32'hffff_ffff; // -1
+        b                = 32'h0000_0001; // +1
+        clk.next        (1);
+        $assert_continue(y == 32'h0000_0001, "slt -1 < 1");
+        a                = 32'h0000_0001;
+        b                = 32'hffff_ffff;
+        clk.next        (1);
+        $assert_continue(y == 32'h0000_0000, "slt 1 < -1 は偽");
+        a                = 32'hffff_fffe; // -2
+        b                = 32'hffff_ffff; // -1
+        clk.next        (1);
+        $assert_continue(y == 32'h0000_0001, "slt -2 < -1 (同符号)");
+        a                = 32'h0000_0005;
+        b                = 32'h0000_0005;
+        clk.next        (1);
+        $assert_continue(y == 32'h0000_0000, "slt 等値は偽");
+
+        // sltu: 符号なし比較 (0xffffffff は最大値)
+        op               = RvPkg::AluOp::sltu;
+        a                = 32'hffff_ffff;
+        b                = 32'h0000_0001;
+        clk.next        (1);
+        $assert_continue(y == 32'h0000_0000, "sltu 最大値 < 1 は偽");
+        a                = 32'h0000_0001;
+        b                = 32'hffff_ffff;
+        clk.next        (1);
+        $assert_continue(y == 32'h0000_0001, "sltu 1 < 最大値");
+
+        // ビット演算
+        op               = RvPkg::AluOp::bxor;
+        a                = 32'hff00_ff00;
+        b                = 32'h0f0f_0f0f;
+        clk.next        (1);
+        $assert_continue(y == 32'hf00f_f00f, "xor");
+        op               = RvPkg::AluOp::bor;
+        clk.next        (1);
+        $assert_continue(y == 32'hff0f_ff0f, "or");
+        op               = RvPkg::AluOp::band;
+        clk.next        (1);
+        $assert_continue(y == 32'h0f00_0f00, "and");
+
+        // passb: LUI 用に b をそのまま通す
+        op               = RvPkg::AluOp::passb;
+        a                = 32'hdead_beef;
+        b                = 32'habcd_e000;
+        clk.next        (1);
+        $assert_continue(y == 32'habcd_e000, "passb");
+
+        $finish();
+    }
+}

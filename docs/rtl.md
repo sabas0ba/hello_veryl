@@ -63,6 +63,7 @@ LED 割当（すべて active-low）:
 | ImageScanout | src/video/image_scanout.veryl | PSRAM フレームバッファを 8x8 複製で LCD へスキャンアウト（[tfcard.md](tfcard.md)） |
 | PsramAxiArb2 | src/psram/axi_arb2.veryl | AXI4-Lite 2 マスタ固定優先度アービタ（2 段で 3 マスタを合成） |
 | AxiLiteMemModel | src/psram/axi_mem_model.veryl | L1 用 AXI4-Lite メモリモデル（合成対象外） |
+| RvDecoder / RvAlu / RvRegFile | src/riscv/ | RV32I ソフトコアの構成要素（[riscv.md](riscv.md)） |
 | stream_if | src/common/stream.veryl | valid/ready ハンドシェイクの汎用 stream interface |
 | Uart | src/uart/uart.veryl | 115200bps 8N1．RX は 2FF 同期 + 中央サンプリング，ノンブロッキング供給 |
 | VideoTiming | src/video/timing.veryl | LCD タイミング生成（datasheet 導出の 27MHz 直結 59.1Hz，HTotal=890 x VTotal=513） |

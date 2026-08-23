@@ -1,0 +1,39 @@
+/// RV32I のレジスタファイル (docs/riscv.md「マイクロアーキテクチャ」)
+///
+/// 32 x 32 bit．読み出し 2 ポート・書き込み 1 ポートで，読み出しは組合せ．
+/// BSRAM ではなくフリップフロップで持つ (992 bit は DFF の空きに対して小さく，
+/// 読み出し 2 ポートを 1 サイクルで取れる)．
+///
+/// x0 は読み出し 0 固定・書き込み無効
+/// (RISC-V Instruction Set Manual の RV32I レジスタ定義)．
+pub module RvRegFile (
+    i_clk: input clock, /// クロック
+    i_rst: input reset, /// リセット
+
+    i_rs1: input  logic<5> , /// 読み出しレジスタ番号 1
+    o_rd1: output logic<32>, /// 読み出し値 1
+    i_rs2: input  logic<5> , /// 読み出しレジスタ番号 2
+    o_rd2: output logic<32>, /// 読み出し値 2
+
+    i_we   : input logic    , /// 書き込みイネーブル
+    i_rd   : input logic<5> , /// 書き込み先レジスタ番号
+    i_wdata: input logic<32>, /// 書き込みデータ
+) {
+    var regs: logic<32> [32];
+
+    // x0 は常に 0．書き込みは下の always_ff で無効化する
+    assign o_rd1 = if i_rs1 == 0 ? 32'b0 : regs[i_rs1];
+    assign o_rd2 = if i_rs2 == 0 ? 32'b0 : regs[i_rs2];
+
+    always_ff (i_clk, i_rst) {
+        if_reset {
+            for i in 0..32 {
+                regs[i] = 0;
+            }
+        } else {
+            if i_we && i_rd != 0 {
+                regs[i_rd] = i_wdata;
+            }
+        }
+    }
+}

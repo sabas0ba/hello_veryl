@@ -1,0 +1,165 @@
+/// RV32I 命令デコーダ (docs/riscv.md「ISA スコープ」)
+///
+/// 命令語を制御信号と符号拡張済み即値へ変換する組合せ回路．
+/// 符号は RISC-V Instruction Set Manual の RV32I 基本整数命令セットの表に従う
+/// (docs/riscv.md 一次資料表)．
+///
+/// 即値の形式:
+///
+/// | 形式 | 構成 |
+/// | --- | --- |
+/// | I | sext(inst[31:20]) |
+/// | S | sext({inst[31:25], inst[11:7]}) |
+/// | B | sext({inst[31], inst[7], inst[30:25], inst[11:8], 1'b0}) |
+/// | U | {inst[31:12], 12'b0} |
+/// | J | sext({inst[31], inst[19:12], inst[20], inst[30:21], 1'b0}) |
+///
+/// FENCE (MISC-MEM) は本コアではメモリ順序の並べ替えを行わないため NOP として
+/// 受理する．SYSTEM (ECALL/EBREAK) と未定義符号は `illegal` を立てる
+/// (Zicsr は段階 9)．
+pub module RvDecoder (
+    i_inst: input  logic         <32>, /// 命令語
+    o_dec : output RvPkg::Decoded    , /// デコード結果
+) {
+    let opcode: logic<7> = i_inst[6:0];
+    let rd    : logic<5> = i_inst[11:7];
+    let funct3: logic<3> = i_inst[14:12];
+    let rs1   : logic<5> = i_inst[19:15];
+    let rs2   : logic<5> = i_inst[24:20];
+    let funct7: logic<7> = i_inst[31:25];
+
+    // ---- 即値 ----
+    let imm_i: logic<32> = {i_inst[31] repeat 20, i_inst[31:20]};
+    let imm_s: logic<32> = {i_inst[31] repeat 20, i_inst[31:25], i_inst[11:7]};
+    let imm_b: logic<32> = {i_inst[31] repeat 20, i_inst[7], i_inst[30:25], i_inst[11:8], 1'b0};
+    let imm_u: logic<32> = {i_inst[31:12], 12'b0};
+    let imm_j: logic<32> = {i_inst[31] repeat 12, i_inst[19:12], i_inst[20], i_inst[30:21], 1'b0};
+
+    // ---- OP / OP-IMM の ALU 演算 ----
+    // funct7 で区別するのは ADD/SUB (OP) と SRL/SRA のみ．
+    // SLLI/SRLI/SRAI は shamt が inst[24:20] で funct7 が 0000000/0100000 に限られる
+    let alu_reg: RvPkg::AluOp = case funct3 {
+        3'b000 : if funct7[5] ? RvPkg::AluOp::sub : RvPkg::AluOp::add,
+        3'b001 : RvPkg::AluOp::sll,
+        3'b010 : RvPkg::AluOp::slt,
+        3'b011 : RvPkg::AluOp::sltu,
+        3'b100 : RvPkg::AluOp::bxor,
+        3'b101 : if funct7[5] ? RvPkg::AluOp::sra : RvPkg::AluOp::srl,
+        3'b110 : RvPkg::AluOp::bor,
+        default: RvPkg::AluOp::band,
+    };
+
+    // OP-IMM は ADDI が funct7 を持たないため，funct7 を見るのはシフトのみ
+    let alu_imm: RvPkg::AluOp = case funct3 {
+        3'b000 : RvPkg::AluOp::add,
+        3'b001 : RvPkg::AluOp::sll,
+        3'b010 : RvPkg::AluOp::slt,
+        3'b011 : RvPkg::AluOp::sltu,
+        3'b100 : RvPkg::AluOp::bxor,
+        3'b101 : if funct7[5] ? RvPkg::AluOp::sra : RvPkg::AluOp::srl,
+        3'b110 : RvPkg::AluOp::bor,
+        default: RvPkg::AluOp::band,
+    };
+
+    // ---- 符号の妥当性 ----
+    // OP: funct7 は 0000000 か 0100000 のみ．0100000 は ADD/SUB と SRL/SRA だけ
+    let f7_zero: logic = funct7 == 7'b0000000;
+    let f7_alt : logic = funct7 == 7'b0100000;
+    let reg_ok : logic = f7_zero || (f7_alt && (funct3 == 3'b000 || funct3 == 3'b101));
+    // OP-IMM: シフト系のみ funct7 を検査する (SLLI は 0000000，SRLI/SRAI は 0000000/0100000)
+    let imm_shift: logic = funct3 == 3'b001 || funct3 == 3'b101;
+    let imm_ok   : logic = if imm_shift ? (f7_zero || (f7_alt && funct3 == 3'b101)) : 1'b1;
+    let branch_ok: logic = funct3 != 3'b010 && funct3 != 3'b011;
+    let load_ok  : logic = funct3 != 3'b011 && funct3 != 3'b110 && funct3 != 3'b111;
+    let store_ok : logic = funct3 == 3'b000 || funct3 == 3'b001 || funct3 == 3'b010;
+
+    always_comb {
+        // 既定値: 何もしない未定義命令
+        o_dec.rd        = rd;
+        o_dec.rs1       = rs1;
+        o_dec.rs2       = rs2;
+        o_dec.imm       = imm_i;
+        o_dec.alu_op    = RvPkg::AluOp::add;
+        o_dec.src_a     = RvPkg::SrcA::rs1;
+        o_dec.src_b     = RvPkg::SrcB::imm;
+        o_dec.wb_sel    = RvPkg::WbSel::alu;
+        o_dec.reg_write = 0;
+        o_dec.mem_read  = 0;
+        o_dec.mem_write = 0;
+        o_dec.mem_op    = RvPkg::MemOp::w;
+        o_dec.branch    = 0;
+        o_dec.branch_op = RvPkg::BranchOp::beq;
+        o_dec.jump      = 0;
+        o_dec.jalr      = 0;
+        o_dec.illegal   = 1;
+
+        case opcode {
+            RvPkg::OpLui: {
+                o_dec.imm       = imm_u;
+                o_dec.alu_op    = RvPkg::AluOp::passb;
+                o_dec.reg_write = 1;
+                o_dec.illegal   = 0;
+            }
+            RvPkg::OpAuipc: {
+                o_dec.imm       = imm_u;
+                o_dec.src_a     = RvPkg::SrcA::pc;
+                o_dec.reg_write = 1;
+                o_dec.illegal   = 0;
+            }
+            RvPkg::OpJal: {
+                o_dec.imm       = imm_j;
+                o_dec.src_a     = RvPkg::SrcA::pc;
+                o_dec.wb_sel    = RvPkg::WbSel::pc4;
+                o_dec.reg_write = 1;
+                o_dec.jump      = 1;
+                o_dec.illegal   = 0;
+            }
+            RvPkg::OpJalr: {
+                o_dec.imm       = imm_i;
+                o_dec.wb_sel    = RvPkg::WbSel::pc4;
+                o_dec.reg_write = 1;
+                o_dec.jump      = 1;
+                o_dec.jalr      = 1;
+                o_dec.illegal   = funct3 != 3'b000;
+            }
+            RvPkg::OpBranch: {
+                o_dec.imm       = imm_b;
+                o_dec.src_a     = RvPkg::SrcA::pc;
+                o_dec.branch    = 1;
+                o_dec.branch_op = funct3 as RvPkg::BranchOp;
+                o_dec.illegal   = !branch_ok;
+            }
+            RvPkg::OpLoad: {
+                o_dec.imm       = imm_i;
+                o_dec.wb_sel    = RvPkg::WbSel::mem;
+                o_dec.reg_write = 1;
+                o_dec.mem_read  = 1;
+                o_dec.mem_op    = funct3 as RvPkg::MemOp;
+                o_dec.illegal   = !load_ok;
+            }
+            RvPkg::OpStore: {
+                o_dec.imm       = imm_s;
+                o_dec.mem_write = 1;
+                o_dec.mem_op    = funct3 as RvPkg::MemOp;
+                o_dec.illegal   = !store_ok;
+            }
+            RvPkg::OpImm: {
+                o_dec.imm       = imm_i;
+                o_dec.alu_op    = alu_imm;
+                o_dec.reg_write = 1;
+                o_dec.illegal   = !imm_ok;
+            }
+            RvPkg::OpReg: {
+                o_dec.alu_op    = alu_reg;
+                o_dec.src_b     = RvPkg::SrcB::rs2;
+                o_dec.reg_write = 1;
+                o_dec.illegal   = !reg_ok;
+            }
+            RvPkg::OpFence: {
+                // メモリ順序の並べ替えを行わないため NOP として受理する
+                o_dec.illegal = 0;
+            }
+            default: {}
+        }
+    }
+}

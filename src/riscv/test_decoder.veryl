@@ -1,0 +1,215 @@
+// RvDecoder の L1 テスト (docs/riscv.md「検証」)
+//
+// 命令語はハンドエンコードではなく riscv64-unknown-elf-gcc でアセンブルした値を
+// 使う (テストベクタ自体の符号化誤りを排除するため)．元のアセンブリと
+// 逆アセンブル結果は各ケースのコメントに残す．
+
+#[test(test_rv_decoder)]
+module test_rv_decoder {
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    var iw : logic         <32>;
+    var dec: RvPkg::Decoded    ;
+
+    inst dut: RvDecoder (
+        i_inst: iw ,
+        o_dec : dec,
+    );
+
+    initial {
+        rst.assert();
+
+        // lui ra, 0xabcde  -> abcde0b7
+        iw               = 32'habcde0b7;
+        clk.next        (1);
+        $assert_continue(dec.illegal == 1'b0, "lui legal");
+        $assert_continue(dec.rd == 5'd1, "lui rd");
+        $assert_continue(dec.imm == 32'habcde000, "lui imm (U)");
+        $assert_continue(dec.alu_op == RvPkg::AluOp::passb, "lui alu");
+        $assert_continue(dec.reg_write == 1'b1, "lui reg_write");
+        $assert_continue(dec.src_b == RvPkg::SrcB::imm, "lui src_b");
+
+        // auipc sp, 0x12345 -> 12345117
+        iw               = 32'h12345117;
+        clk.next        (1);
+        $assert_continue(dec.illegal == 1'b0, "auipc legal");
+        $assert_continue(dec.rd == 5'd2, "auipc rd");
+        $assert_continue(dec.imm == 32'h12345000, "auipc imm (U)");
+        $assert_continue(dec.src_a == RvPkg::SrcA::pc, "auipc src_a");
+        $assert_continue(dec.alu_op == RvPkg::AluOp::add, "auipc alu");
+
+        // jal gp, +0x38 -> 038001ef
+        iw               = 32'h038001ef;
+        clk.next        (1);
+        $assert_continue(dec.illegal == 1'b0, "jal legal");
+        $assert_continue(dec.rd == 5'd3, "jal rd");
+        $assert_continue(dec.imm == 32'h00000038, "jal imm (J)");
+        $assert_continue(dec.jump == 1'b1, "jal jump");
+        $assert_continue(dec.jalr == 1'b0, "jal not jalr");
+        $assert_continue(dec.wb_sel == RvPkg::WbSel::pc4, "jal wb_sel");
+        $assert_continue(dec.src_a == RvPkg::SrcA::pc, "jal src_a");
+
+        // jalr tp, 8(t0) -> 00828267
+        iw               = 32'h00828267;
+        clk.next        (1);
+        $assert_continue(dec.illegal == 1'b0, "jalr legal");
+        $assert_continue(dec.rd == 5'd4, "jalr rd");
+        $assert_continue(dec.rs1 == 5'd5, "jalr rs1");
+        $assert_continue(dec.imm == 32'h00000008, "jalr imm (I)");
+        $assert_continue(dec.jump == 1'b1, "jalr jump");
+        $assert_continue(dec.jalr == 1'b1, "jalr jalr");
+
+        // beq t1, t2, 0 -> 00730063
+        iw               = 32'h00730063;
+        clk.next        (1);
+        $assert_continue(dec.illegal == 1'b0, "beq legal");
+        $assert_continue(dec.rs1 == 5'd6, "beq rs1");
+        $assert_continue(dec.rs2 == 5'd7, "beq rs2");
+        $assert_continue(dec.imm == 32'h00000000, "beq imm (B)");
+        $assert_continue(dec.branch == 1'b1, "beq branch");
+        $assert_continue(dec.branch_op == RvPkg::BranchOp::beq, "beq branch_op");
+        $assert_continue(dec.reg_write == 1'b0, "beq no reg_write");
+
+        // lw s0, -4(s1) -> ffc4a403
+        iw               = 32'hffc4a403;
+        clk.next        (1);
+        $assert_continue(dec.illegal == 1'b0, "lw legal");
+        $assert_continue(dec.rd == 5'd8, "lw rd");
+        $assert_continue(dec.rs1 == 5'd9, "lw rs1");
+        $assert_continue(dec.imm == 32'hfffffffc, "lw imm (I, 負)");
+        $assert_continue(dec.mem_read == 1'b1, "lw mem_read");
+        $assert_continue(dec.mem_op == RvPkg::MemOp::w, "lw mem_op");
+        $assert_continue(dec.wb_sel == RvPkg::WbSel::mem, "lw wb_sel");
+
+        // sw a0, 12(a1) -> 00a5a623
+        iw               = 32'h00a5a623;
+        clk.next        (1);
+        $assert_continue(dec.illegal == 1'b0, "sw legal");
+        $assert_continue(dec.rs1 == 5'd11, "sw rs1");
+        $assert_continue(dec.rs2 == 5'd10, "sw rs2");
+        $assert_continue(dec.imm == 32'h0000000c, "sw imm (S)");
+        $assert_continue(dec.mem_write == 1'b1, "sw mem_write");
+        $assert_continue(dec.reg_write == 1'b0, "sw no reg_write");
+
+        // addi a2, a3, -1 -> fff68613
+        iw               = 32'hfff68613;
+        clk.next        (1);
+        $assert_continue(dec.illegal == 1'b0, "addi legal");
+        $assert_continue(dec.imm == 32'hffffffff, "addi imm (I, 負)");
+        $assert_continue(dec.alu_op == RvPkg::AluOp::add, "addi alu");
+        $assert_continue(dec.src_b == RvPkg::SrcB::imm, "addi src_b");
+
+        // slli a4, a5, 31 -> 01f79713
+        iw               = 32'h01f79713;
+        clk.next        (1);
+        $assert_continue(dec.illegal == 1'b0, "slli legal");
+        $assert_continue(dec.alu_op == RvPkg::AluOp::sll, "slli alu");
+        $assert_continue(dec.imm[4:0] == 5'd31, "slli shamt");
+
+        // srai a6, a7, 5 -> 4058d813 (funct7=0100000 が imm の上位に載る)
+        iw               = 32'h4058d813;
+        clk.next        (1);
+        $assert_continue(dec.illegal == 1'b0, "srai legal");
+        $assert_continue(dec.alu_op == RvPkg::AluOp::sra, "srai alu");
+        $assert_continue(dec.imm[4:0] == 5'd5, "srai shamt");
+
+        // add s2, s3, s4 -> 01498933
+        iw               = 32'h01498933;
+        clk.next        (1);
+        $assert_continue(dec.illegal == 1'b0, "add legal");
+        $assert_continue(dec.alu_op == RvPkg::AluOp::add, "add alu");
+        $assert_continue(dec.src_b == RvPkg::SrcB::rs2, "add src_b");
+        $assert_continue(dec.reg_write == 1'b1, "add reg_write");
+
+        // sub s5, s6, s7 -> 417b0ab3
+        iw               = 32'h417b0ab3;
+        clk.next        (1);
+        $assert_continue(dec.illegal == 1'b0, "sub legal");
+        $assert_continue(dec.alu_op == RvPkg::AluOp::sub, "sub alu");
+
+        // sltu s8, s9, s10 -> 01acbc33
+        iw               = 32'h01acbc33;
+        clk.next        (1);
+        $assert_continue(dec.illegal == 1'b0, "sltu legal");
+        $assert_continue(dec.alu_op == RvPkg::AluOp::sltu, "sltu alu");
+
+        // fence -> 0ff0000f (NOP として受理する)
+        iw               = 32'h0ff0000f;
+        clk.next        (1);
+        $assert_continue(dec.illegal == 1'b0, "fence legal");
+        $assert_continue(dec.reg_write == 1'b0, "fence no reg_write");
+        $assert_continue(dec.mem_read == 1'b0, "fence no mem_read");
+        $assert_continue(dec.mem_write == 1'b0, "fence no mem_write");
+
+        // ecall -> 00000073 (SYSTEM は段階 9 まで未対応)
+        iw               = 32'h00000073;
+        clk.next        (1);
+        $assert_continue(dec.illegal == 1'b1, "ecall illegal");
+
+        // 未定義 opcode 1111111 -> 0000007f
+        iw               = 32'h0000007f;
+        clk.next        (1);
+        $assert_continue(dec.illegal == 1'b1, "未定義 opcode");
+        $assert_continue(dec.reg_write == 1'b0, "未定義でも書き込まない");
+
+        $finish();
+    }
+}
+
+// 符号の妥当性検査: 予約された funct7 / funct3 を弾く
+#[test(test_rv_decoder_illegal)]
+module test_rv_decoder_illegal {
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    var iw : logic         <32>;
+    var dec: RvPkg::Decoded    ;
+
+    inst dut: RvDecoder (
+        i_inst: iw ,
+        o_dec : dec,
+    );
+
+    initial {
+        rst.assert();
+
+        // add (funct3=000) に funct7=0100001 は予約 -> illegal
+        // 0000000 なら add，0100000 なら sub
+        iw               = {7'b0100001, 5'd20, 5'd19, 3'b000, 5'd18, 7'b0110011};
+        clk.next        (1);
+        $assert_continue(dec.illegal == 1'b1, "OP funct7 予約");
+
+        // xor (funct3=100) に funct7=0100000 は予約 -> illegal
+        iw               = {7'b0100000, 5'd20, 5'd19, 3'b100, 5'd18, 7'b0110011};
+        clk.next        (1);
+        $assert_continue(dec.illegal == 1'b1, "OP xor に funct7=0100000");
+
+        // slli (funct3=001) に funct7=0100000 は予約 -> illegal
+        iw               = {7'b0100000, 5'd5, 5'd15, 3'b001, 5'd14, 7'b0010011};
+        clk.next        (1);
+        $assert_continue(dec.illegal == 1'b1, "SLLI funct7 予約");
+
+        // branch funct3=010/011 は未定義
+        iw               = {7'b0000000, 5'd7, 5'd6, 3'b010, 5'd0, 7'b1100011};
+        clk.next        (1);
+        $assert_continue(dec.illegal == 1'b1, "BRANCH funct3=010");
+
+        // load funct3=011 (LD) は RV32I にない
+        iw               = {12'd0, 5'd9, 3'b011, 5'd8, 7'b0000011};
+        clk.next        (1);
+        $assert_continue(dec.illegal == 1'b1, "LOAD funct3=011");
+
+        // store funct3=011 (SD) は RV32I にない
+        iw               = {7'd0, 5'd10, 5'd11, 3'b011, 5'd0, 7'b0100011};
+        clk.next        (1);
+        $assert_continue(dec.illegal == 1'b1, "STORE funct3=011");
+
+        // jalr funct3 != 000 は未定義
+        iw               = {12'd8, 5'd5, 3'b001, 5'd4, 7'b1100111};
+        clk.next        (1);
+        $assert_continue(dec.illegal == 1'b1, "JALR funct3!=000");
+
+        $finish();
+    }
+}
