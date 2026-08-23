@@ -257,6 +257,7 @@ rv32ui の除外は 2 件（rv32um は全件対象）．
 ```
 Hello from the RV32I core on Tang Nano 9K!
 PSRAM OK
+MULDIV OK
 ```
 
 1 行目は自作 RV32I コアがブート ROM から起動し，MMIO の UART ステータスを
@@ -264,7 +265,10 @@ PSRAM OK
 2 行目は **コアが PSRAM へ 64 語のパターンを書き，読み返して全て一致した**
 ことを示す（`software/hello.S`）．経路は
 コア → `RvAxiMaster` → AXI4-Lite → `PsramAxiBridge`（CDC 27↔54 MHz）→
-`PsramCtrl` → `PsramPhySdr` → HyperBus．続く LED 点滅ループも同じプログラムに含まれる．
+`PsramCtrl` → `PsramPhySdr` → HyperBus．
+3 行目は M 拡張の確認で，乗除算の代表値・符号付き除算の切り捨て方向・
+剰余の符号・ゼロ除算の規定値がすべて一致したことを示す．
+続く LED 点滅ループも同じプログラムに含まれる．
 
 #### 複数ボード接続時の誤書き込み防止
 
@@ -342,7 +346,7 @@ PSRAM サブシステムを含まない段階 6 時点では LUT4 2729（31%）�
 | 5 | riscv-tests 実行環境（rv32ui） | L2 | 済（40 件全 pass） |
 | 6 | MMIO（UART / LED）と実機での文字列出力 | L4 | 済（実機で出力を確認） |
 | 7 | AXI4-Lite マスタ化して PSRAM を接続 | L1 / L4 | 済（実機で PSRAM OK） |
-| 8 | M 拡張（乗除算） | L1 / L2 | RTL・L2（rv32um 8 件 pass）済．実機確認は保留（下記） |
+| 8 | M 拡張（乗除算） | L1 / L2 / L4 | 済（実機で MULDIV OK） |
 | 9 | Zicsr・割り込み・タイマ（CLINT） | L1 / L2 | 未 |
 | 10 | TF カードからのプログラムロード（第一段ローダ） | L4 | 未 |
 | 11 | LCD デモ（Donut / フレームバッファ描画） | L4 | 未 |
