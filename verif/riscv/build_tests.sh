@@ -16,8 +16,12 @@ fi
 
 mkdir -p "$OUT"
 
-# fence.i は Zifencei 拡張であり本コアの対象外 (docs/riscv.md「ISA スコープ」)
-SKIP="fence_i"
+# 対象外の拡張・機能 (docs/riscv.md「ISA スコープ」「残課題・リスク」)
+#   fence_i: fence.i は Zifencei 拡張
+#   ma_data: 非整列アクセスがハードウェアで動作することを要求する．RISC-V 仕様は
+#            「ハードウェア対応」と「アドレス非整列例外の送出」のいずれも許容するが，
+#            本コアは現状どちらでもない (例外は Zicsr と併せて段階 9)
+SKIP="fence_i ma_data"
 
 ok=0
 skipped=""
