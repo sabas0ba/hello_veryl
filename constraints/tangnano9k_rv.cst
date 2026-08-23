@@ -72,3 +72,13 @@ IO_LOC  "lcd_r[1]" 74;
 IO_PORT "lcd_r[1]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=24;
 IO_LOC  "lcd_r[0]" 75;
 IO_PORT "lcd_r[0]" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=24;
+
+// TF card slot, SPI mode (tangnano9k.cst と同じピン．docs/tfcard.md)
+IO_LOC  "tf_sclk" 36;
+IO_PORT "tf_sclk" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+IO_LOC  "tf_mosi" 37;
+IO_PORT "tf_mosi" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+IO_LOC  "tf_cs_n" 38;
+IO_PORT "tf_cs_n" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+IO_LOC  "tf_miso" 39;
+IO_PORT "tf_miso" IO_TYPE=LVCMOS33 PULL_MODE=UP;

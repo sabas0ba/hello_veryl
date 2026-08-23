@@ -7,10 +7,12 @@
 /// | `0x0000_0000`–`0x0000_1FFF` | ブート ROM（8 KB 相当，リードのみ） |
 /// | `0x0000_2000`–`0x0000_3FFF` | データ RAM（RamWords x 4 byte，最大 8 KB） |
 /// | `0x1000_0000`–`0x103F_FFFF` | PSRAM ch0（AXI4-Lite マスタとして外へ出す） |
-/// | `0x2000_0000`– | MMIO（UART / LED / TOHOST） |
+/// | `0x2000_0000`–`0x2000_0FFF` | MMIO レジスタ（UART / LED / TOHOST / タイマ / TF） |
+/// | `0x2000_1000`–`0x2000_11FF` | TF カードのセクタバッファ（512 バイト，リードのみ） |
 ///
 /// デコードは `addr[29]` で MMIO，`addr[28]` で PSRAM，
 /// 残りを `addr[13]` で ROM / RAM に分ける．
+/// MMIO 内は `addr[12]` でレジスタとセクタバッファに分ける．
 /// コアは完了まで `o_mem_addr` を保持するため，組合せデコードで足りる．
 ///
 /// PSRAM サブシステム本体（PLL / phy / ctrl / ブリッジ）はクロックドメインが
@@ -18,6 +20,8 @@
 pub module RvSoc #(
     /// データ RAM の語数（`addr[13]` で選ぶので最大 2048 語 = 8 KB）
     param RamWords: u32 = 512,
+    /// TF カードの初期化クロック分周比（`TfCtrl` へ渡す．テストで短縮する）
+    param TfInitDivider: u32 = 80,
 ) (
     i_clk: input clock, /// クロック
     i_rst: input reset, /// リセット
@@ -34,6 +38,11 @@ pub module RvSoc #(
     o_trap        : output logic    , /// トラップ受理（観測用）
     o_cause       : output logic<32>, /// トラップ原因（観測用）
     o_illegal     : output logic    , /// 不正命令例外を起こした（診断用）
+
+    o_tf_sclk: output logic, /// TF SCK
+    o_tf_mosi: output logic, /// TF MOSI
+    o_tf_cs_n: output logic, /// TF CS#
+    i_tf_miso: input  logic, /// TF MISO
 ) {
     var timer_irq: logic    ;
     var mem_valid: logic    ;
@@ -61,11 +70,14 @@ pub module RvSoc #(
         o_illegal  : o_illegal,
     );
 
-    let sel_mmio : logic = mem_addr[29];
-    let sel_psram: logic = !mem_addr[29] && mem_addr[28];
-    let sel_local: logic = !mem_addr[29] && !mem_addr[28];
-    let sel_ram  : logic = sel_local && mem_addr[13];
-    let sel_rom  : logic = sel_local && !mem_addr[13];
+    let sel_mmio: logic = mem_addr[29];
+    // MMIO 内の分割: レジスタ / TF セクタバッファ
+    let sel_tfbuf  : logic = sel_mmio && mem_addr[12];
+    let sel_mmioreg: logic = sel_mmio && !mem_addr[12];
+    let sel_psram  : logic = !mem_addr[29] && mem_addr[28];
+    let sel_local  : logic = !mem_addr[29] && !mem_addr[28];
+    let sel_ram    : logic = sel_local && mem_addr[13];
+    let sel_rom    : logic = sel_local && !mem_addr[13];
 
     var rom_done : logic    ;
     var rom_rdata: logic<32>;
@@ -99,24 +111,51 @@ pub module RvSoc #(
         i_dbg_wdata: 32'b0               ,
     );
 
+    var tf_start : logic    ;
+    var tf_lba   : logic<32>;
+    var tf_status: logic<32>;
+    var tf_done  : logic    ;
+    var tf_rdata : logic<32>;
+
     var mmio_done : logic    ;
     var mmio_rdata: logic<32>;
 
     inst mmio: RvMmio (
-        i_clk                                ,
-        i_rst                                ,
-        i_valid       : mem_valid && sel_mmio,
-        i_addr        : mem_addr             ,
-        i_write       : mem_write            ,
-        i_wdata       : mem_wdata            ,
-        o_done        : mmio_done            ,
-        o_rdata       : mmio_rdata           ,
-        tx            : tx                   ,
-        rx            : rx                   ,
-        o_leds        : o_leds               ,
-        o_tohost_valid: o_tohost_valid       ,
-        o_tohost      : o_tohost             ,
-        o_timer_irq   : timer_irq            ,
+        i_clk                                   ,
+        i_rst                                   ,
+        i_valid       : mem_valid && sel_mmioreg,
+        i_addr        : mem_addr                ,
+        i_write       : mem_write               ,
+        i_wdata       : mem_wdata               ,
+        o_done        : mmio_done               ,
+        o_rdata       : mmio_rdata              ,
+        tx            : tx                      ,
+        rx            : rx                      ,
+        o_leds        : o_leds                  ,
+        o_tohost_valid: o_tohost_valid          ,
+        o_tohost      : o_tohost                ,
+        o_timer_irq   : timer_irq               ,
+        o_tf_start    : tf_start                ,
+        o_tf_lba      : tf_lba                  ,
+        i_tf_status   : tf_status               ,
+    );
+
+    inst tfsec: RvTfSector #(
+        InitDivider: TfInitDivider,
+    ) (
+        i_clk                           ,
+        i_rst                           ,
+        i_start : tf_start              ,
+        i_lba   : tf_lba                ,
+        o_status: tf_status             ,
+        i_valid : mem_valid && sel_tfbuf,
+        i_addr  : mem_addr              ,
+        o_done  : tf_done               ,
+        o_rdata : tf_rdata              ,
+        o_sclk  : o_tf_sclk             ,
+        o_mosi  : o_tf_mosi             ,
+        o_cs_n  : o_tf_cs_n             ,
+        i_miso  : i_tf_miso             ,
     );
 
     var psram_done : logic    ;
@@ -135,6 +174,16 @@ pub module RvSoc #(
         m_axi  : m_psram               ,
     );
 
-    assign mem_done  = rom_done || ram_done || mmio_done || psram_done;
-    assign mem_rdata = if sel_rom ? rom_rdata : if sel_ram ? ram_rdata : if sel_psram ? psram_rdata : mmio_rdata;
+    assign mem_done  = rom_done || ram_done || mmio_done || psram_done || tf_done;
+    assign mem_rdata = if sel_rom ?
+        rom_rdata
+    : if sel_ram ?
+        ram_rdata
+    : if sel_psram ?
+        psram_rdata
+    : if sel_tfbuf ?
+        tf_rdata
+    :
+        mmio_rdata
+    ;
 }

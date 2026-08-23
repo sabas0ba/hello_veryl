@@ -69,10 +69,12 @@ try {
         try { $n = $sp.Read($buf, 0, $buf.Length) } catch { $n = 0 }
         if ($n -gt 0) {
             $total += $n
-            if ($ShowLines -gt 0 -and $head.Length -lt ($ShowLines * 100)) {
+            if ($ShowLines -gt 0 -and $head.Length -lt ($ShowLines * 101)) {
                 for ($i = 0; $i -lt $n; $i++) {
                     $c = [int]$buf[$i]
-                    if ($c -eq 12) { [void]$head.Append("`n") }
+                    # FF (フレーム先頭) と LF を改行に寄せ，CR は捨てる
+                    if ($c -eq 12 -or $c -eq 10) { [void]$head.Append("`n") }
+                    elseif ($c -eq 13) { }
                     elseif ($c -ge 32 -and $c -le 126) { [void]$head.Append([char]$c) }
                 }
             }
@@ -89,10 +91,16 @@ try {
     }
     if ($ShowLines -gt 0) {
         Write-Output ''
-        $s = $head.ToString()
-        for ($i = 0; $i -lt $s.Length; $i += 100) {
-            $len = [Math]::Min(100, $s.Length - $i)
-            Write-Output $s.Substring($i, $len)
+        # 100 桁を超える行 (torus の 1 フレーム) は折り返して出す
+        foreach ($line in $head.ToString() -split "`n") {
+            if ($line.Length -le 100) {
+                Write-Output $line
+            } else {
+                for ($i = 0; $i -lt $line.Length; $i += 100) {
+                    $len = [Math]::Min(100, $line.Length - $i)
+                    Write-Output $line.Substring($i, $len)
+                }
+            }
         }
     }
 }

@@ -13,6 +13,11 @@
 /// | `0x34` MTIME_HI | R | 同上位 32 bit |
 /// | `0x38` MTIMECMP_LO | R/W | 比較値の下位 32 bit |
 /// | `0x3C` MTIMECMP_HI | R/W | 同上位 32 bit |
+/// | `0x50` TF_CTRL | W | 1 を書くとセクタ読み出しを開始する |
+/// | `0x50` TF_CTRL | R | 状態語（bit0 busy / bit1 init_done / bit4:2 init_err / bit7:5 err） |
+/// | `0x54` TF_LBA | R/W | 読み出す論理ブロックアドレス |
+///
+/// セクタバッファ本体は別窓（`0x2000_1000`〜）に置く．RvSoc のデコードを参照．
 ///
 /// タイマ割り込みは `mtime >= mtimecmp` で `o_timer_irq` を上げる（CLINT 相当）．
 /// `mtimecmp` はリセット時に全 1 とし，設定するまで割り込まない．
@@ -37,6 +42,10 @@ pub module RvMmio (
     o_tohost_valid: output logic    , /// 終了通知
     o_tohost      : output logic<32>, /// 終了コード
     o_timer_irq   : output logic    , /// タイマ割り込み（mtime >= mtimecmp）
+
+    o_tf_start : output logic    , /// TF セクタ読み出し開始（1 サイクルパルス）
+    o_tf_lba   : output logic<32>, /// TF の読み出し LBA
+    i_tf_status: input  logic<32>, /// TF の状態語
 ) {
     const RegTohost    : logic<8> = 8'h00;
     const RegUart      : logic<8> = 8'h10;
@@ -46,6 +55,8 @@ pub module RvMmio (
     const RegMtimeHi   : logic<8> = 8'h34;
     const RegMtimecmpLo: logic<8> = 8'h38;
     const RegMtimecmpHi: logic<8> = 8'h3c;
+    const RegTfCtrl    : logic<8> = 8'h50;
+    const RegTfLba     : logic<8> = 8'h54;
 
     let reg_sel: logic<8> = i_addr[7:0];
 
@@ -86,11 +97,14 @@ pub module RvMmio (
             mtimecmp       = 64'hffff_ffff_ffff_ffff;
             rx_valid       = 0;
             rx_data        = 0;
+            o_tf_start     = 0;
+            o_tf_lba       = 0;
         } else {
             mtime = mtime + 1;
 
             pending        = accept;
             o_tohost_valid = 0;
+            o_tf_start     = 0;
 
             if tx.valid && tx.ready {
                 tx.valid = 0;
@@ -112,6 +126,8 @@ pub module RvMmio (
                         RegMtimecmpLo: mtimecmp[31:0]  = i_wdata;
                         RegMtimecmpHi: mtimecmp[63:32] = i_wdata;
                         RegLed       : o_leds          = i_wdata[5:0];
+                        RegTfLba     : o_tf_lba        = i_wdata;
+                        RegTfCtrl    : o_tf_start      = i_wdata[0];
                         default      : {}
                     }
                     o_rdata = 0;
@@ -124,6 +140,8 @@ pub module RvMmio (
                         RegMtimeHi   : mtime[63:32],
                         RegMtimecmpLo: mtimecmp[31:0],
                         RegMtimecmpHi: mtimecmp[63:32],
+                        RegTfCtrl    : i_tf_status,
+                        RegTfLba     : o_tf_lba,
                         default      : 32'h0,
                     };
                 }

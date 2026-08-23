@@ -37,6 +37,10 @@ module test_rv_soc {
     var _trap       : logic    ;
     var _cause      : logic<32>;
     var illegal     : logic    ;
+    // TF カードは接続しない（挿入なしの MISO = High）
+    var _tf_sclk: logic;
+    var _tf_mosi: logic;
+    var _tf_cs_n: logic;
 
     inst dut: RvSoc #(
         RamWords: 64,
@@ -53,6 +57,10 @@ module test_rv_soc {
         o_trap        : _trap       ,
         o_cause       : _cause      ,
         o_illegal     : illegal     ,
+        o_tf_sclk     : _tf_sclk    ,
+        o_tf_mosi     : _tf_mosi    ,
+        o_tf_cs_n     : _tf_cs_n    ,
+        i_tf_miso     : 1'b1        ,
     );
 
     var _dbg_data: logic<32>;
