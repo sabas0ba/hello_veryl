@@ -1,0 +1,157 @@
+// PsramPhySdrCore + PsramCtrl (i_en 駆動) のパッドレベル統合 L1 テスト．
+// HyperRamRegReadModel (test_spike_bitbang.veryl) を 4 位相生成の CK へ
+// オーバーサンプル接続し，初期化シーケンス (CR0 書き込み → IR0 読み出し
+// 自己診断) がパッド境界を通して成立することを検証する．
+//
+// - CA は立上り/立下り両側でモデルへ取り込まれるため，最終 CA の照合が
+//   phy の byte A/B 位相割当 (立上り側= A) を検証する
+// - モデルは POR IL=6 相当 (DataStartCycle=14) の応答だが，ctrl の
+//   RWDS 修飾ペア検出はレイテンシ不変のため IL=3 設定のまま成立する
+//   (phy の 1 SDR サイクル提示遅延にも同様に不変)
+#[test(test_psram_phy_sdr_init)]
+module test_psram_phy_sdr_init {
+    const MaxWait: u32 = 4000;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    // SDR 境界 (ctrl ↔ phy core)
+    var en      : logic   ;
+    var ck_en   : logic   ;
+    var cs_n_sdr: logic   ;
+    var reset_n : logic   ;
+    var dq_a_o  : logic<8>;
+    var dq_b_o  : logic<8>;
+    var dq_oe   : logic   ;
+    var rwds_a_o: logic   ;
+    var rwds_b_o: logic   ;
+    var rwds_oe : logic   ;
+    var dq_a_i  : logic<8>;
+    var dq_b_i  : logic<8>;
+    var rwds_a_i: logic   ;
+    var rwds_b_i: logic   ;
+
+    // パッド値 (phy core ↔ モデル)
+    var pad_ck      : logic   ;
+    var _pad_ck_n   : logic   ;
+    var pad_cs_n    : logic   ;
+    var _pad_reset_n: logic   ;
+    var pad_dq_o    : logic<8>;
+    var _pad_dq_oe  : logic   ;
+    var _pad_rwds_o : logic   ;
+    var _pad_rwds_oe: logic   ;
+
+    var m_dq        : logic<8> ;
+    var m_dq_drive  : logic    ;
+    var m_rwds      : logic    ;
+    var m_rwds_drive: logic    ;
+    var m_ca        : logic<48>;
+
+    // パッド解決 (非駆動時は 0 に落とす)
+    let pad_dq_in  : logic<8> = if m_dq_drive ? m_dq : 8'h00;
+    let pad_rwds_in: logic    = if m_rwds_drive ? m_rwds : 1'b0;
+
+    inst core: PsramPhySdrCore (
+        i_clk    : clk         ,
+        i_rst    : rst         ,
+        o_en     : en          ,
+        i_ck_en  : ck_en       ,
+        i_cs_n   : cs_n_sdr    ,
+        i_reset_n: reset_n     ,
+        i_dq_a   : dq_a_o      ,
+        i_dq_b   : dq_b_o      ,
+        i_dq_oe  : dq_oe       ,
+        i_rwds_a : rwds_a_o    ,
+        i_rwds_b : rwds_b_o    ,
+        i_rwds_oe: rwds_oe     ,
+        o_dq_a   : dq_a_i      ,
+        o_dq_b   : dq_b_i      ,
+        o_rwds_a : rwds_a_i    ,
+        o_rwds_b : rwds_b_i    ,
+        o_ck     : pad_ck      ,
+        o_ck_n   : _pad_ck_n   ,
+        o_cs_n   : pad_cs_n    ,
+        o_reset_n: _pad_reset_n,
+        o_dq     : pad_dq_o    ,
+        o_dq_oe  : _pad_dq_oe  ,
+        i_dq     : pad_dq_in   ,
+        o_rwds   : _pad_rwds_o ,
+        o_rwds_oe: _pad_rwds_oe,
+        i_rwds   : pad_rwds_in ,
+    );
+
+    var req: psram_pkg::req_t;
+
+    assign req.we    = 0;
+    assign req.addr  = 0;
+    assign req.wdata = 0;
+    assign req.wstrb = 0;
+
+    var _req_ready: logic           ;
+    var _rsp_valid: logic           ;
+    var _rsp      : psram_pkg::rsp_t;
+    var init_done : logic           ;
+    var init_ok   : logic           ;
+
+    inst ctrl: PsramCtrl #(
+        ResetPulseCycles: 4 ,
+        TvcsCycles      : 16, // テスト短縮
+    ) (
+        i_clk      : clk       ,
+        i_rst      : rst       ,
+        i_en       : en        ,
+        i_req_valid: 1'b0      ,
+        o_req_ready: _req_ready,
+        i_req      : req       ,
+        o_rsp_valid: _rsp_valid,
+        i_rsp_ready: 1'b1      ,
+        o_rsp      : _rsp      ,
+        o_init_done: init_done ,
+        o_init_ok  : init_ok   ,
+        o_ck_en    : ck_en     ,
+        o_cs_n     : cs_n_sdr  ,
+        o_reset_n  : reset_n   ,
+        o_dq_a     : dq_a_o    ,
+        o_dq_b     : dq_b_o    ,
+        o_dq_oe    : dq_oe     ,
+        o_rwds_a   : rwds_a_o  ,
+        o_rwds_b   : rwds_b_o  ,
+        o_rwds_oe  : rwds_oe   ,
+        i_dq_a     : dq_a_i    ,
+        i_dq_b     : dq_b_i    ,
+        i_rwds_a   : rwds_a_i  ,
+        i_rwds_b   : rwds_b_i  ,
+    );
+
+    inst model: HyperRamRegReadModel (
+        i_clk       : clk         ,
+        i_rst       : rst         ,
+        i_ck        : pad_ck      ,
+        i_cs_n      : pad_cs_n    ,
+        i_dq        : pad_dq_o    ,
+        o_dq        : m_dq        ,
+        o_dq_drive  : m_dq_drive  ,
+        o_rwds      : m_rwds      ,
+        o_rwds_drive: m_rwds_drive,
+        o_ca        : m_ca        ,
+    );
+
+    initial {
+        rst.assert();
+
+        for _w in 0..MaxWait {
+            if init_done == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        $assert(init_done == 1'b1, "init done");
+        $assert(init_ok == 1'b1, "init ok (IR0=005F via 4-phase SDR phy)");
+        // 最終トランザクション (IR0 リード) の CA 全体を照合
+        $assert(m_ca == 48'he000_0000_0000, "IR0 read CA through phy");
+
+        clk.next(8);
+        $assert (pad_cs_n == 1'b1, "CS# idle high");
+        $finish ();
+    }
+}

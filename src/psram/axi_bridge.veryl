@@ -1,0 +1,157 @@
+/// AXI4-Lite ブリッジ + CDC (docs/psram.md「バス IF」「CDC」)
+///
+/// s_axi (27 MHz ドメイン) の単一アウトスタンディング要求を
+/// psram_pkg::req_t へ束ね，CdcHandshake で clk_mem 側の
+/// PsramCtrl へ渡す．応答は逆方向の handshake で受け，B/R チャネルへ
+/// 返す (常に OKAY．PSRAM はエラー応答を持たない)．
+///
+/// - AW と W は到着順非依存で合流し，両方揃ってから同時に受理する
+/// - 初期化未完了時は PsramCtrl 側が要求を取らないため，AXI 側は
+///   応答待ちのまま自然にブロックされる
+pub module PsramAxiBridge (
+    i_clk_axi: input 'axi clock, /// AXI 側クロック (27 MHz)
+    i_rst_axi: input 'axi reset, /// AXI 側リセット
+    i_clk_mem: input 'mem clock, /// clk_mem (54 MHz)
+    i_rst_mem: input 'mem reset, /// mem 側リセット
+
+    s_axi: modport 'axi $std::axi4_lite_if::<$std::axi4_lite_pkg::<22, 4, 1>>::slave, /// AXI4-Lite スレーブ
+
+    // clk_mem 側 (PsramCtrl の req/rsp へ接続)
+    o_req_valid: output 'mem logic           ,
+    i_req_ready: input  'mem logic           ,
+    o_req      : output 'mem psram_pkg::req_t,
+    i_rsp_valid: input  'mem logic           ,
+    o_rsp_ready: output 'mem logic           ,
+    i_rsp      : input  'mem psram_pkg::rsp_t,
+) {
+    enum State: logic<3> {
+        idle,
+        accept_r,
+        accept_w,
+        send,
+        wait_rsp,
+        resp_b,
+        resp_r,
+    }
+
+    var state       : 'axi State               ;
+    var id_q        : 'axi logic           <1> ;
+    var req_pl      : 'axi psram_pkg::req_t    ;
+    var rdata_q     : 'axi logic           <32>;
+    var req_hs_valid: 'axi logic               ;
+    var req_hs_ready: 'axi logic               ;
+    var rsp_hs_valid: 'axi logic               ;
+    var rsp_pl      : 'axi psram_pkg::rsp_t    ;
+
+    assign s_axi.bresp = $std::axi4_lite_config::resp_variants::OKAY;
+    assign s_axi.rresp = $std::axi4_lite_config::resp_variants::OKAY;
+    assign s_axi.bid   = id_q;
+    assign s_axi.rid   = id_q;
+    assign s_axi.rdata = rdata_q;
+
+    always_ff (i_clk_axi, i_rst_axi) {
+        if_reset {
+            state         = State::idle;
+            id_q          = 0;
+            req_pl.we     = 0;
+            req_pl.addr   = 0;
+            req_pl.wdata  = 0;
+            req_pl.wstrb  = 0;
+            rdata_q       = 0;
+            req_hs_valid  = 0;
+            s_axi.awready = 0;
+            s_axi.wready  = 0;
+            s_axi.arready = 0;
+            s_axi.bvalid  = 0;
+            s_axi.rvalid  = 0;
+        } else if state == State::idle {
+            if s_axi.arvalid {
+                s_axi.arready = 1;
+                state         = State::accept_r;
+            } else if s_axi.awvalid && s_axi.wvalid {
+                s_axi.awready = 1;
+                s_axi.wready  = 1;
+                state         = State::accept_w;
+            }
+        } else if state == State::accept_r {
+            // このエッジで AR 転送成立 (arvalid は ready まで保持される)
+            s_axi.arready = 0;
+            req_pl.we     = 0;
+            req_pl.addr   = s_axi.araddr[21:2];
+            req_pl.wdata  = 0;
+            req_pl.wstrb  = 0;
+            id_q          = s_axi.arid;
+            req_hs_valid  = 1;
+            state         = State::send;
+        } else if state == State::accept_w {
+            // このエッジで AW/W 転送成立
+            s_axi.awready = 0;
+            s_axi.wready  = 0;
+            req_pl.we     = 1;
+            req_pl.addr   = s_axi.awaddr[21:2];
+            req_pl.wdata  = s_axi.wdata;
+            req_pl.wstrb  = s_axi.wstrb;
+            id_q          = s_axi.awid;
+            req_hs_valid  = 1;
+            state         = State::send;
+        } else if state == State::send {
+            if req_hs_valid && req_hs_ready {
+                req_hs_valid = 0;
+                state        = State::wait_rsp;
+            }
+        } else if state == State::wait_rsp {
+            if rsp_hs_valid {
+                rdata_q = rsp_pl.rdata;
+                if req_pl.we {
+                    s_axi.bvalid = 1;
+                    state        = State::resp_b;
+                } else {
+                    s_axi.rvalid = 1;
+                    state        = State::resp_r;
+                }
+            }
+        } else if state == State::resp_b {
+            if s_axi.bvalid && s_axi.bready {
+                s_axi.bvalid = 0;
+                state        = State::idle;
+            }
+        } else { // State::resp_r
+            if s_axi.rvalid && s_axi.rready {
+                s_axi.rvalid = 0;
+                state        = State::idle;
+            }
+        }
+    }
+
+    // 要求パス CDC (axi → mem)
+    inst u_req_cdc: CdcHandshake #(
+        TYPE: psram_pkg::req_t,
+    ) (
+        is_clk  : i_clk_axi   ,
+        is_rst  : i_rst_axi   ,
+        is_valid: req_hs_valid,
+        os_ready: req_hs_ready,
+        is_data : req_pl      ,
+        id_clk  : i_clk_mem   ,
+        id_rst  : i_rst_mem   ,
+        od_valid: o_req_valid ,
+        id_ready: i_req_ready ,
+        od_data : o_req       ,
+    );
+
+    // 応答パス CDC (mem → axi)．AXI 側は wait_rsp でのみ受けるため常時 ready
+    inst u_rsp_cdc: CdcHandshake #(
+        TYPE: psram_pkg::rsp_t,
+    ) (
+        is_clk  : i_clk_mem   ,
+        is_rst  : i_rst_mem   ,
+        is_valid: i_rsp_valid ,
+        os_ready: o_rsp_ready ,
+        is_data : i_rsp       ,
+        id_clk  : i_clk_axi   ,
+        id_rst  : i_rst_axi   ,
+        od_valid: rsp_hs_valid,
+        id_ready: 1'b1        ,
+        od_data : rsp_pl      ,
+    );
+}

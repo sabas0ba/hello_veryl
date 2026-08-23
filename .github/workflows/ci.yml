@@ -19,3 +19,15 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Build and test
         run: bash ./scripts/ci.sh
+
+  # 合成後検査 (verif/): FPGA ツールチェーンを要するため，ローカルと同一の
+  # pin 済みコンテナ (container/Containerfile) をビルドして実行する
+  verif:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Build toolchain container
+        run: docker build -t hello-veryl-fpga -f container/Containerfile container
+      - name: Run verification suite
+        run: docker run --rm --network none -v "$PWD:/work" hello-veryl-fpga bash verif/run.sh

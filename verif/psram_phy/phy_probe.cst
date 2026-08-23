@@ -1,0 +1,5 @@
+// PsramPhy 単体実証用の最小制約 (PSRAM マジックポートは自動配置)
+IO_LOC  "i_clk" 52;
+IO_PORT "i_clk" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+IO_LOC  "led" 10;
+IO_PORT "led" PULL_MODE=UP DRIVE=8;

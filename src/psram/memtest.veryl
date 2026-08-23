@@ -1,0 +1,239 @@
+/// PSRAM memtest (実機デモ，docs/psram.md パッチ計画 #7)
+///
+/// AXI4-Lite マスタとして PSRAM へ Words 語を書き込み，読み返して照合する．
+/// パターンはアドレス関数 (`{k[15:0]^A5A5, k[15:0]}`) とし，アドレスデコード
+/// 誤りもデータ不一致として検出する．結果は ASCII 1 行の stream として送出:
+///
+/// ```text
+/// PSRAM INIT=1 MEMTEST=PASS ERR=0000 K=00000 RD=00000000
+/// ```
+///
+/// K/RD は最初の不一致の語番号と読み値 (診断用．PASS 時は 0)
+///
+/// 初期化状態 (i_init_done/ok) は clk_mem ドメインの準静的フラグを
+/// 2FF 同期して参照する．
+pub module PsramMemtest #(
+    /// テストする 32bit ワード数
+    param Words: u32 = 1024,
+) (
+    i_clk: input clock,
+    i_rst: input reset,
+
+    m_axi: modport $std::axi4_lite_if::<$std::axi4_lite_pkg::<22, 4, 1>>::master, /// PSRAM ブリッジへ
+
+    i_init_done: input logic, /// PsramCtrl の初期化完了 (clk_mem 域，内部で同期)
+    i_init_ok  : input logic, /// PsramCtrl の IR0 照合結果 (同上)
+
+    msg: modport stream_if::source, /// 結果メッセージ (リセット毎に 1 行)
+) {
+    const MsgLen: u32 = 56;
+
+    // 準静的フラグの 2FF 同期 (立ち上がり後は変化しない)
+    var init_done_sync: logic<2>;
+    var init_ok_sync  : logic<2>;
+
+    always_ff (i_clk, i_rst) {
+        if_reset {
+            init_done_sync = '0;
+            init_ok_sync   = '0;
+        } else {
+            init_done_sync = {init_done_sync[lsb], i_init_done};
+            init_ok_sync   = {init_ok_sync[lsb], i_init_ok};
+        }
+    }
+
+    // アドレス関数パターン
+    function Pattern (
+        k: input logic<20>,
+    ) -> logic<32> {
+        return {k[15:0] ^ 16'ha5a5, k[15:0]};
+    }
+
+    enum State: logic<3> {
+        wait_init,
+        wr_issue,
+        wr_resp,
+        rd_issue,
+        rd_resp,
+        send,
+        done,
+    }
+
+    var state   : State    ;
+    var k       : logic<20>;
+    var err_cnt : logic<16>;
+    var send_idx: logic<6> ;
+    var first_k : logic<20>; // 最初の不一致の語番号
+    var first_rd: logic<32>; // 最初の不一致の読み値
+
+    let pass: logic = err_cnt == 0;
+
+    // 使用しない AXI 信号は固定 (awid/arid は master modport に含まれず，
+    // インタフェースインスタンス側で固定する)
+    assign m_axi.awprot.instruction_access = 0;
+    assign m_axi.awprot.non_secure         = 0;
+    assign m_axi.awprot.privileged         = 0;
+    assign m_axi.arprot.instruction_access = 0;
+    assign m_axi.arprot.non_secure         = 0;
+    assign m_axi.arprot.privileged         = 0;
+
+    // "PSRAM INIT=x MEMTEST=XXXX ERR=xxxx K=xxxxx RD=xxxxxxxx\r\n"
+    assign msg.data = case send_idx {
+        0      : 8'h50, // 'P'
+        1      : 8'h53, // 'S'
+        2      : 8'h52, // 'R'
+        3      : 8'h41, // 'A'
+        4      : 8'h4d, // 'M'
+        5      : 8'h20,
+        6      : 8'h49, // 'I'
+        7      : 8'h4e, // 'N'
+        8      : 8'h49, // 'I'
+        9      : 8'h54, // 'T'
+        10     : 8'h3d, // '='
+        11     : 8'h30 + {7'b0000000, init_ok_sync[msb]},
+        12     : 8'h20,
+        13     : 8'h4d, // 'M'
+        14     : 8'h45, // 'E'
+        15     : 8'h4d, // 'M'
+        16     : 8'h54, // 'T'
+        17     : 8'h45, // 'E'
+        18     : 8'h53, // 'S'
+        19     : 8'h54, // 'T'
+        20     : 8'h3d, // '='
+        21     : if pass ? 8'h50 : 8'h46, // 'P'/'F'
+        22     : 8'h41, // 'A'
+        23     : if pass ? 8'h53 : 8'h49, // 'S'/'I'
+        24     : if pass ? 8'h53 : 8'h4c, // 'S'/'L'
+        25     : 8'h20,
+        26     : 8'h45, // 'E'
+        27     : 8'h52, // 'R'
+        28     : 8'h52, // 'R'
+        29     : 8'h3d, // '='
+        30     : psram_pkg::HexChar(err_cnt[15:12]),
+        31     : psram_pkg::HexChar(err_cnt[11:8]),
+        32     : psram_pkg::HexChar(err_cnt[7:4]),
+        33     : psram_pkg::HexChar(err_cnt[3:0]),
+        34     : 8'h20,
+        35     : 8'h4b, // 'K'
+        36     : 8'h3d, // '='
+        37     : psram_pkg::HexChar({3'b000, first_k[19:16]}),
+        38     : psram_pkg::HexChar(first_k[15:12]),
+        39     : psram_pkg::HexChar(first_k[11:8]),
+        40     : psram_pkg::HexChar(first_k[7:4]),
+        41     : psram_pkg::HexChar(first_k[3:0]),
+        42     : 8'h20,
+        43     : 8'h52, // 'R'
+        44     : 8'h44, // 'D'
+        45     : 8'h3d, // '='
+        46     : psram_pkg::HexChar(first_rd[31:28]),
+        47     : psram_pkg::HexChar(first_rd[27:24]),
+        48     : psram_pkg::HexChar(first_rd[23:20]),
+        49     : psram_pkg::HexChar(first_rd[19:16]),
+        50     : psram_pkg::HexChar(first_rd[15:12]),
+        51     : psram_pkg::HexChar(first_rd[11:8]),
+        52     : psram_pkg::HexChar(first_rd[7:4]),
+        53     : psram_pkg::HexChar(first_rd[3:0]),
+        54     : 8'h0d, // CR
+        55     : 8'h0a, // LF
+        default: 8'h00,
+    };
+
+    always_ff (i_clk, i_rst) {
+        if_reset {
+            state         = State::wait_init;
+            k             = 0;
+            err_cnt       = 0;
+            send_idx      = 0;
+            first_k       = 0;
+            first_rd      = 0;
+            msg.valid     = 0;
+            m_axi.awvalid = 0;
+            m_axi.awaddr  = 0;
+            m_axi.wvalid  = 0;
+            m_axi.wdata   = 0;
+            m_axi.wstrb   = 0;
+            m_axi.bready  = 0;
+            m_axi.arvalid = 0;
+            m_axi.araddr  = 0;
+            m_axi.rready  = 0;
+        } else if state == State::wait_init {
+            if init_done_sync[msb] {
+                state         = State::wr_issue;
+                k             = 0;
+                m_axi.awvalid = 1;
+                m_axi.awaddr  = {k, 2'b00};
+                m_axi.wvalid  = 1;
+                m_axi.wdata   = Pattern(k);
+                m_axi.wstrb   = 4'hf;
+            }
+        } else if state == State::wr_issue {
+            if m_axi.awvalid && m_axi.awready {
+                m_axi.awvalid = 0;
+            }
+            if m_axi.wvalid && m_axi.wready {
+                m_axi.wvalid = 0;
+            }
+            // 両チャネルとも受理済み (このエッジで受理されるものを含む)
+            if (!m_axi.awvalid || m_axi.awready) && (!m_axi.wvalid || m_axi.wready) {
+                m_axi.bready = 1;
+                state        = State::wr_resp;
+            }
+        } else if state == State::wr_resp {
+            if m_axi.bvalid {
+                m_axi.bready = 0;
+                if k == Words - 1 {
+                    // リードパスへ
+                    k             = 0;
+                    state         = State::rd_issue;
+                    m_axi.arvalid = 1;
+                    m_axi.araddr  = 0;
+                } else {
+                    k             = k + 1;
+                    state         = State::wr_issue;
+                    m_axi.awvalid = 1;
+                    m_axi.awaddr  = {k + 1, 2'b00};
+                    m_axi.wvalid  = 1;
+                    m_axi.wdata   = Pattern(k + 1);
+                    m_axi.wstrb   = 4'hf;
+                }
+            }
+        } else if state == State::rd_issue {
+            if m_axi.arvalid && m_axi.arready {
+                m_axi.arvalid = 0;
+                m_axi.rready  = 1;
+                state         = State::rd_resp;
+            }
+        } else if state == State::rd_resp {
+            if m_axi.rvalid {
+                m_axi.rready = 0;
+                if m_axi.rdata != Pattern(k) {
+                    if err_cnt == 0 {
+                        first_k  = k;
+                        first_rd = m_axi.rdata;
+                    }
+                    err_cnt = err_cnt + 1;
+                }
+                if k == Words - 1 {
+                    state     = State::send;
+                    send_idx  = 0;
+                    msg.valid = 1;
+                } else {
+                    k             = k + 1;
+                    state         = State::rd_issue;
+                    m_axi.arvalid = 1;
+                    m_axi.araddr  = {k + 1, 2'b00};
+                }
+            }
+        } else if state == State::send {
+            if msg.valid && msg.ready {
+                if send_idx == MsgLen - 1 {
+                    msg.valid = 0;
+                    state     = State::done;
+                } else {
+                    send_idx = send_idx + 1;
+                }
+            }
+        }
+        // State::done: リセットまで何もしない
+    }
+}

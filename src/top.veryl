@@ -1,23 +1,31 @@
 /// トップモジュール (Tang Nano 9K)
 ///
-/// UART エコー + テキストコンソール (LCD) + PSRAM spike + TF カード
-/// テキスト表示デモ + LED 表示の統合．
+/// UART エコー + テキストコンソール (LCD) + PSRAM サブシステム
+/// + TF カードテキスト表示デモ + LED 表示の統合．
 ///
 /// ```mermaid
 /// flowchart LR
 ///     PC["PC (COMポート)"] -- uart_rx --> RX["Uart RX"]
-///     RX -- "echo" --> ARB["TX arbiter<br>(spike/デモ優先)"]
-///     SPIKE["PsramSpikeBitbang"] -- "結果1行" --> ARB
+///     RX -- "echo" --> ARB["TX arbiter<br>(memtest &gt; TF &gt; echo)"]
+///     MT["PsramMemtest"] -- "結果1行" --> ARB
 ///     DEMO["TfTextDemo"] -- "報告行 + *.TXT 内容" --> ARB
 ///     FAT["Fat32Reader"] --> DEMO
 ///     TFC["TfCtrl"] --> FAT
 ///     ARB --> TX["Uart TX"] -- uart_tx --> PC
 ///     ARB -. "傍受" .-> CON["TextConsole"] --> LCD["5inch LCD"]
-///     SPIKE <--> RAM["内蔵 PSRAM ch0"]
+///     MT -- AXI4-Lite --> BR["PsramAxiBridge<br>(CDC)"] --> CTRL["PsramCtrl"]
+///     CTRL --> PHY["PsramPhySdr<br>(CK 13.5MHz)"] <--> RAM["内蔵 PSRAM ch0"]
 ///     TFC <--> TF["TF カード (SPI)"]
-///     PLL["PsramClkGen<br>(rPLL 54MHz)"] --> LEDS["leds"]
+///     PLL["PsramClkGen<br>(rPLL 54MHz)"] --> CTRL
 /// ```
 ///
+/// PSRAM サブシステム (phy/ctrl) は clk_mem (rPLL 54 MHz) ドメインで動作し，
+/// AXI 側 (memtest) とはブリッジ内 CdcHandshake で交差する．
+/// phy は SDR fallback (IOLOGIC 不使用．apicula ODDR の実挙動により DDR phy は
+/// 保留中．docs/psram.md「apicula ODDR 実挙動の調査」参照)．
+///
+/// TX アービタは memtest > TF デモ > エコーの固定優先度とし，行の混在を避けるため
+/// TF デモは memtest の報告が完了してから起動する (下記 psram_msg_done)．
 /// TF カードのブリングアップ時は TfSpikeInit (Top 非接続の spike) を
 /// 本デモ一式と差し替えて使う (docs/tfcard.md「spike の構成」)．
 ///
@@ -54,9 +62,7 @@ pub module Top #(
     O_psram_cs_n   : output logic    <2> , /// PSRAM CS#
     O_psram_reset_n: output logic    <2> , /// PSRAM RESET#
     IO_psram_dq    : inout  tri logic<16>, /// PSRAM DQ (ch0=下位8bit)
-    /// PSRAM RWDS．spike では読むだけのため input とする
-    /// (メモリライトのマスクで駆動が必要になる phy パッチで inout 化する)
-    IO_psram_rwds: input logic<2>,
+    IO_psram_rwds  : inout  tri logic<2> , /// PSRAM RWDS (ch0=bit0)
 ) {
     // UART エコー: RX(source) → TX arbiter → TX(sink)
     inst echo_stream: stream_if; // RX からのエコー経路
@@ -74,51 +80,165 @@ pub module Top #(
         rx_stream: echo_stream,
     );
 
-    // PSRAM spike 段1: リセット毎に ch0 の IR0/IR1/CR0 を読み UART/LCD へ報告
-    var ps_ck      : logic   ;
-    var ps_cs_n    : logic   ;
-    var ps_reset_n : logic   ;
-    var ps_dq_o    : logic<8>;
-    var ps_dq_oe   : logic   ;
-    var ps_dq_in   : logic<8>;
-    var _ps_dq_in_1: logic<8>; // ch1 DQ 読み値 (未使用)
+    // PSRAM クロック生成 (rPLL 27→54 MHz + 位相シフト出力)．clk_mem は
+    // PSRAM サブシステム (SDR phy) の駆動に使用する．clk_mem_p (+90°) は
+    // DDR phy 保留に伴い未使用．leds[1] の clk_mem 換算 1 Hz 点滅
+    // (leds[0] と周期比較) と leds[2] の lock 表示は spike 段2 の
+    // 実周波数確認をそのまま残している
+    var clk_mem   : 'mem  clock;
+    var _clk_mem_p: 'memp clock;
+    var pll_lock  :       logic;
 
-    inst spike_msg: stream_if;
-
-    inst psram_spike: PsramSpikeBitbang (
-        i_clk                      ,
-        i_rst                      ,
-        o_ck     : ps_ck           ,
-        o_cs_n   : ps_cs_n         ,
-        o_reset_n: ps_reset_n      ,
-        o_dq     : ps_dq_o         ,
-        o_dq_oe  : ps_dq_oe        ,
-        i_dq     : ps_dq_in        ,
-        i_rwds   : IO_psram_rwds[0],
-        msg      : spike_msg       ,
+    inst psram_clkgen: PsramClkGen (
+        i_clk                  ,
+        o_clk_mem  : clk_mem   ,
+        o_clk_mem_p: _clk_mem_p,
+        o_lock     : pll_lock  ,
     );
 
-    // ch0 のみ使用．ch1 は CS#/RESET# 非活性固定，CK は差動アイドル
-    // (CK=Low / CK#=High)，DQ は入力固定 (High-Z)
-    assign O_psram_ck      = {1'b0, ps_ck};
-    assign O_psram_ck_n    = {1'b1, ~ps_ck};
-    assign O_psram_cs_n    = {1'b1, ps_cs_n};
-    assign O_psram_reset_n = {1'b1, ps_reset_n};
+    // PSRAM サブシステム (SDR fallback phy + ctrl + AXI ブリッジ + memtest;
+    // docs/psram.md)．memtest が起動時に PSRAM を検査し，結果 1 行を
+    // UART/LCD へ報告する．
+    //
+    // phy は PsramPhySdr (ファブリック FF 駆動，IOLOGIC 不使用) を clk_mem
+    // (rPLL 54 MHz) で駆動し，CK 13.5 MHz を得る (apicula ODDR の実挙動により
+    // DDR phy は保留中．docs/psram.md「apicula ODDR 実挙動の調査」)．
+    // ctrl は phy の位相イネーブル ps_en (1/4 レート) で歩調を合わせ，
+    // ブリッジの mem 側へ渡す o_req_ready / o_rsp_valid は ps_en で修飾する
+    // (非イネーブルサイクルでの取りこぼし・二重送信防止．ctrl.veryl 参照)
+    var ps_pad_ck     : 'mem logic              ;
+    var ps_pad_ck_n   : 'mem logic              ;
+    var ps_pad_cs_n   : 'mem logic              ;
+    var ps_pad_reset_n: 'mem logic              ;
+    var ps_en         : 'mem logic              ;
+    var ps_ck_en      : 'mem logic              ;
+    var ps_cs_n       : 'mem logic              ;
+    var ps_reset_n    : 'mem logic              ;
+    var ps_dq_a_o     : 'mem logic           <8>;
+    var ps_dq_b_o     : 'mem logic           <8>;
+    var ps_dq_oe      : 'mem logic              ;
+    var ps_rwds_a_o   : 'mem logic              ;
+    var ps_rwds_b_o   : 'mem logic              ;
+    var ps_rwds_oe    : 'mem logic              ;
+    var ps_dq_a_i     : 'mem logic           <8>;
+    var ps_dq_b_i     : 'mem logic           <8>;
+    var ps_rwds_a_i   : 'mem logic              ;
+    var ps_rwds_b_i   : 'mem logic              ;
+    var ps_req_valid  : 'mem logic              ;
+    var ps_req_ready  : 'mem logic              ;
+    var ps_req        : 'mem psram_pkg::req_t   ;
+    var ps_rsp_valid  : 'mem logic              ;
+    var ps_rsp_ready  : 'mem logic              ;
+    var ps_rsp        : 'mem psram_pkg::rsp_t   ;
+    var ps_init_done  : 'mem logic              ;
+    var ps_init_ok    : 'mem logic              ;
+    var _ps_dq_in_1   :      logic           <8>; // ch1 DQ 読み値 (未使用)
+    var _ps_rwds_in_1 :      logic              ; // ch1 RWDS 読み値 (未使用)
 
-    // DQ の双方向は Gowin IOBUF プリミティブを明示インスタンス化する．
-    // 合成フロー (yosys-slang) は assign による tristate 推論 (cond ? d : 'z)
-    // で z を don't-care に畳み込み，入力経路が消失するため使えない．
-    // OEN は 1 で High-Z (UG289)．定義は blackbox スタブ (src/gowin_prims.sv,
-    // synth.ys で読込) が与え，実体は nextpnr が解決する
-    let ps_dq_oen: logic = ~ps_dq_oe;
-    for i in 0..8 :g_psram_dq0 {
-        inst pad: $sv::IOBUF (
-            O  : ps_dq_in[i]   ,
-            IO : IO_psram_dq[i],
-            I  : ps_dq_o[i]    ,
-            OEN: ps_dq_oen     ,
+    inst psram_msg: stream_if;
+    inst psram_axi: $std::axi4_lite_if::<$std::axi4_lite_pkg::<22, 4, 1>>;
+
+    assign psram_axi.awid = 0;
+    assign psram_axi.arid = 0;
+
+    // ctrl は ps_en のサイクルしか req/rsp を観測しないため，全速 (clk_mem) で
+    // 動く CdcHandshake 側の ready/valid 授受を ps_en のサイクルへ限定する
+    let ps_req_ready_g: 'mem logic = ps_req_ready && ps_en;
+    let ps_rsp_valid_g: 'mem logic = ps_rsp_valid && ps_en;
+
+    // リセットは全ドメインで S1 ボタンを非同期アサート共有する (デアサート後は
+    // 各 FSM が RESET# パルス/tVCS 待機で吸収)．ドメイン間データはブリッジ内の
+    // CdcHandshake と memtest 内の 2FF 同期が処理するため，この境界の
+    // 注釈不一致は既知のリセット/フラグ共有のみ
+    unsafe (cdc) {
+        inst psram_phy: PsramPhySdr (
+            i_clk        : clk_mem         ,
+            i_rst        : i_rst           ,
+            o_en         : ps_en           ,
+            i_ck_en      : ps_ck_en        ,
+            i_cs_n       : ps_cs_n         ,
+            i_reset_n    : ps_reset_n      ,
+            i_dq_a       : ps_dq_a_o       ,
+            i_dq_b       : ps_dq_b_o       ,
+            i_dq_oe      : ps_dq_oe        ,
+            i_rwds_a     : ps_rwds_a_o     ,
+            i_rwds_b     : ps_rwds_b_o     ,
+            i_rwds_oe    : ps_rwds_oe      ,
+            o_dq_a       : ps_dq_a_i       ,
+            o_dq_b       : ps_dq_b_i       ,
+            o_rwds_a     : ps_rwds_a_i     ,
+            o_rwds_b     : ps_rwds_b_i     ,
+            o_pad_ck     : ps_pad_ck       ,
+            o_pad_ck_n   : ps_pad_ck_n     ,
+            o_pad_cs_n   : ps_pad_cs_n     ,
+            o_pad_reset_n: ps_pad_reset_n  ,
+            io_pad_dq    : IO_psram_dq[7:0],
+            io_pad_rwds  : IO_psram_rwds[0],
+        );
+
+        inst psram_ctrl: PsramCtrl #(
+            // CS# Low 上限 tCSM 4 µs (CK 13.5 MHz → 74 ns/CK で 24 CK ≈ 1.8 µs)
+            TimeoutCyc: 24,
+        ) (
+            i_clk      : clk_mem     ,
+            i_rst      : i_rst       ,
+            i_en       : ps_en       ,
+            i_req_valid: ps_req_valid,
+            o_req_ready: ps_req_ready,
+            i_req      : ps_req      ,
+            o_rsp_valid: ps_rsp_valid,
+            i_rsp_ready: ps_rsp_ready,
+            o_rsp      : ps_rsp      ,
+            o_init_done: ps_init_done,
+            o_init_ok  : ps_init_ok  ,
+            o_ck_en    : ps_ck_en    ,
+            o_cs_n     : ps_cs_n     ,
+            o_reset_n  : ps_reset_n  ,
+            o_dq_a     : ps_dq_a_o   ,
+            o_dq_b     : ps_dq_b_o   ,
+            o_dq_oe    : ps_dq_oe    ,
+            o_rwds_a   : ps_rwds_a_o ,
+            o_rwds_b   : ps_rwds_b_o ,
+            o_rwds_oe  : ps_rwds_oe  ,
+            i_dq_a     : ps_dq_a_i   ,
+            i_dq_b     : ps_dq_b_i   ,
+            i_rwds_a   : ps_rwds_a_i ,
+            i_rwds_b   : ps_rwds_b_i ,
+        );
+
+        inst psram_bridge: PsramAxiBridge (
+            i_clk_axi  : i_clk         ,
+            i_rst_axi  : i_rst         ,
+            i_clk_mem  : clk_mem       ,
+            i_rst_mem  : i_rst         ,
+            s_axi      : psram_axi     ,
+            o_req_valid: ps_req_valid  ,
+            i_req_ready: ps_req_ready_g,
+            o_req      : ps_req        ,
+            i_rsp_valid: ps_rsp_valid_g,
+            o_rsp_ready: ps_rsp_ready  ,
+            i_rsp      : ps_rsp        ,
+        );
+
+        inst psram_memtest: PsramMemtest (
+            i_clk                    ,
+            i_rst                    ,
+            m_axi      : psram_axi   ,
+            i_init_done: ps_init_done,
+            i_init_ok  : ps_init_ok  ,
+            msg        : psram_msg   ,
         );
     }
+
+    // ch0 のみ使用．ch1 は CS#/RESET# 非活性固定，CK は差動アイドル
+    // (CK=Low / CK#=High)，DQ/RWDS は入力固定 (High-Z)
+    assign O_psram_ck      = {1'b0, ps_pad_ck};
+    assign O_psram_ck_n    = {1'b1, ps_pad_ck_n};
+    assign O_psram_cs_n    = {1'b1, ps_pad_cs_n};
+    assign O_psram_reset_n = {1'b1, ps_pad_reset_n};
+
+    // ch1 側パッドは IOBUF を常時 High-Z で明示インスタンス化する
+    // (assign による tristate は yosys-slang が推論できない; docs/psram.md)
     for i in 0..8 :g_psram_dq1 {
         inst pad: $sv::IOBUF (
             O  : _ps_dq_in_1[i]    ,
@@ -127,6 +247,12 @@ pub module Top #(
             OEN: 1'b1              ,
         );
     }
+    inst u_rwds1_pad: $sv::IOBUF (
+        O  : _ps_rwds_in_1   ,
+        IO : IO_psram_rwds[1],
+        I  : 1'b0            ,
+        OEN: 1'b1            ,
+    );
 
     // TF カードテキスト表示デモ: 初期化報告行 + ルート最初の *.TXT の内容を
     // 送出する (TfCtrl → Fat32Reader → TfTextDemo，docs/tfcard.md)
@@ -188,31 +314,50 @@ pub module Top #(
         blk         : tf_blk_st       ,
     );
 
+    // memtest の報告行と TF デモの出力が混ざらないよう，memtest の 1 行が
+    // 出終わってからデモを起動する (msg.valid は行の途中で落ちない)
+    var psram_msg_started: logic;
+    var psram_msg_done   : logic;
+
+    always_ff (i_clk, i_rst) {
+        if_reset {
+            psram_msg_started = 0;
+            psram_msg_done    = 0;
+        } else {
+            if psram_msg.valid && psram_msg.ready {
+                psram_msg_started = 1;
+            }
+            if psram_msg_started && !psram_msg.valid {
+                psram_msg_done = 1;
+            }
+        }
+    }
+
     inst tf_demo: TfTextDemo (
-        i_clk                       ,
-        i_rst                       ,
-        i_init_done : tf_init_done  ,
-        i_init_err  : tf_init_err   ,
-        o_req_valid : tf_freq_valid ,
-        o_req_name  : tf_freq_name  ,
-        o_req_offset: tf_freq_offset,
-        o_req_len   : tf_freq_len   ,
-        i_req_ready : tf_freq_ready ,
-        i_done      : tf_f_done     ,
-        i_err       : tf_f_err      ,
-        fdat        : tf_f_st       ,
-        msg         : tf_msg        ,
+        i_clk                                       ,
+        i_rst                                       ,
+        i_init_done : tf_init_done && psram_msg_done,
+        i_init_err  : tf_init_err                   ,
+        o_req_valid : tf_freq_valid                 ,
+        o_req_name  : tf_freq_name                  ,
+        o_req_offset: tf_freq_offset                ,
+        o_req_len   : tf_freq_len                   ,
+        i_req_ready : tf_freq_ready                 ,
+        i_done      : tf_f_done                     ,
+        i_err       : tf_f_err                      ,
+        fdat        : tf_f_st                       ,
+        msg         : tf_msg                        ,
     );
 
-    // TX arbiter: PSRAM spike > TF デモ > エコーの優先順位．いずれも
+    // TX arbiter: memtest > TF デモ > エコーの優先順位．いずれも
     // リセット直後のみ送出するためエコーとの競合は実用上起きない
     // (競合時は下位側が待たされる)．TF デモのファイル転送中の
     // ブロック間ギャップではエコーが割り込みうるが，デモ用途では許容する
-    assign tx_stream.valid   = spike_msg.valid || tf_msg.valid || echo_stream.valid;
-    assign tx_stream.data    = if spike_msg.valid ? spike_msg.data : if tf_msg.valid ? tf_msg.data : echo_stream.data;
-    assign spike_msg.ready   = tx_stream.ready;
-    assign tf_msg.ready      = tx_stream.ready && !spike_msg.valid;
-    assign echo_stream.ready = tx_stream.ready && !spike_msg.valid && !tf_msg.valid;
+    assign tx_stream.valid   = psram_msg.valid || tf_msg.valid || echo_stream.valid;
+    assign tx_stream.data    = if psram_msg.valid ? psram_msg.data : if tf_msg.valid ? tf_msg.data : echo_stream.data;
+    assign psram_msg.ready   = tx_stream.ready;
+    assign tf_msg.ready      = tx_stream.ready && !psram_msg.valid;
+    assign echo_stream.ready = tx_stream.ready && !psram_msg.valid && !tf_msg.valid;
 
     // LCD: UART TXへ流れるバイト列を傍受してテキスト表示 (白文字/黒背景)
     var vt_de    : logic    ;
@@ -261,20 +406,6 @@ pub module Top #(
     // パネルはDCLK立上りでデータをラッチするため，反転出力でデータ遷移と
     // サンプリングエッジを半周期ずらす
     assign lcd_clk = ~i_clk;
-
-    // PSRAM spike 段2: rPLL 単体実証 (docs/psram.md)．
-    // clk_mem (54 MHz) で 1 Hz 点滅を作り，27 MHz 基準の leds[0] と
-    // 周期を目視比較することで実周波数を確認する．lock は leds[2] へ
-    var clk_mem   : 'mem  clock;
-    var _clk_mem_p: 'memp clock; // 位相シフト出力 (phy パッチで使用)
-    var pll_lock  :       logic;
-
-    inst psram_clkgen: PsramClkGen (
-        i_clk                  ,
-        o_clk_mem  : clk_mem   ,
-        o_clk_mem_p: _clk_mem_p,
-        o_lock     : pll_lock  ,
-    );
 
     // LED 割当 (active-low):
     //   leds[0]: 1 Hz 点滅 (27 MHz 基準)

@@ -1,0 +1,4 @@
+# PsramPhy 単体実証の合成スクリプト (repo ルートから実行，要 build/sources.f)
+plugin -i slang
+read_slang -f build/sources.f src/gowin_prims.sv verif/psram_phy/phy_probe_top.sv --top top
+synth_gowin -json build/psram_phy_probe/phy_synth.json

@@ -1,0 +1,576 @@
+// PsramCtrl の L1 テスト (docs/psram.md「L1」: phy の SDR 境界へモデルを接続)
+// モデルは W955D8MBYA データシートの自前解釈のみから実装 (外部コード引用なし)．
+// phy パイプラインの半サイクルずれは StraddleRead=1 の変種で模擬し，
+// コントローラのペア検出が位相によらず語を組めることを確認する．
+
+// SDR 境界 HyperRAM モデル (CA 解釈 / CR0 / IR / 固定レイテンシ / 64 語メモリ)
+module SdrHyperRamModel #(
+    param StraddleRead: bit = 0, /// リード応答を半サイクルずらす変種
+) (
+    i_clk: input clock,
+    i_rst: input reset,
+
+    i_ck_en  : input  logic   ,
+    i_cs_n   : input  logic   ,
+    i_reset_n: input  logic   ,
+    i_dq_a   : input  logic<8>,
+    i_dq_b   : input  logic<8>,
+    i_dq_oe  : input  logic   ,
+    i_rwds_a : input  logic   ,
+    i_rwds_b : input  logic   ,
+    i_rwds_oe: input  logic   ,
+    o_dq_a   : output logic<8>,
+    o_dq_b   : output logic<8>,
+    o_rwds_a : output logic   ,
+    o_rwds_b : output logic   ,
+
+    o_cr0: output logic<16>, /// 観測用
+) {
+    var cr0  : logic<16>;
+    var ckcnt: logic<6> ;
+    var ca   : logic<48>;
+
+    // straddle 変種: 次 ck で byte B を返すための保留
+    var strad_pend: logic   ;
+    var strad_lo  : logic<8>;
+
+    assign o_cr0 = cr0;
+
+    // CR0[7:4] → Initial Latency (データシート Table 8)
+    let il: logic<4> = case cr0[7:4] {
+        4'b1110: 4'd3,
+        4'b1111: 4'd4,
+        4'b0000: 4'd5,
+        default: 4'd6,
+    };
+    // データ位相の ck 番号 (CA 3 クロック目 = ck2 を起点に 2*IL)
+    let data_ck: logic<6> = 6'd2 + {1'b0, il, 1'b0};
+
+    let active: logic = !i_cs_n && i_ck_en && i_reset_n;
+
+    // CA デコード (ck0..2 で取り込み済みの ca レジスタから)
+    let is_read: logic     = ca[47];
+    let is_reg : logic     = ca[46];
+    let hw_addr: logic<6>  = {ca[18:16], ca[2:0]}; // A5-A0 (64 語モデル)
+    let reg_val: logic<16> = if ca[24] ? cr0 : if ca[0] ? 16'h000f : 16'h005f;
+
+    // メモリ (リセットなしの別ブロックで保持)
+    var mem     : logic<16> [64];
+    var mem_rval: logic<16>     ;
+
+    always_ff (i_clk) {
+        if active && ckcnt >: 3 - 1 && !is_reg {
+            if !is_read && ckcnt == data_ck && i_dq_oe && i_rwds_oe {
+                // ライト (RWDS High=マスク)
+                if !i_rwds_a {
+                    mem[hw_addr][15:8] = i_dq_a;
+                }
+                if !i_rwds_b {
+                    mem[hw_addr][7:0] = i_dq_b;
+                }
+            }
+        }
+        mem_rval = mem[hw_addr];
+    }
+
+    always_ff (i_clk, i_rst) {
+        if_reset {
+            cr0        = 16'h8f1f; // POR デフォルト
+            ckcnt      = 0;
+            ca         = 0;
+            strad_pend = 0;
+            strad_lo   = 0;
+            o_dq_a     = 0;
+            o_dq_b     = 0;
+            o_rwds_a   = 0;
+            o_rwds_b   = 0;
+        } else if i_cs_n {
+            ckcnt      = 0;
+            strad_pend = 0;
+            o_dq_a     = 0;
+            o_dq_b     = 0;
+            o_rwds_a   = 0;
+            o_rwds_b   = 0;
+        } else if i_ck_en && i_reset_n {
+            ckcnt = ckcnt + 1;
+            // 既定値 (データ位相のみ上書き)
+            o_dq_a   = 0;
+            o_dq_b   = 0;
+            o_rwds_a = 0;
+            o_rwds_b = 0;
+
+            if ckcnt <: 3 {
+                // CA 取り込み (ck0..2)
+                ca = {ca[31:0], i_dq_a, i_dq_b};
+            } else if is_reg && !is_read {
+                // レジスタ書き込み (ゼロレイテンシ: ck3 のデータ語．CR0 のみ実装)
+                if ckcnt == 3 && i_dq_oe && ca[24] && !ca[0] {
+                    cr0 = {i_dq_a, i_dq_b};
+                }
+            } else if is_read && ckcnt == data_ck {
+                // リード応答 (edge 整列相当: RWDS=1 の半サンプル + 続く 0)
+                if StraddleRead {
+                    o_rwds_b   = 1;
+                    o_dq_b     = if is_reg ? reg_val[15:8] : mem_rval[15:8];
+                    strad_pend = 1;
+                    strad_lo   = if is_reg ? reg_val[7:0] : mem_rval[7:0];
+                } else {
+                    o_rwds_a = 1;
+                    o_dq_a   = if is_reg ? reg_val[15:8] : mem_rval[15:8];
+                    o_rwds_b = 0;
+                    o_dq_b   = if is_reg ? reg_val[7:0] : mem_rval[7:0];
+                }
+            } else if strad_pend {
+                // straddle: 次 ck の a 半サンプルで byte B
+                o_rwds_a   = 0;
+                o_dq_a     = strad_lo;
+                strad_pend = 0;
+            }
+        }
+    }
+}
+
+#[test(test_psram_ctrl_init)]
+module test_psram_ctrl_init {
+    const MaxWait: u32 = 4000;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    var req      : psram_pkg::req_t    ;
+    var rsp      : psram_pkg::rsp_t    ;
+    var req_valid: logic               ;
+    var req_ready: logic               ;
+    var rsp_valid: logic               ;
+    var init_done: logic               ;
+    var init_ok  : logic               ;
+    var cr0      : logic           <16>;
+
+    var ck_en   : logic   ;
+    var cs_n    : logic   ;
+    var reset_n : logic   ;
+    var dq_a_o  : logic<8>;
+    var dq_b_o  : logic<8>;
+    var dq_oe   : logic   ;
+    var rwds_a_o: logic   ;
+    var rwds_b_o: logic   ;
+    var rwds_oe : logic   ;
+    var dq_a_i  : logic<8>;
+    var dq_b_i  : logic<8>;
+    var rwds_a_i: logic   ;
+    var rwds_b_i: logic   ;
+
+    inst dut: PsramCtrl #(
+        ResetPulseCycles: 4 ,
+        TvcsCycles      : 16, // テスト短縮
+    ) (
+        i_clk      : clk      ,
+        i_rst      : rst      ,
+        i_en       : 1'b1     ,
+        i_req_valid: req_valid,
+        o_req_ready: req_ready,
+        i_req      : req      ,
+        o_rsp_valid: rsp_valid,
+        i_rsp_ready: 1'b1     ,
+        o_rsp      : rsp      ,
+        o_init_done: init_done,
+        o_init_ok  : init_ok  ,
+        o_ck_en    : ck_en    ,
+        o_cs_n     : cs_n     ,
+        o_reset_n  : reset_n  ,
+        o_dq_a     : dq_a_o   ,
+        o_dq_b     : dq_b_o   ,
+        o_dq_oe    : dq_oe    ,
+        o_rwds_a   : rwds_a_o ,
+        o_rwds_b   : rwds_b_o ,
+        o_rwds_oe  : rwds_oe  ,
+        i_dq_a     : dq_a_i   ,
+        i_dq_b     : dq_b_i   ,
+        i_rwds_a   : rwds_a_i ,
+        i_rwds_b   : rwds_b_i ,
+    );
+
+    inst model: SdrHyperRamModel (
+        i_clk    : clk     ,
+        i_rst    : rst     ,
+        i_ck_en  : ck_en   ,
+        i_cs_n   : cs_n    ,
+        i_reset_n: reset_n ,
+        i_dq_a   : dq_a_o  ,
+        i_dq_b   : dq_b_o  ,
+        i_dq_oe  : dq_oe   ,
+        i_rwds_a : rwds_a_o,
+        i_rwds_b : rwds_b_o,
+        i_rwds_oe: rwds_oe ,
+        o_dq_a   : dq_a_i  ,
+        o_dq_b   : dq_b_i  ,
+        o_rwds_a : rwds_a_i,
+        o_rwds_b : rwds_b_i,
+        o_cr0    : cr0     ,
+    );
+
+    initial {
+        req_valid  = 0;
+        req.we     = 0;
+        req.addr   = 0;
+        req.wdata  = 0;
+        req.wstrb  = 0;
+        rst.assert();
+
+        for _w in 0..MaxWait {
+            if init_done == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        $assert(init_done == 1'b1, "init done");
+        $assert(init_ok == 1'b1, "init ok (IR0=005F)");
+        $assert(cr0 == 16'h8fef, "CR0 written");
+        $finish();
+    }
+}
+
+#[test(test_psram_ctrl_rw)]
+module test_psram_ctrl_rw {
+    const MaxWait: u32 = 4000;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    var req      : psram_pkg::req_t    ;
+    var rsp      : psram_pkg::rsp_t    ;
+    var req_valid: logic               ;
+    var req_ready: logic               ;
+    var rsp_valid: logic               ;
+    var init_done: logic               ;
+    var init_ok  : logic               ;
+    var _cr0     : logic           <16>;
+
+    var ck_en   : logic   ;
+    var cs_n    : logic   ;
+    var reset_n : logic   ;
+    var dq_a_o  : logic<8>;
+    var dq_b_o  : logic<8>;
+    var dq_oe   : logic   ;
+    var rwds_a_o: logic   ;
+    var rwds_b_o: logic   ;
+    var rwds_oe : logic   ;
+    var dq_a_i  : logic<8>;
+    var dq_b_i  : logic<8>;
+    var rwds_a_i: logic   ;
+    var rwds_b_i: logic   ;
+
+    inst dut: PsramCtrl #(
+        ResetPulseCycles: 4 ,
+        TvcsCycles      : 16, // テスト短縮
+    ) (
+        i_clk      : clk      ,
+        i_rst      : rst      ,
+        i_en       : 1'b1     ,
+        i_req_valid: req_valid,
+        o_req_ready: req_ready,
+        i_req      : req      ,
+        o_rsp_valid: rsp_valid,
+        i_rsp_ready: 1'b1     ,
+        o_rsp      : rsp      ,
+        o_init_done: init_done,
+        o_init_ok  : init_ok  ,
+        o_ck_en    : ck_en    ,
+        o_cs_n     : cs_n     ,
+        o_reset_n  : reset_n  ,
+        o_dq_a     : dq_a_o   ,
+        o_dq_b     : dq_b_o   ,
+        o_dq_oe    : dq_oe    ,
+        o_rwds_a   : rwds_a_o ,
+        o_rwds_b   : rwds_b_o ,
+        o_rwds_oe  : rwds_oe  ,
+        i_dq_a     : dq_a_i   ,
+        i_dq_b     : dq_b_i   ,
+        i_rwds_a   : rwds_a_i ,
+        i_rwds_b   : rwds_b_i ,
+    );
+
+    inst model: SdrHyperRamModel #(
+        StraddleRead: 1'b0,
+    ) (
+        i_clk    : clk     ,
+        i_rst    : rst     ,
+        i_ck_en  : ck_en   ,
+        i_cs_n   : cs_n    ,
+        i_reset_n: reset_n ,
+        i_dq_a   : dq_a_o  ,
+        i_dq_b   : dq_b_o  ,
+        i_dq_oe  : dq_oe   ,
+        i_rwds_a : rwds_a_o,
+        i_rwds_b : rwds_b_o,
+        i_rwds_oe: rwds_oe ,
+        o_dq_a   : dq_a_i  ,
+        o_dq_b   : dq_b_i  ,
+        o_rwds_a : rwds_a_i,
+        o_rwds_b : rwds_b_i,
+        o_cr0    : _cr0    ,
+    );
+
+    initial {
+        req_valid  = 0;
+        req.we     = 0;
+        req.addr   = 0;
+        req.wdata  = 0;
+        req.wstrb  = 0;
+        rst.assert();
+
+        for _w in 0..MaxWait {
+            if init_done == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        $assert(init_ok == 1'b1, "init ok");
+
+        // ---- フルワード書き込み → 読み返し ----
+        req.we    = 1;
+        req.addr  = 3;
+        req.wdata = 32'hdeadbeef;
+        req.wstrb = 4'hf;
+        req_valid = 1;
+        for _w in 0..MaxWait {
+            if req_ready == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        clk.next (1); // accept edge
+        req_valid = 0;
+        for _w in 0..MaxWait {
+            if rsp_valid == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        clk.next(1); // consume
+
+        req.we    = 0;
+        req_valid = 1;
+        for _w in 0..MaxWait {
+            if req_ready == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        clk.next (1);
+        req_valid = 0;
+        for _w in 0..MaxWait {
+            if rsp_valid == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        $assert (rsp.rdata == 32'hdeadbeef, "readback full word");
+        clk.next(1);
+
+        // ---- WSTRB 部分書き込み (byte1 のみ) ----
+        req.we    = 1;
+        req.addr  = 7;
+        req.wdata = 32'h1234abcd;
+        req.wstrb = 4'hf;
+        req_valid = 1;
+        for _w in 0..MaxWait {
+            if req_ready == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        clk.next (1);
+        req_valid = 0;
+        for _w in 0..MaxWait {
+            if rsp_valid == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        clk.next(1);
+
+        req.we    = 1;
+        req.wdata = 32'h00005500;
+        req.wstrb = 4'b0010; // byte1 = [15:8] のみ書く (h1 はトランザクション省略)
+        req_valid = 1;
+        for _w in 0..MaxWait {
+            if req_ready == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        clk.next (1);
+        req_valid = 0;
+        for _w in 0..MaxWait {
+            if rsp_valid == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        clk.next(1);
+
+        req.we    = 0;
+        req_valid = 1;
+        for _w in 0..MaxWait {
+            if req_ready == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        clk.next (1);
+        req_valid = 0;
+        for _w in 0..MaxWait {
+            if rsp_valid == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        $assert (rsp.rdata == 32'h123455cd, "partial write (byte1)");
+        clk.next(1);
+
+        $finish();
+    }
+}
+
+#[test(test_psram_ctrl_rw_straddle)]
+module test_psram_ctrl_rw_straddle {
+    const MaxWait: u32 = 4000;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    var req      : psram_pkg::req_t    ;
+    var rsp      : psram_pkg::rsp_t    ;
+    var req_valid: logic               ;
+    var req_ready: logic               ;
+    var rsp_valid: logic               ;
+    var init_done: logic               ;
+    var init_ok  : logic               ;
+    var _cr0     : logic           <16>;
+
+    var ck_en   : logic   ;
+    var cs_n    : logic   ;
+    var reset_n : logic   ;
+    var dq_a_o  : logic<8>;
+    var dq_b_o  : logic<8>;
+    var dq_oe   : logic   ;
+    var rwds_a_o: logic   ;
+    var rwds_b_o: logic   ;
+    var rwds_oe : logic   ;
+    var dq_a_i  : logic<8>;
+    var dq_b_i  : logic<8>;
+    var rwds_a_i: logic   ;
+    var rwds_b_i: logic   ;
+
+    inst dut: PsramCtrl #(
+        ResetPulseCycles: 4 ,
+        TvcsCycles      : 16, // テスト短縮
+    ) (
+        i_clk      : clk      ,
+        i_rst      : rst      ,
+        i_en       : 1'b1     ,
+        i_req_valid: req_valid,
+        o_req_ready: req_ready,
+        i_req      : req      ,
+        o_rsp_valid: rsp_valid,
+        i_rsp_ready: 1'b1     ,
+        o_rsp      : rsp      ,
+        o_init_done: init_done,
+        o_init_ok  : init_ok  ,
+        o_ck_en    : ck_en    ,
+        o_cs_n     : cs_n     ,
+        o_reset_n  : reset_n  ,
+        o_dq_a     : dq_a_o   ,
+        o_dq_b     : dq_b_o   ,
+        o_dq_oe    : dq_oe    ,
+        o_rwds_a   : rwds_a_o ,
+        o_rwds_b   : rwds_b_o ,
+        o_rwds_oe  : rwds_oe  ,
+        i_dq_a     : dq_a_i   ,
+        i_dq_b     : dq_b_i   ,
+        i_rwds_a   : rwds_a_i ,
+        i_rwds_b   : rwds_b_i ,
+    );
+
+    inst model: SdrHyperRamModel #(
+        StraddleRead: 1'b1,
+    ) (
+        i_clk    : clk     ,
+        i_rst    : rst     ,
+        i_ck_en  : ck_en   ,
+        i_cs_n   : cs_n    ,
+        i_reset_n: reset_n ,
+        i_dq_a   : dq_a_o  ,
+        i_dq_b   : dq_b_o  ,
+        i_dq_oe  : dq_oe   ,
+        i_rwds_a : rwds_a_o,
+        i_rwds_b : rwds_b_o,
+        i_rwds_oe: rwds_oe ,
+        o_dq_a   : dq_a_i  ,
+        o_dq_b   : dq_b_i  ,
+        o_rwds_a : rwds_a_i,
+        o_rwds_b : rwds_b_i,
+        o_cr0    : _cr0    ,
+    );
+
+    initial {
+        req_valid  = 0;
+        req.we     = 0;
+        req.addr   = 0;
+        req.wdata  = 0;
+        req.wstrb  = 0;
+        rst.assert();
+
+        for _w in 0..MaxWait {
+            if init_done == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        $assert(init_ok == 1'b1, "init ok");
+
+        // ---- 半サイクルずれ応答での書き込み → 読み返し ----
+        req.we    = 1;
+        req.addr  = 12;
+        req.wdata = 32'hcafe5aa5;
+        req.wstrb = 4'hf;
+        req_valid = 1;
+        for _w in 0..MaxWait {
+            if req_ready == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        clk.next (1);
+        req_valid = 0;
+        for _w in 0..MaxWait {
+            if rsp_valid == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        clk.next(1);
+
+        req.we    = 0;
+        req_valid = 1;
+        for _w in 0..MaxWait {
+            if req_ready == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        clk.next (1);
+        req_valid = 0;
+        for _w in 0..MaxWait {
+            if rsp_valid == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        $assert (rsp.rdata == 32'hcafe5aa5, "readback with straddled response");
+        clk.next(1);
+
+        $finish();
+    }
+}
