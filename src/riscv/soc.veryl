@@ -1,0 +1,106 @@
+/// RV32I ソフトコアの SoC (docs/riscv.md「メモリマップ」)
+///
+/// コア・ブート ROM・データ RAM・MMIO をアドレスデコードで束ねる．
+///
+/// | 範囲 | 内容 |
+/// | --- | --- |
+/// | `0x0000_0000`–`0x0000_1FFF` | ブート ROM（8 KB 相当，リードのみ） |
+/// | `0x0000_2000`–`0x0000_2FFF` | データ RAM（RamWords x 4 byte） |
+/// | `0x2000_0000`– | MMIO（UART / LED / TOHOST） |
+///
+/// デコードは `addr[29]` で MMIO，`addr[13]` で ROM / RAM を分ける．
+/// コアは完了まで `o_mem_addr` を保持するため，組合せデコードで足りる．
+pub module RvSoc #(
+    /// データ RAM の語数
+    param RamWords: u32 = 512,
+) (
+    i_clk: input clock, /// クロック
+    i_rst: input reset, /// リセット
+
+    tx: modport stream_if::source, /// UART TX へ
+
+    o_leds        : output logic<6> , /// LED（active-high）
+    o_tohost_valid: output logic    , /// 終了通知
+    o_tohost      : output logic<32>, /// 終了コード
+    o_pc          : output logic<32>, /// 現在の PC（観測用）
+    o_illegal     : output logic    , /// 未定義命令で停止した
+) {
+    var mem_valid: logic    ;
+    var mem_addr : logic<32>;
+    var mem_write: logic    ;
+    var mem_wdata: logic<32>;
+    var mem_wstrb: logic<4> ;
+    var mem_done : logic    ;
+    var mem_rdata: logic<32>;
+
+    inst core: RvCore (
+        i_clk                 ,
+        i_rst                 ,
+        o_mem_valid: mem_valid,
+        o_mem_addr : mem_addr ,
+        o_mem_write: mem_write,
+        o_mem_wdata: mem_wdata,
+        o_mem_wstrb: mem_wstrb,
+        i_mem_done : mem_done ,
+        i_mem_rdata: mem_rdata,
+        o_pc       : o_pc     ,
+        o_illegal  : o_illegal,
+    );
+
+    let sel_mmio: logic = mem_addr[29];
+    let sel_ram : logic = !mem_addr[29] && mem_addr[13];
+    let sel_rom : logic = !mem_addr[29] && !mem_addr[13];
+
+    var rom_done : logic    ;
+    var rom_rdata: logic<32>;
+
+    inst rom: RvRom (
+        i_clk                        ,
+        i_rst                        ,
+        i_valid: mem_valid && sel_rom,
+        i_addr : mem_addr            ,
+        o_done : rom_done            ,
+        o_rdata: rom_rdata           ,
+    );
+
+    var ram_done : logic    ;
+    var ram_rdata: logic<32>;
+
+    inst ram: RvMem #(
+        Words: RamWords,
+    ) (
+        i_clk                            ,
+        i_rst                            ,
+        i_valid    : mem_valid && sel_ram,
+        i_addr     : mem_addr            ,
+        i_write    : mem_write           ,
+        i_wdata    : mem_wdata           ,
+        i_wstrb    : mem_wstrb           ,
+        o_done     : ram_done            ,
+        o_rdata    : ram_rdata           ,
+        i_dbg_we   : 1'b0                ,
+        i_dbg_word : 32'b0               ,
+        i_dbg_wdata: 32'b0               ,
+    );
+
+    var mmio_done : logic    ;
+    var mmio_rdata: logic<32>;
+
+    inst mmio: RvMmio (
+        i_clk                                ,
+        i_rst                                ,
+        i_valid       : mem_valid && sel_mmio,
+        i_addr        : mem_addr             ,
+        i_write       : mem_write            ,
+        i_wdata       : mem_wdata            ,
+        o_done        : mmio_done            ,
+        o_rdata       : mmio_rdata           ,
+        tx            : tx                   ,
+        o_leds        : o_leds               ,
+        o_tohost_valid: o_tohost_valid       ,
+        o_tohost      : o_tohost             ,
+    );
+
+    assign mem_done  = rom_done || ram_done || mmio_done;
+    assign mem_rdata = if sel_rom ? rom_rdata : if sel_ram ? ram_rdata : mmio_rdata;
+}

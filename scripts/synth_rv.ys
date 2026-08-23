@@ -1,0 +1,6 @@
+# TopRv (RV32I ソフトコア) の合成スクリプト
+# (repo ルートから実行: yosys -s scripts/synth_rv.ys，要 build/sources.f)
+# 既存 Top 用は scripts/synth.ys．こちらはソフトコアだけのビットストリームを作る．
+plugin -i slang
+read_slang -f build/sources.f src/gowin_prims.sv --top hello_veryl_TopRv
+synth_gowin -json build/top_rv_synth.json

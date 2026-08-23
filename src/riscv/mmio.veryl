@@ -1,0 +1,91 @@
+/// RvCore のメモリマップドペリフェラル (docs/riscv.md「メモリマップ」)
+///
+/// レイテンシと握手は RvMem と同じ（要求の次サイクルに `o_done`）．
+///
+/// | オフセット | 幅 | 動作 |
+/// | --- | --- | --- |
+/// | `0x00` TOHOST | W | 終了通知．`o_tohost_valid` を 1 サイクル上げ値を出す（riscv-tests と同じ規約） |
+/// | `0x10` UART | W | 下位 8 bit を UART TX へ送出する |
+/// | `0x10` UART | R | bit0 = 送信可（0 なら前のバイトが未送出） |
+/// | `0x20` LED | W | 下位 6 bit を LED へ（極性は Top 側で扱う） |
+///
+/// UART は 1 バイトのバッファのみ持つ．ソフトウェアは送信前に
+/// `0x10` を読んで bit0 が 1 であることを確認する．
+pub module RvMmio (
+    i_clk: input clock, /// クロック
+    i_rst: input reset, /// リセット
+
+    i_valid: input  logic    , /// アクセス要求
+    i_addr : input  logic<32>, /// バイトアドレス
+    i_write: input  logic    , /// 1 でストア
+    i_wdata: input  logic<32>, /// ストアデータ
+    o_done : output logic    , /// 完了（1 サイクル）
+    o_rdata: output logic<32>, /// リードデータ
+
+    tx: modport stream_if::source, /// UART TX へ
+
+    o_leds        : output logic<6> , /// LED（active-high．Top で反転する）
+    o_tohost_valid: output logic    , /// 終了通知
+    o_tohost      : output logic<32>, /// 終了コード
+) {
+    const RegTohost: logic<8> = 8'h00;
+    const RegUart  : logic<8> = 8'h10;
+    const RegLed   : logic<8> = 8'h20;
+
+    let reg_sel: logic<8> = i_addr[7:0];
+
+    var pending: logic;
+
+    let accept: logic = i_valid && !pending;
+
+    // UART 送信バッファ（1 バイト）
+    var tx_busy: logic;
+
+    always_ff (i_clk, i_rst) {
+        if_reset {
+            pending        = 0;
+            tx_busy        = 0;
+            tx.valid       = 0;
+            tx.data        = 0;
+            o_leds         = 0;
+            o_tohost_valid = 0;
+            o_tohost       = 0;
+            o_rdata        = 0;
+        } else {
+            pending        = accept;
+            o_tohost_valid = 0;
+
+            if tx.valid && tx.ready {
+                tx.valid = 0;
+                tx_busy  = 0;
+            }
+
+            if accept {
+                if i_write {
+                    case reg_sel {
+                        RegTohost: {
+                            o_tohost       = i_wdata;
+                            o_tohost_valid = 1;
+                        }
+                        RegUart: if !tx_busy {
+                            tx.data  = i_wdata[7:0];
+                            tx.valid = 1;
+                            tx_busy  = 1;
+                        }
+                        RegLed : o_leds = i_wdata[5:0];
+                        default: {}
+                    }
+                    o_rdata = 0;
+                } else {
+                    o_rdata = case reg_sel {
+                        RegUart: {1'b0 repeat 31, !tx_busy},
+                        RegLed : {1'b0 repeat 26, o_leds},
+                        default: 32'h0,
+                    };
+                }
+            }
+        }
+    }
+
+    assign o_done = pending;
+}

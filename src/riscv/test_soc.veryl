@@ -1,0 +1,81 @@
+// RvSoc の L1 テスト (docs/riscv.md パッチ計画 #6)
+//
+// ブート ROM の software/hello.S をコアが実行し，MMIO 経由で UART へ
+// 1 行送出したうえで LED を点灯させるところまでを確認する．
+// UART は stream_if を即受理してボーレート待ちを省く（実 UART の
+// タイミングは既存の UART テストで担保済み）．
+
+#[test(test_rv_soc)]
+module test_rv_soc {
+    const MaxCycles: u32 = 20_000;
+    const MsgLen   : u32 = 44; // "Hello from the RV32I core on Tang Nano 9K!\r\n"
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    inst tx: stream_if;
+
+    var leds        : logic<6> ;
+    var tohost_valid: logic    ;
+    var _tohost     : logic<32>;
+    var pc          : logic<32>;
+    var illegal     : logic    ;
+
+    inst dut: RvSoc #(
+        RamWords: 64,
+    ) (
+        i_clk         : clk         ,
+        i_rst         : rst         ,
+        tx            : tx          ,
+        o_leds        : leds        ,
+        o_tohost_valid: tohost_valid,
+        o_tohost      : _tohost     ,
+        o_pc          : pc          ,
+        o_illegal     : illegal     ,
+    );
+
+    var got      : logic<8> [64];
+    var n        : logic<7>     ;
+    var leds_seen: logic        ;
+
+    initial {
+        n          = 0;
+        leds_seen  = 0;
+        tx.ready   = 1;
+        rst.assert();
+
+        for _c in 0..MaxCycles {
+            if tx.valid == 1'b1 && tx.ready == 1'b1 && n <: MsgLen {
+                got[n] = tx.data;
+                n      = n + 1;
+            }
+            if leds == 6'h3f {
+                leds_seen = 1;
+            }
+            clk.next(1);
+        }
+
+        $assert_continue(illegal == 1'b0, "未定義命令に落ちていない");
+        $assert_continue(n == MsgLen, "送出バイト数");
+
+        // 先頭 "Hello "
+        $assert_continue(got[0] == 8'h48, "'H'");
+        $assert_continue(got[1] == 8'h65, "'e'");
+        $assert_continue(got[2] == 8'h6c, "'l'");
+        $assert_continue(got[3] == 8'h6c, "'l'");
+        $assert_continue(got[4] == 8'h6f, "'o'");
+        $assert_continue(got[5] == 8'h20, "' '");
+        // 末尾 "9K!\r\n"
+        $assert_continue(got[39] == 8'h39, "'9'");
+        $assert_continue(got[40] == 8'h4b, "'K'");
+        $assert_continue(got[41] == 8'h21, "'!'");
+        $assert_continue(got[42] == 8'h0d, "CR");
+        $assert_continue(got[43] == 8'h0a, "LF");
+
+        // 送出後に LED 全点灯へ進む
+        $assert_continue(leds_seen == 1'b1, "LED 全点灯へ到達");
+        $assert_continue(tohost_valid == 1'b0, "TOHOST は使っていない");
+
+        $finish();
+    }
+}
