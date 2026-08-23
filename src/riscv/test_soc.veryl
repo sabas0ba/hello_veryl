@@ -24,6 +24,7 @@ module test_rv_soc {
     inst rst: $tb::reset_gen ( clk );
 
     inst tx    : stream_if;
+    inst rx    : stream_if;
     inst ps_axi: $std::axi4_lite_if::<$std::axi4_lite_pkg::<22, 4, 1>>;
 
     assign ps_axi.awid = 0;
@@ -43,6 +44,7 @@ module test_rv_soc {
         i_clk         : clk         ,
         i_rst         : rst         ,
         tx            : tx          ,
+        rx            : rx          ,
         m_psram       : ps_axi      ,
         o_leds        : leds        ,
         o_tohost_valid: tohost_valid,
@@ -79,6 +81,8 @@ module test_rv_soc {
         n          = 0;
         leds_seen  = 0;
         tx.ready   = 1;
+        rx.valid   = 0;
+        rx.data    = 0;
         rst.assert();
 
         for _c in 0..MaxCycles {

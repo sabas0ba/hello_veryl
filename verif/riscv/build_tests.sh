@@ -1,13 +1,28 @@
 #!/usr/bin/env bash
 # riscv-tests (rv32ui / rv32um / rv32mi) を自前の最小テスト環境でビルドする
 # (docs/riscv.md「検証」)．FPGA ツールチェーンコンテナ内での実行を前提とする:
-#   .\scripts\fpga-run.ps1 bash verif/riscv/build_tests.sh
+#   .\scripts\fpga-run.ps1 bash verif/riscv/build_tests.sh [sim|hw]
+#
+# ターゲット:
+#   sim (既定) : 0x0000_0000 リンク -> build/riscv_tests
+#                シミュレーションのランナー (test_riscv_tests) は RvMem の
+#                先頭へ直接プリロードするため 0x0 でリンクする
+#   hw         : 0x1000_0000 リンク -> build/riscv_tests_hw
+#                実機は UART モニタが PSRAM (0x1000_0000) へロードする．
+#                リンカが la を絶対アドレスの li へ緩和するため，
+#                ロードアドレスでリンクしないとデータ参照が壊れる
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
+TARGET="${1:-sim}"
 SRC=/opt/riscv-tests
 ENV=verif/riscv/env
-OUT=build/riscv_tests
+
+case "$TARGET" in
+    sim) LD="$ENV/link.ld"    ; OUT=build/riscv_tests    ;;
+    hw)  LD="$ENV/link_hw.ld" ; OUT=build/riscv_tests_hw ;;
+    *)   echo "ERROR: 未知のターゲット '$TARGET' (sim|hw)" >&2; exit 1 ;;
+esac
 
 if [ ! -d "$SRC" ]; then
     echo "ERROR: $SRC が無い (container/Containerfile の riscv-tests 層を確認)" >&2
@@ -43,7 +58,7 @@ build_set() {
         esac
         riscv64-unknown-elf-gcc -march="$march" -mabi=ilp32 -nostdlib -nostartfiles \
             -I"$ENV" -I"$SRC/isa/macros/scalar" -I"$SRC/env" \
-            -T"$ENV/link.ld" -o "$OUT/$n.elf" "$f"
+            -T"$LD" -o "$OUT/$n.elf" "$f"
         riscv64-unknown-elf-objcopy -O binary "$OUT/$n.elf" "$OUT/$n.bin"
         ok=$((ok + 1))
     done
@@ -53,6 +68,6 @@ build_set rv32ui rv32i_zicsr
 build_set rv32um rv32im_zicsr
 build_set rv32mi rv32im_zicsr
 
-echo "built: $ok tests -> $OUT"
+echo "built: $ok tests ($TARGET) -> $OUT"
 [ -n "$skipped" ] && echo "skipped (対象外拡張):$skipped"
 exit 0

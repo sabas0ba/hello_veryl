@@ -60,9 +60,6 @@ pub module TopRv #(
         rx_stream: rx_stream,
     );
 
-    // 受信は使わないが，ready を上げておかないと RX がオーバランを報告し続ける
-    assign rx_stream.ready = 1;
-
     var soc_leds     : logic<6> ;
     var _tohost_valid: logic    ;
     var _tohost      : logic<32>;
@@ -77,6 +74,7 @@ pub module TopRv #(
         i_clk                        ,
         i_rst                        ,
         tx            : tx_stream    ,
+        rx            : rx_stream    ,
         m_psram       : ps_axi       ,
         o_leds        : soc_leds     ,
         o_tohost_valid: _tohost_valid,

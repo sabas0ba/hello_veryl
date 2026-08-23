@@ -23,6 +23,7 @@ pub module RvSoc #(
     i_rst: input reset, /// リセット
 
     tx: modport stream_if::source, /// UART TX へ
+    rx: modport stream_if::sink  , /// UART RX から
 
     m_psram: modport $std::axi4_lite_if::<$std::axi4_lite_pkg::<22, 4, 1>>::master, /// PSRAM へ（AXI4-Lite）
 
@@ -111,6 +112,7 @@ pub module RvSoc #(
         o_done        : mmio_done            ,
         o_rdata       : mmio_rdata           ,
         tx            : tx                   ,
+        rx            : rx                   ,
         o_leds        : o_leds               ,
         o_tohost_valid: o_tohost_valid       ,
         o_tohost      : o_tohost             ,

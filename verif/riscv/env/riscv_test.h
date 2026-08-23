@@ -22,6 +22,10 @@
 // テストベンチ / MMIO が監視するアドレス (docs/riscv.md「メモリマップ」)
 #define MMIO_TOHOST 0x20000000
 
+// テスト終了後の戻り先．実機では ROM 上の UART モニタの復帰点 (software/monitor.S)．
+// シミュレーションではランナーが tohost のストアで打ち切るためここへは到達しない．
+#define MONITOR_ENTRY 0x00000004
+
 #define RVTEST_RV32U
 #define RVTEST_RV64U
 #define RVTEST_RV32M
@@ -62,14 +66,16 @@ reset_vector:                                                           \
         li a0, 1;                                                       \
         li a1, MMIO_TOHOST;                                             \
         sw a0, 0(a1);                                                   \
-1:      j 1b;
+        li a2, MONITOR_ENTRY;                                           \
+        jr a2;
 
 #define RVTEST_FAIL                                                     \
         slli a0, TESTNUM, 1;                                            \
         ori  a0, a0, 1;                                                 \
         li a1, MMIO_TOHOST;                                             \
         sw a0, 0(a1);                                                   \
-1:      j 1b;
+        li a2, MONITOR_ENTRY;                                           \
+        jr a2;
 
 #define RVTEST_DATA_BEGIN .align 4; .global begin_signature; begin_signature:
 #define RVTEST_DATA_END   .align 4; .global end_signature; end_signature:
