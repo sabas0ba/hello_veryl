@@ -7,6 +7,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # トランスパイルとソースリスト生成 (synth スクリプトは repo ルート相対で参照)
+# build/ はクリーンチェックアウト (CI) には存在しないため先に作る
+mkdir -p build
 veryl build
 sed 's|^/work/||' hello_veryl.f > build/sources.f
 
