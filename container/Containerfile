@@ -44,6 +44,12 @@ RUN curl -fL --proto '=https' --tlsv1.2 \
 # the digest-pinned base image, same convention as the packages above)
 RUN apt-get update  && apt-get install -y --no-install-recommends       gcc-riscv64-unknown-elf binutils-riscv64-unknown-elf  && rm -rf /var/lib/apt/lists/*
 
+# riscv-tests: L2 の外部オラクル (docs/riscv.md「検証」)．コミット SHA で pin する
+# (SHA-1 が内容の完全性を担保する)．サブモジュール env は親コミットが記録する版に従う．
+# 個々の rv32ui テストは自己完結した .S なので autotools は使わず，
+# scripts 側で env/p のヘッダを include して直接アセンブルする
+RUN git clone https://github.com/riscv-software-src/riscv-tests.git /opt/riscv-tests  && git -C /opt/riscv-tests checkout 2ebecad997fa58cd9e5724340ba75aa4b59bd1d0  && git -C /opt/riscv-tests submodule update --init --recursive
+
 # The bind-mounted repo is owned by a different uid than root inside the
 # container, so exempt the two known mount points from git's ownership check
 # (/work for the CLI wrappers, /workspaces/* for the DevContainer)
