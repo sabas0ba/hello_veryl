@@ -1,0 +1,263 @@
+// ImageScanout の L1 テスト: 縮小 VideoTiming (8x4 有効) + AXI メモリモデルで，
+// ブロック複製・ラインバッファ二重化・出力位相 (2 サイクル遅れ) を検証する
+// (docs/tfcard.md「画像表示デモ仕様」)．
+//
+// ソースは 4x2．ScaleX=ScaleY=2 で 8x4 へ拡大する．
+//   フレームバッファ word0 = 2222_1111, word1 = 4444_3333 (行 0)
+//                   word2 = 6666_5555, word3 = 8888_7777 (行 1)
+//   行 0/1 の表示: 1111 1111 2222 2222 3333 3333 4444 4444
+//   行 2/3 の表示: 5555 5555 6666 6666 7777 7777 8888 8888
+
+#[test(test_image_scanout)]
+module test_image_scanout {
+    const MaxWait: u32 = 20_000;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    inst axi: $std::axi4_lite_if::<$std::axi4_lite_pkg::<22, 4, 1>>;
+
+    assign axi.awid = 0;
+    assign axi.arid = 0;
+
+    var vt_de    : logic   ;
+    var _vt_hsync: logic   ;
+    var _vt_vsync: logic   ;
+    var vt_frame : logic   ;
+    var vt_pos_x : logic<3>;
+    var _vt_pos_y: logic<2>;
+
+    var dbg_word : logic<20>;
+    var dbg_we   : logic    ;
+    var dbg_wdata: logic<32>;
+    var _dbg_data: logic<32>;
+    var _wr_count: logic<16>;
+    var rd_count : logic<16>;
+
+    var en     : logic         ;
+    var rgb    : logic<16>     ;
+    var rd_base: logic<16>     ;
+    var got    : logic<16> [10];
+    var got2   : logic<16> [10];
+
+    inst vt: VideoTiming #(
+        Width      : 8,
+        Height     : 4,
+        HFrontPorch: 2,
+        HSyncWidth : 1,
+        HBackPorch : 2,
+        VFrontPorch: 1,
+        VSyncWidth : 1,
+        VBackPorch : 2,
+    ) (
+        i_clk: clk      ,
+        i_rst: rst      ,
+        de   : vt_de    ,
+        hsync: _vt_hsync,
+        vsync: _vt_vsync,
+        frame: vt_frame ,
+        pos_x: vt_pos_x ,
+        pos_y: _vt_pos_y,
+    );
+
+    inst dut: ImageScanout #(
+        SrcW  : 4,
+        SrcH  : 2,
+        ScaleX: 2,
+        ScaleY: 2,
+    ) (
+        i_clk  : clk             ,
+        i_rst  : rst             ,
+        i_en   : en              ,
+        i_frame: vt_frame        ,
+        i_de   : vt_de           ,
+        i_pos_x: {7'b0, vt_pos_x},
+        m_axi  : axi             ,
+        o_rgb  : rgb             ,
+    );
+
+    inst mem: AxiLiteMemModel #(
+        Words: 8,
+    ) (
+        i_clk      : clk      ,
+        i_rst      : rst      ,
+        s_axi      : axi      ,
+        i_dbg_word : dbg_word ,
+        i_dbg_we   : dbg_we   ,
+        i_dbg_wdata: dbg_wdata,
+        o_dbg_data : _dbg_data,
+        o_wr_count : _wr_count,
+        o_rd_count : rd_count ,
+    );
+
+    initial {
+        en         = 0;
+        dbg_we     = 0;
+        rd_base    = 0;
+        rst.assert();
+
+        // フレームバッファの初期値を直接書き込む
+        dbg_word  = 0;
+        dbg_wdata = 32'h2222_1111;
+        dbg_we    = 1;
+        clk.next (1);
+        dbg_word  = 1;
+        dbg_wdata = 32'h4444_3333;
+        clk.next (1);
+        dbg_word  = 2;
+        dbg_wdata = 32'h6666_5555;
+        clk.next (1);
+        dbg_word  = 3;
+        dbg_wdata = 32'h8888_7777;
+        clk.next (1);
+        dbg_we    = 0;
+        en        = 1;
+
+        // フレーム先頭 (V ブランキング) を待ってから先読みさせる
+        for _w in 0..MaxWait {
+            if vt_frame == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        // フレーム先頭で先読みカウンタの基準を取る (フレーム前の先読みを除くため)
+        rd_base = rd_count;
+
+        // 行 0 の有効期間を捕捉する
+        for _w in 0..MaxWait {
+            if vt_de == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        for n in 0..10 {
+            got[n]   = rgb;
+            clk.next(1);
+        }
+
+        // 行 0: pos_x=0 の画素は 2 サイクル遅れて現れる
+        $assert_continue(got[2] == 16'h1111, "row0 px0");
+        $assert_continue(got[3] == 16'h1111, "row0 px0 (repeat)");
+        $assert_continue(got[4] == 16'h2222, "row0 px1");
+        $assert_continue(got[5] == 16'h2222, "row0 px1 (repeat)");
+        $assert_continue(got[6] == 16'h3333, "row0 px2");
+        $assert_continue(got[7] == 16'h3333, "row0 px2 (repeat)");
+        $assert_continue(got[8] == 16'h4444, "row0 px3");
+        $assert_continue(got[9] == 16'h4444, "row0 px3 (repeat)");
+
+        // 行 1 (同じソース行) を読み飛ばし，行 2 = ソース行 1 を捕捉する
+        for _r in 0..2 {
+            for _w in 0..MaxWait {
+                if vt_de == 1'b0 {
+                    break;
+                }
+                clk.next(1);
+            }
+            for _w in 0..MaxWait {
+                if vt_de == 1'b1 {
+                    break;
+                }
+                clk.next(1);
+            }
+        }
+        for n in 0..10 {
+            got2[n]  = rgb;
+            clk.next(1);
+        }
+
+        $assert_continue(got2[2] == 16'h5555, "row2 px0");
+        $assert_continue(got2[4] == 16'h6666, "row2 px1");
+        $assert_continue(got2[6] == 16'h7777, "row2 px2");
+        $assert_continue(got2[8] == 16'h8888, "row2 px3");
+
+        // 1 フレームあたりのリードはソース 2 行 x 2 語 = 4 回
+        $assert_continue(rd_count - rd_base == 16'd4, "read count per frame");
+        $finish         ();
+    }
+}
+
+// i_en=0 の間は黒を出し，リードも発行しない
+#[test(test_image_scanout_disabled)]
+module test_image_scanout_disabled {
+    const MaxWait: u32 = 20_000;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    inst axi: $std::axi4_lite_if::<$std::axi4_lite_pkg::<22, 4, 1>>;
+
+    assign axi.awid = 0;
+    assign axi.arid = 0;
+
+    var vt_de    : logic   ;
+    var _vt_hsync: logic   ;
+    var _vt_vsync: logic   ;
+    var vt_frame : logic   ;
+    var vt_pos_x : logic<3>;
+    var _vt_pos_y: logic<2>;
+
+    var _dbg_data: logic<32>;
+    var _wr_count: logic<16>;
+    var rd_count : logic<16>;
+    var rgb      : logic<16>;
+
+    inst vt: VideoTiming #(
+        Width      : 8,
+        Height     : 4,
+        HFrontPorch: 2,
+        HSyncWidth : 1,
+        HBackPorch : 2,
+        VFrontPorch: 1,
+        VSyncWidth : 1,
+        VBackPorch : 2,
+    ) (
+        i_clk: clk      ,
+        i_rst: rst      ,
+        de   : vt_de    ,
+        hsync: _vt_hsync,
+        vsync: _vt_vsync,
+        frame: vt_frame ,
+        pos_x: vt_pos_x ,
+        pos_y: _vt_pos_y,
+    );
+
+    inst dut: ImageScanout #(
+        SrcW  : 4,
+        SrcH  : 2,
+        ScaleX: 2,
+        ScaleY: 2,
+    ) (
+        i_clk  : clk             ,
+        i_rst  : rst             ,
+        i_en   : 1'b0            ,
+        i_frame: vt_frame        ,
+        i_de   : vt_de           ,
+        i_pos_x: {7'b0, vt_pos_x},
+        m_axi  : axi             ,
+        o_rgb  : rgb             ,
+    );
+
+    inst mem: AxiLiteMemModel #(
+        Words: 8,
+    ) (
+        i_clk      : clk      ,
+        i_rst      : rst      ,
+        s_axi      : axi      ,
+        i_dbg_word : 0        ,
+        i_dbg_we   : 0        ,
+        i_dbg_wdata: 0        ,
+        o_dbg_data : _dbg_data,
+        o_wr_count : _wr_count,
+        o_rd_count : rd_count ,
+    );
+
+    initial {
+        rst.assert();
+        for _w in 0..300 {
+            $assert_continue(rgb == 16'h0000, "black while disabled");
+            clk.next        (1);
+        }
+        $assert_continue(rd_count == 16'd0, "no reads while disabled");
+        $finish         ();
+    }
+}

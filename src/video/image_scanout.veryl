@@ -1,0 +1,192 @@
+/// PSRAM フレームバッファのスキャンアウト (docs/tfcard.md「画像表示デモ仕様」)
+///
+/// PSRAM 上の SrcW x SrcH の RGB565 画像を，ScaleX x ScaleY のブロック複製で
+/// LCD の有効領域へ拡大表示する．AXI4-Lite のリードマスタとして動作し，
+/// ソース 1 行ぶんをラインバッファ (2 面) へ先読みする．
+///
+/// 帯域: ソース 1 行は ScaleY ラインぶん表示されるため，その間に次の 1 行
+/// (SrcW/2 ワード) を読めばよい (docs/tfcard.md「帯域の制約と解像度の決定」)．
+///
+/// 出力位相: TextConsole と同じく i_pos_x から 2 サイクル遅れで o_rgb を出す
+/// (ラインバッファの出力レジスタ 1 段 + 本モジュールの出力段 1 段)．
+///
+/// 制約: SrcW は偶数 (32 bit ワード = 2 px)，ScaleX / ScaleY は 2 冪．
+pub module ImageScanout #(
+    /// ソース画像の幅 [px] (偶数)
+    param SrcW: u32 = 100,
+    /// ソース画像の高さ [px]
+    param SrcH: u32 = 60,
+    /// 水平複製率 (有効幅 = SrcW * ScaleX，2 冪)
+    param ScaleX: u32 = 8,
+    /// 垂直複製率 (有効高 = SrcH * ScaleY，2 冪)
+    param ScaleY: u32 = 8,
+    /// フレームバッファ先頭のワード番号 (32 bit 単位)
+    param FbWordBase: u32 = 0,
+) (
+    i_clk: input clock, /// クロック (= pclk 27 MHz)
+    i_rst: input reset, /// リセット
+
+    i_en: input logic, /// 1 で表示 (フレームバッファ展開完了後)
+
+    // VideoTiming の出力
+    i_frame: input logic    , /// V ブランキング先頭の 1 クロックパルス
+    i_de   : input logic    , /// データイネーブル
+    i_pos_x: input logic<10>, /// 画素 X 座標 (de==1 で有効)
+
+    m_axi: modport $std::axi4_lite_if::<$std::axi4_lite_pkg::<22, 4, 1>>::master, /// PSRAM からのリード
+
+    o_rgb: output logic<16>, /// RGB565 画素 (i_pos_x から 2 サイクル遅れ)
+) {
+    /// ソース 1 行あたりの 32 bit ワード数 (1 ワード = 2 px)
+    const RowWords: u32 = SrcW / 2;
+    /// ラインバッファ総語数 (2 面)
+    const BufWords: u32 = SrcW * 2;
+    /// ラインバッファのアドレス幅
+    const BufAddrW: u32 = $clog2(BufWords);
+
+    const XShift: u32 = $clog2(ScaleX);
+    const YShift: u32 = $clog2(ScaleY);
+
+    // ---- 表示行の追跡 ----
+    // i_frame は V ブランキング先頭 = 次フレームの行 0 の直前に立つ
+    var line_y: logic<10>;
+    var de_d  : logic    ;
+
+    let disp_row: logic<10> = line_y >> YShift;
+
+    // ---- 先読み ----
+    enum FState: logic<2> {
+        idle,
+        addr,
+        data,
+        wr_hi,
+    }
+
+    var fstate    : FState    ;
+    var fetch_row : logic <10>; // 次に読む行
+    var fetch_i   : logic <10>; // 行内ワード位置
+    var fetch_word: logic <20>; // 次に読むワード番号
+    var hi_hold   : logic <16>; // 32 bit 語の上位 (奇数画素)
+
+    // 行 r は「行 r-1 の表示中」までに読み終えればよい
+    let fetch_pending: logic = fetch_row <: SrcH && fetch_row <= disp_row + 1;
+
+    // ---- ラインバッファ (2 面) ----
+    var lb_we  : logic          ;
+    var lb_wadr: logic<BufAddrW>;
+    var lb_wdat: logic<16>      ;
+    var lb_q   : logic<16>      ;
+
+    // 読み出し面 = 表示行のパリティ，書き込み面 = 先読み行のパリティ
+    let rd_face: logic<BufAddrW> = if disp_row[0] ? SrcW : 0;
+    let wr_face: logic<BufAddrW> = if fetch_row[0] ? SrcW : 0;
+
+    // 幅はパラメータに依存するため，一旦フル幅で計算してから切り出す
+    let src_x  : logic<10>       = i_pos_x >> XShift;
+    let wr_off : logic<10>       = fetch_i << 1;
+    let lb_radr: logic<BufAddrW> = rd_face + src_x[BufAddrW - 1:0];
+
+    inst line_buf: $std::ram #(
+        WORD_SIZE : BufWords,
+        DATA_WIDTH: 16      ,
+        BUFFER_OUT: true    ,
+    ) (
+        i_clk          ,
+        i_rst          ,
+        i_clr : 0      ,
+        i_mea : 1      ,
+        i_wea : lb_we  ,
+        i_adra: lb_wadr,
+        i_da  : lb_wdat,
+        i_meb : 1      ,
+        i_adrb: lb_radr,
+        o_qb  : lb_q   ,
+    );
+
+    assign m_axi.awprot.instruction_access = 0;
+    assign m_axi.awprot.non_secure         = 0;
+    assign m_axi.awprot.privileged         = 0;
+    assign m_axi.arprot.instruction_access = 0;
+    assign m_axi.arprot.non_secure         = 0;
+    assign m_axi.arprot.privileged         = 0;
+
+    // 本モジュールはライトを行わない
+    assign m_axi.awvalid = 0;
+    assign m_axi.awaddr  = 0;
+    assign m_axi.wvalid  = 0;
+    assign m_axi.wdata   = 0;
+    assign m_axi.wstrb   = 0;
+    assign m_axi.bready  = 0;
+
+    always_ff (i_clk, i_rst) {
+        if_reset {
+            line_y        = 0;
+            de_d          = 0;
+            fstate        = FState::idle;
+            fetch_row     = 0;
+            fetch_i       = 0;
+            fetch_word    = 0;
+            hi_hold       = 0;
+            lb_we         = 0;
+            lb_wadr       = 0;
+            lb_wdat       = 0;
+            m_axi.arvalid = 0;
+            m_axi.araddr  = 0;
+            m_axi.rready  = 0;
+            o_rgb         = 0;
+        } else {
+            // ---- 行カウンタ ----
+            de_d = i_de;
+            if i_frame {
+                line_y     = 0;
+                fetch_row  = 0;
+                fetch_i    = 0;
+                fetch_word = FbWordBase;
+                fstate     = FState::idle;
+            } else if de_d && !i_de {
+                line_y = line_y + 1; // 有効行の終わり
+            }
+
+            // ---- 先読み FSM ----
+            lb_we = 0;
+            if fstate == FState::idle {
+                if i_en && fetch_pending {
+                    m_axi.araddr  = {fetch_word[19:0], 2'b00};
+                    m_axi.arvalid = 1;
+                    fstate        = FState::addr;
+                }
+            } else if fstate == FState::addr {
+                if m_axi.arvalid && m_axi.arready {
+                    m_axi.arvalid = 0;
+                    m_axi.rready  = 1;
+                    fstate        = FState::data;
+                }
+            } else if fstate == FState::data {
+                if m_axi.rvalid && m_axi.rready {
+                    m_axi.rready = 0;
+                    // 1 語 = 2 px．下位を偶数画素として先に書き，上位は次サイクル
+                    lb_we   = 1;
+                    lb_wadr = wr_face + wr_off[BufAddrW - 1:0];
+                    lb_wdat = m_axi.rdata[15:0];
+                    hi_hold = m_axi.rdata[31:16];
+                    fstate  = FState::wr_hi;
+                }
+            } else {
+                lb_we   = 1;
+                lb_wadr = wr_face + wr_off[BufAddrW - 1:0] + 1;
+                lb_wdat = hi_hold;
+                fstate  = FState::idle;
+                if fetch_i == RowWords - 1 {
+                    fetch_i   = 0;
+                    fetch_row = fetch_row + 1;
+                } else {
+                    fetch_i = fetch_i + 1;
+                }
+                fetch_word = fetch_word + 1;
+            }
+
+            // ---- 出力 (ラインバッファ 1 段 + 本段 = 2 サイクル遅れ) ----
+            o_rgb = if i_en ? lb_q : 0;
+        }
+    }
+}

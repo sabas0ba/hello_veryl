@@ -1,0 +1,542 @@
+/// TF カード画像表示デモ (docs/tfcard.md「画像表示デモ仕様」，パッチ #8)
+///
+/// ルート直下の `IMAGE.BMP` (既定．ReqName で変更可) を Fat32Reader から読み，
+/// 無圧縮 24 bpp BMP を解析して RGB565 へ変換し，
+/// PSRAM のフレームバッファへ AXI4-Lite で書く．
+/// 結果は 1 行の ASCII で報告する．
+///
+/// 報告行:
+///
+/// - `IMG OK`      : ロード成功 (以降 o_img_done=1．ImageScanout が表示を開始する)
+/// - `TF ERR <d>`  : TF カード初期化失敗 (d は TfTypes::Error の値)
+/// - `FS ERR <d>`  : FAT32 リーダのエラー (d は TfTypes::FsError の値)
+/// - `IMG ERR <d> <hhhh>` : BMP が受理条件を満たさない
+///   (1=BM シグネチャ不一致 / 2=24 bpp・無圧縮でない / 3=寸法が SrcW x SrcH と
+///    不一致 / 4=画素データが途中で終了)．`hhhh` は診断値で，
+///   d=1 ならファイル先頭 2 バイト，d=2 なら biBitCount，
+///   d=3 なら実際の幅と高さの下位バイト (幅:高さ)
+///
+/// v1 は寸法を SrcW x SrcH 固定で要求する (部分展開によるフレームバッファの
+/// 未定義領域を作らないため)．ボトムアップ (biHeight > 0) は書き込み行を
+/// 反転して PSRAM 上は常に上から下の順に格納する．
+pub module TfImageDemo #(
+    /// ソース画像の幅 [px] (偶数．32 bit ワード = 2 px のため)
+    param SrcW: u32 = 100,
+    /// ソース画像の高さ [px]
+    param SrcH: u32 = 60,
+    /// フレームバッファ先頭のワード番号 (32 bit 単位)
+    param FbWordBase: u32 = 0,
+    /// ファイル読み出し要求長の上限 [byte]
+    param MaxLen: u32 = 65536,
+    /// 対象ファイルの 8.3 名 11 バイト (既定 "IMAGE   BMP")．
+    /// ワイルドカード `'?'` (3Fh) も使えるが，拡張子だけの照合は
+    /// 中身が BMP でない同名拡張子のファイルを拾いうるため既定では使わない
+    param ReqName: logic<88> = {8'h49, 8'h4d, 8'h41, 8'h47, 8'h45, 8'h20, 8'h20, 8'h20, 8'h42, 8'h4d, 8'h50},
+) (
+    i_clk: input clock, /// クロック
+    i_rst: input reset, /// リセット
+
+    // TfCtrl の初期化状態
+    i_init_done: input logic         , /// 初期化完了
+    i_init_err : input TfTypes::Error, /// 初期化エラー
+
+    // Fat32Reader 要求 IF
+    o_req_valid : output logic               , /// ファイル読み出し要求
+    o_req_name  : output logic           <88>, /// 8.3 名
+    o_req_offset: output logic           <32>, /// 開始オフセット
+    o_req_len   : output logic           <32>, /// 読み出し長
+    i_req_ready : input  logic               , /// 要求受付可能
+    i_done      : input  logic               , /// 完了パルス
+    i_err       : input  TfTypes::FsError    , /// 完了時のエラー種別
+
+    fdat: modport stream_if::sink  , /// ファイル内容 (Fat32Reader から)
+    msg : modport stream_if::source, /// 報告行 (TX アービタへ)
+
+    m_axi: modport $std::axi4_lite_if::<$std::axi4_lite_pkg::<22, 4, 1>>::master, /// PSRAM へのライト
+
+    o_img_done: output logic, /// フレームバッファ展開完了 (表示可)
+) {
+    // 1 行 = SrcW*3 バイト + 4 バイト境界パディング
+    const RowRaw: u32 = SrcW * 3;
+    const RowPad: u32 = (4 - RowRaw % 4) % 4;
+    // 32 bit ワード = 2 px
+    const RowWords: u32 = SrcW / 2;
+    // ボトムアップ時の初期書き込み行 (最終行が画像の最上行)
+    const LastRowBase: u32 = FbWordBase + (SrcH - 1) * RowWords;
+
+    // BITMAPFILEHEADER(14) + BITMAPINFOHEADER(40) の最終バイト位置
+    const HdrEnd: u32 = 53;
+
+    enum State: logic<3> {
+        wait_init,
+        send_line,
+        open_req,
+        header,
+        skip_gap,
+        pixels,
+        drain,
+        finished,
+    }
+
+    function ErrDigit (
+        e: input TfTypes::Error,
+    ) -> logic<8> {
+        return case e {
+            TfTypes::Error::not_init   : 8'h31,
+            TfTypes::Error::timeout    : 8'h32,
+            TfTypes::Error::crc        : 8'h33,
+            TfTypes::Error::unsupported: 8'h34,
+            TfTypes::Error::resp       : 8'h35,
+            default                    : 8'h30,
+        };
+    }
+
+    function FsErrDigit (
+        e: input TfTypes::FsError,
+    ) -> logic<8> {
+        return case e {
+            TfTypes::FsError::no_fs    : 8'h31,
+            TfTypes::FsError::not_found: 8'h32,
+            TfTypes::FsError::io       : 8'h33,
+            default                    : 8'h30,
+        };
+    }
+
+    function HexDigit (
+        v: input logic<4>,
+    ) -> logic<8> {
+        return if v <: 10 ? 8'h30 + {4'b0, v} : 8'h37 + {4'b0, v};
+    }
+
+    // 行 ROM: sel0 "IMG OK" (8) / sel1 "TF ERR d" (10) /
+    //         sel2 "FS ERR d" (10) / sel3 "IMG ERR d hhhh" (16)
+    function LineChar (
+        sel: input logic<2> ,
+        idx: input logic<5> ,
+        d  : input logic<8> ,
+        x  : input logic<16>,
+    ) -> logic<8> {
+        return case sel {
+            2'd0: case idx {
+                0      : 8'h49, // 'I'
+                1      : 8'h4d, // 'M'
+                2      : 8'h47, // 'G'
+                3      : 8'h20,
+                4      : 8'h4f, // 'O'
+                5      : 8'h4b, // 'K'
+                6      : 8'h0d,
+                7      : 8'h0a,
+                default: 8'h00,
+            },
+            2'd1: case idx {
+                0      : 8'h54, // 'T'
+                1      : 8'h46, // 'F'
+                2      : 8'h20,
+                3      : 8'h45, // 'E'
+                4      : 8'h52, // 'R'
+                5      : 8'h52, // 'R'
+                6      : 8'h20,
+                7      : d,
+                8      : 8'h0d,
+                9      : 8'h0a,
+                default: 8'h00,
+            },
+            2'd2: case idx {
+                0      : 8'h46, // 'F'
+                1      : 8'h53, // 'S'
+                2      : 8'h20,
+                3      : 8'h45,
+                4      : 8'h52,
+                5      : 8'h52,
+                6      : 8'h20,
+                7      : d,
+                8      : 8'h0d,
+                9      : 8'h0a,
+                default: 8'h00,
+            },
+            default: case idx {
+                0      : 8'h49, // 'I'
+                1      : 8'h4d, // 'M'
+                2      : 8'h47, // 'G'
+                3      : 8'h20,
+                4      : 8'h45, // 'E'
+                5      : 8'h52,
+                6      : 8'h52,
+                7      : 8'h20,
+                8      : d,
+                9      : 8'h20,
+                10     : HexDigit(x[15:12]),
+                11     : HexDigit(x[11:8]),
+                12     : HexDigit(x[7:4]),
+                13     : HexDigit(x[3:0]),
+                14     : 8'h0d,
+                15     : 8'h0a,
+                default: 8'h00,
+            },
+        };
+    }
+
+    var state    : State    ;
+    var line_sel : logic<2> ;
+    var err_digit: logic<8> ;
+    var send_idx : logic<5> ;
+    var line_len : logic<5> ;
+    var diag     : logic<16>; // エラー行に添える診断値
+    var after    : State    ;
+
+    // BMP ヘッダ解析
+    var hdr_idx : logic<6> ; // ヘッダ内バイト位置 (0..53)
+    var off_bits: logic<16>; // bfOffBits (上位 2 バイトは 0 を要求)
+    var bmp_w   : logic<16>; // biWidth (同上)
+    var h_lo    : logic<16>; // biHeight の下位 16 bit
+    var h_neg   : logic    ; // biHeight が負 = トップダウン
+    var h_bad   : logic    ; // biHeight の上位 2 バイトが 0000/FFFF 以外
+    var bpp_lo  : logic<8> ; // biBitCount の下位バイト
+    var hdr_bad : logic    ; // シグネチャ不一致
+    var unsup   : logic    ; // 24 bpp・無圧縮でない / ヘッダ値が範囲外
+    var skip_cnt: logic<16>; // 画素データ開始までの残りバイト数
+
+    // 画素展開
+    var bottom_up: logic    ;
+    var row_base : logic<20>; // 現在行の先頭ワード番号
+    var wr_word  : logic<20>; // 次に書くワード番号
+    var px_x     : logic<8> ; // 行内画素位置
+    var row_cnt  : logic<8> ; // 処理済み行数
+    var sub      : logic<2> ; // 0=B, 1=G, 2=R
+    var pad_cnt  : logic<2> ; // 行末パディング残り
+    var pix_b    : logic<8> ;
+    var pix_g    : logic<8> ;
+    var pix_lo   : logic<16>; // 偶数画素 (ワード下位) の保持
+
+    // AXI ライト
+    var wr_busy: logic;
+
+    // Fat32Reader の完了はパルスのため取りこぼさないようラッチする
+    var fs_done : logic           ;
+    var fs_err_l: TfTypes::FsError;
+
+    // biHeight の絶対値 (上位 2 バイトは h_bad で弾く)
+    let abs_h: logic<16> = if h_neg ? ~h_lo + 1 : h_lo;
+
+    assign m_axi.awprot.instruction_access = 0;
+    assign m_axi.awprot.non_secure         = 0;
+    assign m_axi.awprot.privileged         = 0;
+    assign m_axi.arprot.instruction_access = 0;
+    assign m_axi.arprot.non_secure         = 0;
+    assign m_axi.arprot.privileged         = 0;
+
+    // 本モジュールはリードを行わない
+    assign m_axi.arvalid = 0;
+    assign m_axi.araddr  = 0;
+    assign m_axi.rready  = 0;
+
+    assign msg.data  = LineChar(line_sel, send_idx, err_digit, diag);
+    assign msg.valid = state == State::send_line;
+
+    // ヘッダ・パディングは読み捨て，画素はライト未発行のときのみ受ける
+    assign fdat.ready = case state {
+        State::header  : 1,
+        State::skip_gap: 1,
+        State::pixels  : !wr_busy,
+        State::drain   : 1,
+        default        : 0,
+    };
+
+    let byte_ack: logic = fdat.valid && fdat.ready;
+
+    always_ff (i_clk, i_rst) {
+        if_reset {
+            state         = State::wait_init;
+            line_sel      = 0;
+            err_digit     = 0;
+            send_idx      = 0;
+            line_len      = 0;
+            diag          = 0;
+            after         = State::finished;
+            hdr_idx       = 0;
+            off_bits      = 0;
+            bmp_w         = 0;
+            h_lo          = 0;
+            h_neg         = 0;
+            h_bad         = 0;
+            bpp_lo        = 0;
+            hdr_bad       = 0;
+            unsup         = 0;
+            skip_cnt      = 0;
+            bottom_up     = 0;
+            row_base      = 0;
+            wr_word       = 0;
+            px_x          = 0;
+            row_cnt       = 0;
+            sub           = 0;
+            pad_cnt       = 0;
+            pix_b         = 0;
+            pix_g         = 0;
+            pix_lo        = 0;
+            wr_busy       = 0;
+            fs_done       = 0;
+            fs_err_l      = TfTypes::FsError::none;
+            o_img_done    = 0;
+            o_req_valid   = 0;
+            o_req_name    = 0;
+            o_req_offset  = 0;
+            o_req_len     = 0;
+            m_axi.awvalid = 0;
+            m_axi.awaddr  = 0;
+            m_axi.wvalid  = 0;
+            m_axi.wdata   = 0;
+            m_axi.wstrb   = 0;
+            m_axi.bready  = 0;
+        } else {
+            // ---- Fat32Reader 完了のラッチ ----
+            if i_done {
+                fs_done  = 1;
+                fs_err_l = i_err;
+            }
+
+            // ---- AXI ライトのハンドシェイク ----
+            if m_axi.awvalid && m_axi.awready {
+                m_axi.awvalid = 0;
+            }
+            if m_axi.wvalid && m_axi.wready {
+                m_axi.wvalid = 0;
+            }
+            if wr_busy && !m_axi.awvalid && !m_axi.wvalid && !m_axi.bready {
+                m_axi.bready = 1;
+            }
+            if m_axi.bvalid && m_axi.bready {
+                m_axi.bready = 0;
+                wr_busy      = 0;
+            }
+
+            // ---- 本体 ----
+            if state == State::wait_init {
+                if i_init_err != TfTypes::Error::none {
+                    line_sel  = 1;
+                    err_digit = ErrDigit(i_init_err);
+                    line_len  = 10;
+                    send_idx  = 0;
+                    after     = State::finished;
+                    state     = State::send_line;
+                } else if i_init_done {
+                    state = State::open_req;
+                }
+            } else if state == State::send_line {
+                if msg.valid && msg.ready {
+                    if send_idx == line_len - 1 {
+                        state = after;
+                    } else {
+                        send_idx = send_idx + 1;
+                    }
+                }
+            } else if state == State::open_req {
+                // ルート直下の対象ファイル (既定 IMAGE.BMP) を開く
+                o_req_name   = ReqName;
+                o_req_offset = 0;
+                o_req_len    = MaxLen;
+                o_req_valid  = 1;
+                hdr_idx      = 0;
+                hdr_bad      = 0;
+                unsup        = 0;
+                h_bad        = 0;
+                if o_req_valid && i_req_ready {
+                    o_req_valid = 0;
+                    state       = State::header;
+                }
+            } else if state == State::header {
+                if fs_done && !fdat.valid {
+                    // ヘッダ途中で終了 = リーダのエラーかファイル不足
+                    if fs_err_l != TfTypes::FsError::none {
+                        line_sel  = 2;
+                        err_digit = FsErrDigit(fs_err_l);
+                        line_len  = 10;
+                    } else {
+                        line_sel  = 3;
+                        err_digit = 8'h34; // 4 = 画素データ不足
+                        line_len  = 16;
+                    }
+                    send_idx = 0;
+                    after    = State::finished;
+                    state    = State::send_line;
+                } else if byte_ack {
+                    // 32 bit フィールドは下位 16 bit のみ保持し，上位バイトが
+                    // 0 でないものは範囲外として弾く (レジスタ幅の削減)
+                    case hdr_idx {
+                        0: {
+                            diag[15:8] = fdat.data;
+                            if fdat.data != 8'h42 {
+                                hdr_bad = 1;
+                            }
+                        }
+                        1: {
+                            diag[7:0] = fdat.data;
+                            if fdat.data != 8'h4d {
+                                hdr_bad = 1;
+                            }
+                        }
+                        10                            : off_bits[7:0]  = fdat.data;
+                        11                            : off_bits[15:8] = fdat.data;
+                        12, 13, 20, 21, 30, 31, 32, 33: if fdat.data != 0 {
+                            unsup = 1; // bfOffBits/biWidth の上位，biCompression
+                        }
+                        18                            : bmp_w[7:0]  = fdat.data;
+                        19                            : bmp_w[15:8] = fdat.data;
+                        22                            : h_lo[7:0]   = fdat.data;
+                        23                            : h_lo[15:8]  = fdat.data;
+                        24                            : {
+                            h_neg = fdat.data == 8'hff;
+                            if fdat.data != 8'h00 && fdat.data != 8'hff {
+                                h_bad = 1;
+                            }
+                        }
+                        25: {
+                            let h_hi_exp: logic<8> = if h_neg ? 8'hff : 8'h00;
+                            if fdat.data != h_hi_exp {
+                                h_bad = 1;
+                            }
+                        }
+                        28     : bpp_lo = fdat.data;
+                        29     : if fdat.data != 0 {
+                            unsup = 1;
+                        }
+                        default: {}
+                    }
+
+                    if hdr_idx == HdrEnd {
+                        // ヘッダ受理判定 (フィールドはいずれも本サイクル以前に確定)
+                        if hdr_bad {
+                            line_sel  = 3;
+                            err_digit = 8'h31; // 1 = BM シグネチャ不一致
+                            line_len  = 16;
+                            send_idx  = 0;
+                            after     = State::finished;
+                            state     = State::send_line;
+                        } else if unsup || bpp_lo != 24 {
+                            line_sel  = 3;
+                            err_digit = 8'h32; // 2 = 24 bpp・無圧縮でない
+                            diag      = {8'b0, bpp_lo};
+                            line_len  = 16;
+                            send_idx  = 0;
+                            after     = State::finished;
+                            state     = State::send_line;
+                        } else if h_bad || bmp_w != SrcW || abs_h != SrcH {
+                            line_sel  = 3;
+                            err_digit = 8'h33; // 3 = 寸法不一致
+                            diag      = {bmp_w[7:0], abs_h[7:0]};
+                            line_len  = 16;
+                            send_idx  = 0;
+                            after     = State::finished;
+                            state     = State::send_line;
+                        } else {
+                            bottom_up = !h_neg;
+                            row_base  = if h_neg ? FbWordBase : LastRowBase;
+                            wr_word   = if h_neg ? FbWordBase : LastRowBase;
+                            px_x      = 0;
+                            row_cnt   = 0;
+                            sub       = 0;
+                            pad_cnt   = 0;
+                            if off_bits <= HdrEnd + 1 {
+                                state = State::pixels;
+                            } else {
+                                skip_cnt = off_bits - (HdrEnd + 1);
+                                state    = State::skip_gap;
+                            }
+                        }
+                    } else {
+                        hdr_idx = hdr_idx + 1;
+                    }
+                }
+            } else if state == State::skip_gap {
+                if fs_done && !fdat.valid {
+                    line_sel  = 3;
+                    err_digit = 8'h34;
+                    line_len  = 16;
+                    send_idx  = 0;
+                    after     = State::finished;
+                    state     = State::send_line;
+                } else if byte_ack {
+                    if skip_cnt == 1 {
+                        state = State::pixels;
+                    }
+                    skip_cnt = skip_cnt - 1;
+                }
+            } else if state == State::pixels {
+                if fs_done && !fdat.valid {
+                    line_sel  = 3;
+                    err_digit = 8'h34;
+                    line_len  = 16;
+                    send_idx  = 0;
+                    after     = State::finished;
+                    state     = State::send_line;
+                } else if byte_ack {
+                    if pad_cnt >: 0 {
+                        pad_cnt = pad_cnt - 1;
+                        if pad_cnt == 1 {
+                            if row_cnt == SrcH - 1 {
+                                state = State::drain;
+                            } else {
+                                row_cnt  = row_cnt + 1;
+                                px_x     = 0;
+                                sub      = 0;
+                                row_base = if bottom_up ? row_base - RowWords : row_base + RowWords;
+                                wr_word  = if bottom_up ? row_base - RowWords : row_base + RowWords;
+                            }
+                        }
+                    } else if sub == 0 {
+                        pix_b = fdat.data;
+                        sub   = 1;
+                    } else if sub == 1 {
+                        pix_g = fdat.data;
+                        sub   = 2;
+                    } else {
+                        sub = 0;
+                        if px_x[0] == 0 {
+                            pix_lo = {fdat.data[7:3], pix_g[7:2], pix_b[7:3]};
+                        } else {
+                            m_axi.awaddr  = {wr_word, 2'b00};
+                            m_axi.wdata   = {{fdat.data[7:3], pix_g[7:2], pix_b[7:3]}, pix_lo};
+                            m_axi.wstrb   = 4'hf;
+                            m_axi.awvalid = 1;
+                            m_axi.wvalid  = 1;
+                            wr_busy       = 1;
+                            wr_word       = wr_word + 1;
+                        }
+                        if px_x == SrcW - 1 {
+                            if RowPad == 0 {
+                                if row_cnt == SrcH - 1 {
+                                    state = State::drain;
+                                } else {
+                                    row_cnt  = row_cnt + 1;
+                                    px_x     = 0;
+                                    row_base = if bottom_up ? row_base - RowWords : row_base + RowWords;
+                                    wr_word  = if bottom_up ? row_base - RowWords : row_base + RowWords;
+                                }
+                            } else {
+                                pad_cnt = RowPad;
+                            }
+                        } else {
+                            px_x = px_x + 1;
+                        }
+                    }
+                }
+            } else if state == State::drain {
+                // 余剰バイトを読み捨て，リーダの完了と最終ライトの完了を待つ
+                if fs_done && !wr_busy && !fdat.valid {
+                    if fs_err_l != TfTypes::FsError::none {
+                        line_sel  = 2;
+                        err_digit = FsErrDigit(fs_err_l);
+                        line_len  = 10;
+                    } else {
+                        o_img_done = 1;
+                        line_sel   = 0;
+                        line_len   = 8;
+                    }
+                    send_idx = 0;
+                    after    = State::finished;
+                    state    = State::send_line;
+                }
+            }
+            // State::finished: リセットまで何もしない
+        }
+    }
+}

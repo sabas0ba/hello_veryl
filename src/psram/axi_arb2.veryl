@@ -1,0 +1,89 @@
+/// AXI4-Lite 2 マスタ固定優先度アービタ (docs/tfcard.md「画像表示デモ仕様」)
+///
+/// 各マスタが単一アウトスタンディングであることを前提に，グラントを
+/// トランザクション完了 (ライトは B 応答，リードは R 応答) まで保持する．
+/// m0 が高優先度．3 マスタ以上は本モジュールを段積みして構成する
+/// (例: arb(arb(memtest, loader), scanout))．
+///
+/// 前提: マスタは awvalid / arvalid を受理されるまで下げない．
+/// ライト要求は awvalid と wvalid を同一トランザクションとして扱う
+/// (AXI4-Lite の単一転送)．
+pub module PsramAxiArb2 (
+    i_clk: input clock,
+    i_rst: input reset,
+
+    m0: modport $std::axi4_lite_if::<$std::axi4_lite_pkg::<22, 4, 1>>::slave , /// 高優先マスタ
+    m1: modport $std::axi4_lite_if::<$std::axi4_lite_pkg::<22, 4, 1>>::slave , /// 低優先マスタ
+    s : modport $std::axi4_lite_if::<$std::axi4_lite_pkg::<22, 4, 1>>::master, /// 下流スレーブへ
+) {
+    enum Grant: logic<2> {
+        none,
+        g0,
+        g1,
+    }
+
+    var grant: Grant;
+
+    let req0: logic = m0.awvalid || m0.arvalid;
+    let req1: logic = m1.awvalid || m1.arvalid;
+
+    // トランザクション完了: 下流の B 応答または R 応答が受理された時点
+    let done: logic = (s.bvalid && s.bready) || (s.rvalid && s.rready);
+
+    always_ff {
+        if_reset {
+            grant = Grant::none;
+        } else {
+            if grant == Grant::none {
+                if req0 {
+                    grant = Grant::g0;
+                } else if req1 {
+                    grant = Grant::g1;
+                }
+            } else if done {
+                grant = Grant::none;
+            }
+        }
+    }
+
+    let sel0: logic = grant == Grant::g0;
+    let sel1: logic = grant == Grant::g1;
+
+    // 下流へ: グラント中のマスタの信号を通す
+    assign s.awvalid = if sel0 ? m0.awvalid : if sel1 ? m1.awvalid : 0;
+    assign s.awaddr  = if sel0 ? m0.awaddr : m1.awaddr;
+    assign s.awprot  = if sel0 ? m0.awprot : m1.awprot;
+    assign s.wvalid  = if sel0 ? m0.wvalid : if sel1 ? m1.wvalid : 0;
+    assign s.wdata   = if sel0 ? m0.wdata : m1.wdata;
+    assign s.wstrb   = if sel0 ? m0.wstrb : m1.wstrb;
+    assign s.bready  = if sel0 ? m0.bready : if sel1 ? m1.bready : 0;
+    assign s.arvalid = if sel0 ? m0.arvalid : if sel1 ? m1.arvalid : 0;
+    assign s.araddr  = if sel0 ? m0.araddr : m1.araddr;
+    assign s.arprot  = if sel0 ? m0.arprot : m1.arprot;
+    assign s.rready  = if sel0 ? m0.rready : if sel1 ? m1.rready : 0;
+
+    // 上流へ: グラント中のマスタにのみ ready/valid を返す
+    assign m0.awready = sel0 && s.awready;
+    assign m0.wready  = sel0 && s.wready;
+    assign m0.bvalid  = sel0 && s.bvalid;
+    assign m0.bresp   = s.bresp;
+    assign m0.arready = sel0 && s.arready;
+    assign m0.rvalid  = sel0 && s.rvalid;
+    assign m0.rdata   = s.rdata;
+    assign m0.rresp   = s.rresp;
+
+    assign m1.awready = sel1 && s.awready;
+    assign m1.wready  = sel1 && s.wready;
+    assign m1.bvalid  = sel1 && s.bvalid;
+    assign m1.bresp   = s.bresp;
+    assign m1.arready = sel1 && s.arready;
+    assign m1.rvalid  = sel1 && s.rvalid;
+    assign m1.rdata   = s.rdata;
+    assign m1.rresp   = s.rresp;
+
+    // ID は単一 (ID_W=1) のため反射する値も 0 固定
+    assign m0.bid = 0;
+    assign m0.rid = 0;
+    assign m1.bid = 0;
+    assign m1.rid = 0;
+}

@@ -1,0 +1,125 @@
+/// AXI4-Lite の小容量メモリモデル (L1 テスト用．合成対象ではない)
+///
+/// PsramAxiBridge + PsramCtrl + PSRAM の代わりに置き，ライトの内容と回数，
+/// リードの応答を検証するために使う．単一アウトスタンディング，
+/// 応答は常に OKAY，WSTRB はバイト単位で反映する．
+///
+/// `i_dbg_word` / `o_dbg_data` で内容を読み出し，`i_dbg_we` / `i_dbg_wdata` で
+/// 初期値を直接書き込める．
+pub module AxiLiteMemModel #(
+    /// 語数 (32 bit ワード)
+    param Words: u32 = 8,
+    /// リード応答を遅らせるサイクル数 (0 で即応答)
+    param ReadDelay: u32 = 0,
+) (
+    i_clk: input clock, /// クロック
+    i_rst: input reset, /// リセット
+
+    s_axi: modport $std::axi4_lite_if::<$std::axi4_lite_pkg::<22, 4, 1>>::slave, /// AXI4-Lite スレーブ
+
+    i_dbg_word : input  logic<20>, /// 観測・初期化するワード番号
+    i_dbg_we   : input  logic    , /// 1 で i_dbg_wdata を書く (初期値設定用)
+    i_dbg_wdata: input  logic<32>, /// 初期化データ
+    o_dbg_data : output logic<32>, /// 観測値
+    o_wr_count : output logic<16>, /// 受理したライト数
+    o_rd_count : output logic<16>, /// 受理したリード数
+) {
+    const AddrW: u32 = $clog2(Words);
+
+    var mem: logic<32> [Words];
+
+    var wr_pend : logic       ;
+    var wr_addr : logic<AddrW>;
+    var wr_data : logic<32>   ;
+    var wr_strb : logic<4>    ;
+    var rd_pend : logic       ;
+    var rd_delay: logic<8>    ;
+
+    assign o_dbg_data = mem[i_dbg_word[AddrW - 1:0]];
+
+    assign s_axi.bid = 0;
+    assign s_axi.rid = 0;
+
+    always_ff (i_clk, i_rst) {
+        if_reset {
+            s_axi.awready = 0;
+            s_axi.wready  = 0;
+            s_axi.bvalid  = 0;
+            s_axi.bresp   = 0;
+            s_axi.arready = 0;
+            s_axi.rvalid  = 0;
+            s_axi.rdata   = 0;
+            s_axi.rresp   = 0;
+            wr_pend       = 0;
+            wr_addr       = 0;
+            wr_data       = 0;
+            wr_strb       = 0;
+            rd_pend       = 0;
+            rd_delay      = 0;
+            o_wr_count    = 0;
+            o_rd_count    = 0;
+            for i in 0..Words {
+                mem[i] = 0;
+            }
+        } else {
+            // ---- テストベンチからの直接書き込み (初期値設定) ----
+            if i_dbg_we {
+                mem[i_dbg_word[AddrW - 1:0]] = i_dbg_wdata;
+            }
+
+            // ---- ライト: AW と W が揃った時点で 1 拍で受理する ----
+            s_axi.awready = 0;
+            s_axi.wready  = 0;
+            if !wr_pend && !s_axi.bvalid && s_axi.awvalid && s_axi.wvalid {
+                s_axi.awready = 1;
+                s_axi.wready  = 1;
+                wr_pend       = 1;
+                wr_addr       = s_axi.awaddr[AddrW + 1:2];
+                wr_data       = s_axi.wdata;
+                wr_strb       = s_axi.wstrb;
+            }
+
+            if wr_pend {
+                if wr_strb[0] {
+                    mem[wr_addr][7:0] = wr_data[7:0];
+                }
+                if wr_strb[1] {
+                    mem[wr_addr][15:8] = wr_data[15:8];
+                }
+                if wr_strb[2] {
+                    mem[wr_addr][23:16] = wr_data[23:16];
+                }
+                if wr_strb[3] {
+                    mem[wr_addr][31:24] = wr_data[31:24];
+                }
+                wr_pend      = 0;
+                s_axi.bvalid = 1;
+                o_wr_count   = o_wr_count + 1;
+            }
+            if s_axi.bvalid && s_axi.bready {
+                s_axi.bvalid = 0;
+            }
+
+            // ---- リード ----
+            s_axi.arready = 0;
+            if !rd_pend && !s_axi.rvalid && s_axi.arvalid {
+                s_axi.arready = 1;
+                rd_pend       = 1;
+                rd_delay      = ReadDelay;
+                s_axi.rdata   = mem[s_axi.araddr[AddrW + 1:2]];
+            }
+            if rd_pend {
+                if rd_delay == 0 {
+                    rd_pend      = 0;
+                    s_axi.rvalid = 1;
+                    o_rd_count   = o_rd_count + 1;
+                } else {
+                    rd_delay = rd_delay - 1;
+                }
+            }
+            if s_axi.rvalid && s_axi.rready {
+                s_axi.rvalid = 0;
+            }
+        }
+    }
+}

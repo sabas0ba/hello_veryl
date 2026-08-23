@@ -19,7 +19,9 @@ src/tfcard/test_disk_image.veryl へ出力する．Python 標準ライブラリ�
   5. SUBDIR       (attr 10h，スキップ対象)
   6. HELLO   TXT  23 byte，クラスタ 7，内容 "Hello, Veryl TF card!\\r\\n"
   7. DATA    BIN  256 byte，クラスタ 8，内容 00h..FFh
-  8. 終端 (先頭 00h)
+  8. IMAGE   BMP  78 byte，クラスタ 10，4x2 の無圧縮 24 bpp BMP
+     (ボトムアップ．docs/tfcard.md「画像表示デモ仕様」の L1 用)
+  9. 終端 (先頭 00h)
 
 再生成: python scripts/gen_tf_test_image.py
 """
@@ -38,6 +40,46 @@ README_SIZE = 2348
 README_CHAIN = [3, 5, 4]  # 断片化 (昇順でない)
 HELLO_BODY = b"Hello, Veryl TF card!\r\n"
 DATA_BODY = bytes(range(256))
+
+# 4x2 の無圧縮 24 bpp BMP (ボトムアップ)．TfImageDemo の L1 で
+# 画素順・BGR→RGB565 変換・行反転を検証するため，全画素を異なる色にする．
+# 画像座標 (上から) の行 0: 赤 緑 青 白 / 行 1: 黒 黄 シアン マゼンタ
+IMAGE_W = 4
+IMAGE_H = 2
+
+
+def build_bmp() -> bytes:
+    # 画像座標 (上から下) の画素を (R, G, B) で定義する
+    rows_top_down = [
+        [(0xFF, 0x00, 0x00), (0x00, 0xFF, 0x00), (0x00, 0x00, 0xFF), (0xFF, 0xFF, 0xFF)],
+        [(0x00, 0x00, 0x00), (0xFF, 0xFF, 0x00), (0x00, 0xFF, 0xFF), (0xFF, 0x00, 0xFF)],
+    ]
+    row_raw = IMAGE_W * 3
+    pad = (4 - row_raw % 4) % 4
+    pixels = bytearray()
+    # ボトムアップ: ファイル先頭は画像の最下行
+    for row in reversed(rows_top_down):
+        for (r, g, b) in row:
+            pixels += bytes((b, g, r))
+        pixels += bytes(pad)
+
+    off_bits = 54
+    hdr = bytearray()
+    hdr += b"BM"
+    hdr += le(off_bits + len(pixels), 4)   # bfSize
+    hdr += le(0, 2) + le(0, 2)             # bfReserved1/2
+    hdr += le(off_bits, 4)                 # bfOffBits
+    hdr += le(40, 4)                       # biSize
+    hdr += le(IMAGE_W, 4)                  # biWidth
+    hdr += le(IMAGE_H, 4)                  # biHeight (正 = ボトムアップ)
+    hdr += le(1, 2)                        # biPlanes
+    hdr += le(24, 2)                       # biBitCount
+    hdr += le(0, 4)                        # biCompression = BI_RGB
+    hdr += le(len(pixels), 4)              # biSizeImage
+    hdr += le(2835, 4) + le(2835, 4)       # 解像度 (72 dpi)
+    hdr += le(0, 4) + le(0, 4)             # biClrUsed / biClrImportant
+    assert len(hdr) == off_bits
+    return bytes(hdr) + bytes(pixels)
 
 EOC = 0x0FFFFFFF
 
@@ -101,6 +143,9 @@ def build_bpb() -> bytes:
     return bytes(s)
 
 
+IMAGE_BODY = build_bmp()
+
+
 def build_fat() -> bytes:
     entries = {
         0: 0x0FFFFFF8,
@@ -112,6 +157,7 @@ def build_fat() -> bytes:
         6: EOC,     # SUBDIR
         7: EOC,     # HELLO.TXT
         8: EOC,     # DATA.BIN
+        10: EOC,    # IMAGE.BMP
     }
     fat = bytearray(FATSZ32 * SECTOR)
     for idx, val in entries.items():
@@ -129,6 +175,7 @@ def build_root_dir() -> bytes:
         dir_entry(b"SUBDIR     ", 0x10, 6, 0),
         dir_entry(b"HELLO   TXT", 0x20, 7, len(HELLO_BODY)),
         dir_entry(b"DATA    BIN", 0x20, 8, len(DATA_BODY)),
+        dir_entry(b"IMAGE   BMP", 0x20, 10, len(IMAGE_BODY)),
     ]
     for i, e in enumerate(entries):
         d[i * 32:(i + 1) * 32] = e
@@ -172,6 +219,7 @@ def build_volume(part_start: int, with_mbr: bool) -> dict[int, bytes]:
         place(clus_lba(c), body[i * cbytes:(i + 1) * cbytes])
     place(clus_lba(7), HELLO_BODY)
     place(clus_lba(8), DATA_BODY)
+    place(clus_lba(10), IMAGE_BODY)
     return sectors
 
 

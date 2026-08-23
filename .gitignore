@@ -19,3 +19,7 @@ docs/datasheets/
 
 # Simulation waveforms (veryl test --wave)
 *.vcd
+
+# Python の一時生成物 (scripts/ の補助スクリプト)
+__pycache__/
+*.pyc
