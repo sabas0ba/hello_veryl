@@ -1,0 +1,155 @@
+// トラップ動作の L1 テスト (docs/riscv.md 段階 9)
+//
+// riscv64-unknown-elf-gcc でアセンブルした検証プログラム
+// (build/riscv_probe/trap_prog.S 相当) を実行し，各例外の原因コードと
+// mepc / mtval / mscratch の値をストアトランザクションで照合する．
+//
+// プログラムの流れ:
+//   mtvec にハンドラを設定 -> ECALL / EBREAK / 不正命令 / 非整列ロード /
+//   非整列ストア を順に起こす．ハンドラは mcause を 0x100 から順に記録し，
+//   mepc を +4 して mret で復帰する．最後に mscratch の往復・mepc・mtval・
+//   トラップ回数を記録する．
+
+#[test(test_rv_trap)]
+module test_rv_trap {
+    const MaxCycles: u32 = 4000;
+    const ProgWords: u32 = 31;
+    const NumStores: u32 = 9;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    var mem_valid: logic    ;
+    var mem_addr : logic<32>;
+    var mem_write: logic    ;
+    var mem_wdata: logic<32>;
+    var mem_wstrb: logic<4> ;
+    var mem_done : logic    ;
+    var mem_rdata: logic<32>;
+
+    var dbg_we   : logic    ;
+    var dbg_word : logic<32>;
+    var dbg_wdata: logic<32>;
+
+    var _pc    : logic<32>;
+    var _trap  : logic    ;
+    var _cause : logic<32>;
+    var illegal: logic    ;
+
+    inst core: RvCore (
+        i_clk      : clk      ,
+        i_rst      : rst      ,
+        o_mem_valid: mem_valid,
+        o_mem_addr : mem_addr ,
+        o_mem_write: mem_write,
+        o_mem_wdata: mem_wdata,
+        o_mem_wstrb: mem_wstrb,
+        i_mem_done : mem_done ,
+        i_mem_rdata: mem_rdata,
+        i_timer_irq: 1'b0     ,
+        o_pc       : _pc      ,
+        o_trap     : _trap    ,
+        o_cause    : _cause   ,
+        o_illegal  : illegal  ,
+    );
+
+    inst mem: RvMem #(
+        Words: 256,
+    ) (
+        i_clk      : clk      ,
+        i_rst      : rst      ,
+        i_valid    : mem_valid,
+        i_addr     : mem_addr ,
+        i_write    : mem_write,
+        i_wdata    : mem_wdata,
+        i_wstrb    : mem_wstrb,
+        o_done     : mem_done ,
+        o_rdata    : mem_rdata,
+        i_dbg_we   : dbg_we   ,
+        i_dbg_word : dbg_word ,
+        i_dbg_wdata: dbg_wdata,
+    );
+
+    var prog   : logic<32> [ProgWords];
+    var st_addr: logic<32> [NumStores];
+    var st_data: logic<32> [NumStores];
+    var n      : logic<5>             ;
+
+    initial {
+        prog[0]  = 32'h00000297;
+        prog[1]  = 32'h05828293;
+        prog[2]  = 32'h30529073;
+        prog[3]  = 32'h00000413;
+        prog[4]  = 32'h10000493;
+        prog[5]  = 32'h00000073;
+        prog[6]  = 32'h00100073;
+        prog[7]  = 32'h0000007f;
+        prog[8]  = 32'h20100313;
+        prog[9]  = 32'h00032383;
+        prog[10] = 32'h00732023;
+        prog[11] = 32'h00001e37;
+        prog[12] = 32'h234e0e13;
+        prog[13] = 32'h340e1073;
+        prog[14] = 32'h34002ef3;
+        prog[15] = 32'h03d4a423;
+        prog[16] = 32'h34102f73;
+        prog[17] = 32'h03e4a623;
+        prog[18] = 32'h34302ff3;
+        prog[19] = 32'h03f4a823;
+        prog[20] = 32'h0284aa23;
+        prog[21] = 32'h0000006f;
+        prog[22] = 32'h34202573;
+        prog[23] = 32'h00241593;
+        prog[24] = 32'h00b485b3;
+        prog[25] = 32'h00a5a023;
+        prog[26] = 32'h00140413;
+        prog[27] = 32'h34102673;
+        prog[28] = 32'h00460613;
+        prog[29] = 32'h34161073;
+        prog[30] = 32'h30200073;
+
+        n          = 0;
+        dbg_we     = 0;
+        dbg_word   = 0;
+        dbg_wdata  = 0;
+        rst.assert();
+
+        dbg_we = 1;
+        for i in 0..ProgWords {
+            dbg_word  = i;
+            dbg_wdata = prog[i];
+            clk.next (1);
+        }
+        dbg_we = 0;
+
+        for _c in 0..MaxCycles {
+            if mem_done == 1'b1 && mem_write == 1'b1 && n <: NumStores {
+                st_addr[n] = mem_addr;
+                st_data[n] = mem_wdata;
+                n          = n + 1;
+            }
+            clk.next(1);
+        }
+
+        $assert_continue(n == NumStores, "ストア回数");
+
+        // 例外の原因コード (RISC-V 仕様 Machine cause register)
+        $assert_continue(st_addr[0] == 32'h100 && st_data[0] == 32'd11, "ECALL は原因 11");
+        $assert_continue(st_addr[1] == 32'h104 && st_data[1] == 32'd3, "EBREAK は原因 3");
+        $assert_continue(st_addr[2] == 32'h108 && st_data[2] == 32'd2, "不正命令は原因 2");
+        $assert_continue(st_addr[3] == 32'h10c && st_data[3] == 32'd4, "ロード非整列は原因 4");
+        $assert_continue(st_addr[4] == 32'h110 && st_data[4] == 32'd6, "ストア非整列は原因 6");
+        // CSR の往復
+        $assert_continue(st_addr[5] == 32'h128 && st_data[5] == 32'h1234, "mscratch の読み書き");
+        // 直前のトラップの復帰先 (非整列ストア 0x28 の次)
+        $assert_continue(st_addr[6] == 32'h12c && st_data[6] == 32'h2c, "mepc は書き換えた値");
+        // 非整列ストアの mtval は違反アドレス
+        $assert_continue(st_addr[7] == 32'h130 && st_data[7] == 32'h201, "mtval は違反アドレス");
+        $assert_continue(st_addr[8] == 32'h134 && st_data[8] == 32'd5, "トラップ回数");
+
+        // 不正命令例外を 1 度起こしている
+        $assert_continue(illegal == 1'b1, "不正命令例外の記録");
+
+        $finish();
+    }
+}

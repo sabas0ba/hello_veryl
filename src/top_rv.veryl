@@ -58,6 +58,8 @@ pub module TopRv #(
     var _tohost_valid: logic    ;
     var _tohost      : logic<32>;
     var _pc          : logic<32>;
+    var _trap        : logic    ;
+    var _cause       : logic<32>;
     var illegal      : logic    ;
 
     inst soc: RvSoc #(
@@ -71,6 +73,8 @@ pub module TopRv #(
         o_tohost_valid: _tohost_valid,
         o_tohost      : _tohost      ,
         o_pc          : _pc          ,
+        o_trap        : _trap        ,
+        o_cause       : _cause       ,
         o_illegal     : illegal      ,
     );
 

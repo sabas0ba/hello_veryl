@@ -12,8 +12,7 @@
 ///     rdreg --> exec: レジスタ読み出し確定
 ///     exec --> memacc: load / store
 ///     exec --> mdwait: 乗除算 (M 拡張)
-///     exec --> fetch: それ以外（分岐・ジャンプ含む）
-///     exec --> halt: 未定義命令
+///     exec --> fetch: それ以外（分岐・ジャンプ・MRET 含む）
 ///     memacc --> fetch: 完了
 ///     mdwait --> fetch: 完了
 /// ```
@@ -26,8 +25,11 @@
 /// 分岐条件の比較はコア内の専用比較器で行う（ALU は分岐先アドレスの
 /// 計算に使うため）．JALR の分岐先は仕様どおり最下位ビットを 0 にする．
 ///
-/// 未定義命令は `halt` へ落ちて `o_illegal` を上げたまま停止する
-/// （トラップは Zicsr と併せて段階 9）．
+/// トラップ（不正命令・ECALL・EBREAK・ロード/ストアの非整列・命令フェッチの
+/// 非整列・タイマ割り込み）は，どの状態からでも実行を打ち切って `mtvec` へ飛ぶ．
+/// `mepc` / `mcause` / `mtval` の退避と `mstatus` の更新は `RvCsr` 側で行う．
+/// 割り込みは命令境界（フェッチ開始前）でのみ受理する．
+/// `o_illegal` は不正命令例外を 1 度でも起こしたことを示す診断用の粘着フラグ．
 pub module RvCore #(
     /// リセット後の開始アドレス
     param ResetPc: u32 = 0,
@@ -44,8 +46,12 @@ pub module RvCore #(
     i_mem_done : input  logic    , /// 完了
     i_mem_rdata: input  logic<32>, /// リードデータ
 
+    i_timer_irq: input logic, /// CLINT からのタイマ割り込み
+
     o_pc     : output logic<32>, /// 現在の PC（観測用）
-    o_illegal: output logic    , /// 未定義命令で停止した
+    o_trap   : output logic    , /// トラップ受理（1 サイクル．観測用）
+    o_cause  : output logic<32>, /// 受理したトラップの原因（観測用）
+    o_illegal: output logic    , /// 不正命令例外を 1 度でも起こした（診断用）
 ) {
     enum State: logic<3> {
         fetch,
@@ -53,7 +59,6 @@ pub module RvCore #(
         exec,
         memacc,
         mdwait,
-        halt,
     }
 
     var state: State    ;
@@ -152,6 +157,94 @@ pub module RvCore #(
         default         : i_mem_rdata,
     };
 
+    // ---- CSR とトラップ ----
+    let in_exec: logic = state == State::exec;
+
+    var csr_rdata  : logic<32>;
+    var csr_illegal: logic    ;
+    var csr_tvec   : logic<32>;
+    var csr_epc    : logic<32>;
+    var irq_pending: logic    ;
+
+    let csr_valid: logic     = in_exec && dec.sys_op == RvPkg::SysOp::csr;
+    let csr_wdata: logic<32> = if dec.csr_imm ? {27'b0, dec.rs1} : rd1;
+    // CSRRW は常に書く．CSRRS/CSRRC は rs1 (または uimm) が 0 なら書かない
+    let csr_wen: logic = dec.csr_op == 2'b01 || dec.rs1 != 0;
+
+    // ロード / ストアのアドレス整列 (LW/SW は 4，LH/LHU/SH は 2 バイト境界)
+    let addr_mis: logic = case dec.mem_op {
+        RvPkg::MemOp::w                  : alu_y[1:0] != 2'b00,
+        RvPkg::MemOp::h, RvPkg::MemOp::hu: alu_y[0] != 1'b0,
+        default                          : 1'b0,
+    };
+
+    // 命令アドレス非整列は「分岐 / ジャンプ命令」で検出する．
+    // 仕様上 mepc は分岐命令自身を指し，mtval は非整列な分岐先になるため，
+    // フェッチ時ではなく実行時に判定する (riscv-tests rv32mi/ma_fetch)
+    let trap_ifetch : logic = in_exec && (dec.jump || (dec.branch && take_branch)) && next_pc[1:0] != 2'b00;
+    let trap_irq    : logic = state == State::fetch && !o_mem_valid && irq_pending;
+    let trap_illegal: logic = in_exec && (dec.illegal || csr_illegal);
+    let trap_ecall  : logic = in_exec && dec.sys_op == RvPkg::SysOp::ecall;
+    let trap_ebreak : logic = in_exec && dec.sys_op == RvPkg::SysOp::ebreak;
+    let trap_load   : logic = in_exec && dec.mem_read && addr_mis;
+    let trap_store  : logic = in_exec && dec.mem_write && addr_mis;
+
+    let trap_now: logic = trap_ifetch || trap_irq || trap_illegal || trap_ecall || trap_ebreak || trap_load
+        || trap_store;
+
+    // 原因コード (RISC-V 仕様 Machine cause register)．割り込みを最優先とする
+    let trap_cause: logic<32> = if trap_irq ?
+        32'h8000_0007
+    : if trap_ifetch ?
+        32'd0
+    : if trap_illegal ?
+        32'd2
+    : if trap_ebreak ?
+        32'd3
+    : if trap_load ?
+        32'd4
+    : if trap_store ?
+        32'd6
+    :
+        32'd11
+    ;
+
+    let trap_tval: logic<32> = if trap_ifetch ?
+        next_pc
+    : if trap_illegal ?
+        iw
+    : if trap_load || trap_store ?
+        alu_y
+    :
+        32'b0
+    ;
+
+    let is_mret: logic = in_exec && dec.sys_op == RvPkg::SysOp::mret;
+
+    inst csr: RvCsr (
+        i_clk                      ,
+        i_rst                      ,
+        i_valid      : csr_valid   ,
+        i_addr       : dec.csr_addr,
+        i_op         : dec.csr_op  ,
+        i_wdata      : csr_wdata   ,
+        i_wen        : csr_wen     ,
+        o_rdata      : csr_rdata   ,
+        o_illegal    : csr_illegal ,
+        i_trap       : trap_now    ,
+        i_trap_cause : trap_cause  ,
+        i_trap_pc    : pc          ,
+        i_trap_tval  : trap_tval   ,
+        i_mret       : is_mret     ,
+        o_tvec       : csr_tvec    ,
+        o_epc        : csr_epc     ,
+        i_timer_irq  : i_timer_irq ,
+        o_irq_pending: irq_pending ,
+    );
+
+    assign o_trap  = trap_now;
+    assign o_cause = trap_cause;
+
     // ---- 乗除算 (M 拡張) ----
     var md_start : logic    ;
     var md_done  : logic    ;
@@ -172,6 +265,7 @@ pub module RvCore #(
     let wb_value: logic<32> = case dec.wb_sel {
         RvPkg::WbSel::mem: load_data,
         RvPkg::WbSel::pc4: pc4,
+        RvPkg::WbSel::csr: csr_rdata,
         default          : alu_y,
     };
 
@@ -197,7 +291,18 @@ pub module RvCore #(
             rf_we    = 0;
             md_start = 0;
 
-            if state == State::fetch {
+            if trap_now {
+                // トラップ: mepc / mcause / mtval の退避は RvCsr 側で行う．
+                // ここでは実行を打ち切って mtvec へ飛ぶ
+                if trap_illegal {
+                    o_illegal = 1;
+                }
+                o_mem_valid = 0;
+                o_mem_write = 0;
+                o_mem_wstrb = 0;
+                pc          = csr_tvec;
+                state       = State::fetch;
+            } else if state == State::fetch {
                 o_mem_valid = 1;
                 o_mem_addr  = pc;
                 o_mem_write = 0;
@@ -212,9 +317,10 @@ pub module RvCore #(
                 // ここで 1 サイクル待てばレジスタ値が揃う
                 state = State::exec;
             } else if state == State::exec {
-                if dec.illegal {
-                    o_illegal = 1;
-                    state     = State::halt;
+                if is_mret {
+                    // MRET: mstatus の復帰は RvCsr 側で行う
+                    pc    = csr_epc;
+                    state = State::fetch;
                 } else if dec.muldiv {
                     md_start = 1;
                     state    = State::mdwait;
@@ -251,7 +357,6 @@ pub module RvCore #(
                     state       = State::fetch;
                 }
             }
-            // State::halt: 停止したまま
         }
     }
 }

@@ -49,13 +49,13 @@
 
 ## 現行テスト一覧（L1）
 
-Veryl ネイティブテスト 50 件: Blink 3 / UART TX・RX・loopback・overrun 7 /
+Veryl ネイティブテスト 51 件: Blink 3 / UART TX・RX・loopback・overrun 7 /
 VideoTiming 1 / TextConsole 2 / PsramSpike 1 / ActivityLed 1 /
 PsramCtrl 3（init・R/W+WSTRB・straddle）/ CdcHandshake 1 / PsramAxi 1 /
 PsramMemtest 1 / PsramPhySdr 1 / PsramAxiArb2 1 / ImageScanout 2 /
 TF カード 17（TfCrc 既知ベクタ 1・SpiMaster 2・TfSpikeInit 1・TfCtrl 6・
 Fat32Reader 3・TfTextDemo 2・TfImageDemo 2，[tfcard.md](tfcard.md)）/
-RISC-V 8（RvDecoder 2・RvAlu 1・RvRegFile 1・RvCore 2・RvSoc 1 と
-L2 の riscv-tests ランナー 1（rv32ui 40 件を内包），[riscv.md](riscv.md)）．実行方法は
+RISC-V 9（RvDecoder 2・RvAlu 1・RvRegFile 1・RvCore 2・RvTrap 1・RvSoc 1 と
+L2 の riscv-tests ランナー 1（rv32ui/um/mi 60 件を内包），[riscv.md](riscv.md)）．実行方法は
 [environment.md](environment.md)，CI 規約は
 [CONTRIBUTING.md](../CONTRIBUTING.md) を参照．

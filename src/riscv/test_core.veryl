@@ -24,7 +24,7 @@
 
 #[test(test_rv_core)]
 module test_rv_core {
-    const MaxCycles: u32 = 4000;
+    const MaxCycles: u32 = 6000;
     const ProgWords: u32 = 45;
     const NumStores: u32 = 16;
 
@@ -44,6 +44,8 @@ module test_rv_core {
     var dbg_wdata: logic<32>;
 
     var pc     : logic<32>;
+    var _trap  : logic    ;
+    var _cause : logic<32>;
     var illegal: logic    ;
 
     inst core: RvCore (
@@ -56,7 +58,10 @@ module test_rv_core {
         o_mem_wstrb: mem_wstrb,
         i_mem_done : mem_done ,
         i_mem_rdata: mem_rdata,
+        i_timer_irq: 1'b0     ,
         o_pc       : pc       ,
+        o_trap     : _trap    ,
+        o_cause    : _cause   ,
         o_illegal  : illegal  ,
     );
 
@@ -157,7 +162,7 @@ module test_rv_core {
             clk.next(1);
         }
 
-        $assert_continue(illegal == 1'b0, "未定義命令に落ちていない");
+        $assert_continue(illegal == 1'b0, "不正命令例外は起きていない");
         $assert_continue(n == NumStores, "ストア回数");
 
         // 演算
@@ -187,10 +192,10 @@ module test_rv_core {
     }
 }
 
-// 未定義命令で halt へ落ち o_illegal が立つ
-#[test(test_rv_core_illegal)]
-module test_rv_core_illegal {
-    const MaxCycles: u32 = 200;
+// ECALL がトラップとして受理され，原因コードが 11 (M モードからの環境呼び出し) になる
+#[test(test_rv_core_trap)]
+module test_rv_core_trap {
+    const MaxCycles: u32 = 400;
 
     inst clk: $tb::clock_gen;
     inst rst: $tb::reset_gen ( clk );
@@ -208,6 +213,8 @@ module test_rv_core_illegal {
     var dbg_wdata: logic<32>;
 
     var _pc    : logic<32>;
+    var trap   : logic    ;
+    var cause  : logic<32>;
     var illegal: logic    ;
 
     inst core: RvCore (
@@ -220,7 +227,10 @@ module test_rv_core_illegal {
         o_mem_wstrb: mem_wstrb,
         i_mem_done : mem_done ,
         i_mem_rdata: mem_rdata,
+        i_timer_irq: 1'b0     ,
         o_pc       : _pc      ,
+        o_trap     : trap     ,
+        o_cause    : cause    ,
         o_illegal  : illegal  ,
     );
 
@@ -241,26 +251,37 @@ module test_rv_core_illegal {
         i_dbg_wdata: dbg_wdata,
     );
 
+    var first_cause: logic<32>;
+    var seen       : logic    ;
+
     initial {
-        dbg_we     = 0;
-        dbg_word   = 0;
-        dbg_wdata  = 0;
-        rst.assert();
+        dbg_we      = 0;
+        dbg_word    = 0;
+        dbg_wdata   = 0;
+        seen        = 0;
+        first_cause = 0;
+        rst.assert ();
 
         dbg_we    = 1;
         dbg_word  = 0;
         dbg_wdata = 32'h00a00093; // li ra,10
         clk.next (1);
         dbg_word  = 1;
-        dbg_wdata = 32'h00000073; // ecall (段階 9 まで未対応)
+        dbg_wdata = 32'h00000073; // ecall
         clk.next (1);
         dbg_we    = 0;
 
         for _c in 0..MaxCycles {
+            if trap == 1'b1 && seen == 1'b0 {
+                first_cause = cause;
+                seen        = 1;
+            }
             clk.next(1);
         }
-        $assert_continue(illegal == 1'b1, "ecall で halt する");
-        $assert_continue(mem_valid == 1'b0, "halt 後はメモリ要求を出さない");
+
+        $assert_continue(seen == 1'b1, "トラップを受理した");
+        $assert_continue(first_cause == 32'd11, "ECALL の原因コード");
+        $assert_continue(illegal == 1'b0, "ECALL は不正命令ではない");
         $finish         ();
     }
 }

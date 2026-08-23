@@ -8,6 +8,13 @@
 /// | `0x10` UART | W | 下位 8 bit を UART TX へ送出する |
 /// | `0x10` UART | R | bit0 = 送信可（0 なら前のバイトが未送出） |
 /// | `0x20` LED | W | 下位 6 bit を LED へ（極性は Top 側で扱う） |
+/// | `0x30` MTIME_LO | R | 自走カウンタ（クロック毎に +1）の下位 32 bit |
+/// | `0x34` MTIME_HI | R | 同上位 32 bit |
+/// | `0x38` MTIMECMP_LO | R/W | 比較値の下位 32 bit |
+/// | `0x3C` MTIMECMP_HI | R/W | 同上位 32 bit |
+///
+/// タイマ割り込みは `mtime >= mtimecmp` で `o_timer_irq` を上げる（CLINT 相当）．
+/// `mtimecmp` はリセット時に全 1 とし，設定するまで割り込まない．
 ///
 /// UART は 1 バイトのバッファのみ持つ．ソフトウェアは送信前に
 /// `0x10` を読んで bit0 が 1 であることを確認する．
@@ -27,10 +34,15 @@ pub module RvMmio (
     o_leds        : output logic<6> , /// LED（active-high．Top で反転する）
     o_tohost_valid: output logic    , /// 終了通知
     o_tohost      : output logic<32>, /// 終了コード
+    o_timer_irq   : output logic    , /// タイマ割り込み（mtime >= mtimecmp）
 ) {
-    const RegTohost: logic<8> = 8'h00;
-    const RegUart  : logic<8> = 8'h10;
-    const RegLed   : logic<8> = 8'h20;
+    const RegTohost    : logic<8> = 8'h00;
+    const RegUart      : logic<8> = 8'h10;
+    const RegLed       : logic<8> = 8'h20;
+    const RegMtimeLo   : logic<8> = 8'h30;
+    const RegMtimeHi   : logic<8> = 8'h34;
+    const RegMtimecmpLo: logic<8> = 8'h38;
+    const RegMtimecmpHi: logic<8> = 8'h3c;
 
     let reg_sel: logic<8> = i_addr[7:0];
 
@@ -40,6 +52,12 @@ pub module RvMmio (
 
     // UART 送信バッファ（1 バイト）
     var tx_busy: logic;
+
+    // CLINT 相当のタイマ
+    var mtime   : logic<64>;
+    var mtimecmp: logic<64>;
+
+    assign o_timer_irq = mtime >= mtimecmp;
 
     always_ff (i_clk, i_rst) {
         if_reset {
@@ -51,7 +69,10 @@ pub module RvMmio (
             o_tohost_valid = 0;
             o_tohost       = 0;
             o_rdata        = 0;
+            mtime          = 0;
+            mtimecmp       = 64'hffff_ffff_ffff_ffff;
         } else {
+            mtime          = mtime + 1;
             pending        = accept;
             o_tohost_valid = 0;
 
@@ -67,20 +88,26 @@ pub module RvMmio (
                             o_tohost       = i_wdata;
                             o_tohost_valid = 1;
                         }
-                        RegUart: if !tx_busy {
+                        RegUart      : if !tx_busy {
                             tx.data  = i_wdata[7:0];
                             tx.valid = 1;
                             tx_busy  = 1;
                         }
-                        RegLed : o_leds = i_wdata[5:0];
-                        default: {}
+                        RegMtimecmpLo: mtimecmp[31:0]  = i_wdata;
+                        RegMtimecmpHi: mtimecmp[63:32] = i_wdata;
+                        RegLed       : o_leds          = i_wdata[5:0];
+                        default      : {}
                     }
                     o_rdata = 0;
                 } else {
                     o_rdata = case reg_sel {
-                        RegUart: {1'b0 repeat 31, !tx_busy},
-                        RegLed : {1'b0 repeat 26, o_leds},
-                        default: 32'h0,
+                        RegUart      : {1'b0 repeat 31, !tx_busy},
+                        RegLed       : {1'b0 repeat 26, o_leds},
+                        RegMtimeLo   : mtime[31:0],
+                        RegMtimeHi   : mtime[63:32],
+                        RegMtimecmpLo: mtimecmp[31:0],
+                        RegMtimecmpHi: mtimecmp[63:32],
+                        default      : 32'h0,
                     };
                 }
             }

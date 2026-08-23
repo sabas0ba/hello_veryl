@@ -30,8 +30,11 @@ pub module RvSoc #(
     o_tohost_valid: output logic    , /// 終了通知
     o_tohost      : output logic<32>, /// 終了コード
     o_pc          : output logic<32>, /// 現在の PC（観測用）
-    o_illegal     : output logic    , /// 未定義命令で停止した
+    o_trap        : output logic    , /// トラップ受理（観測用）
+    o_cause       : output logic<32>, /// トラップ原因（観測用）
+    o_illegal     : output logic    , /// 不正命令例外を起こした（診断用）
 ) {
+    var timer_irq: logic    ;
     var mem_valid: logic    ;
     var mem_addr : logic<32>;
     var mem_write: logic    ;
@@ -50,7 +53,10 @@ pub module RvSoc #(
         o_mem_wstrb: mem_wstrb,
         i_mem_done : mem_done ,
         i_mem_rdata: mem_rdata,
+        i_timer_irq: timer_irq,
         o_pc       : o_pc     ,
+        o_trap     : o_trap   ,
+        o_cause    : o_cause  ,
         o_illegal  : o_illegal,
     );
 
@@ -108,6 +114,7 @@ pub module RvSoc #(
         o_leds        : o_leds               ,
         o_tohost_valid: o_tohost_valid       ,
         o_tohost      : o_tohost             ,
+        o_timer_irq   : timer_irq            ,
     );
 
     var psram_done : logic    ;

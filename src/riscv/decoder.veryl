@@ -18,8 +18,8 @@
 /// 種別を `md_op` (funct3) で渡す．
 ///
 /// FENCE (MISC-MEM) は本コアではメモリ順序の並べ替えを行わないため NOP として
-/// 受理する．SYSTEM (ECALL/EBREAK) と未定義符号は `illegal` を立てる
-/// (Zicsr は段階 9)．
+/// 受理する．SYSTEM は funct3=000 のとき ECALL / EBREAK / MRET，
+/// それ以外 (100 を除く) を Zicsr の CSR 命令として受理する．
 pub module RvDecoder (
     i_inst: input  logic         <32>, /// 命令語
     o_dec : output RvPkg::Decoded    , /// デコード結果
@@ -98,6 +98,10 @@ pub module RvDecoder (
         o_dec.jalr      = 0;
         o_dec.muldiv    = 0;
         o_dec.md_op     = funct3;
+        o_dec.sys_op    = RvPkg::SysOp::none;
+        o_dec.csr_op    = funct3[1:0];
+        o_dec.csr_imm   = funct3[2];
+        o_dec.csr_addr  = i_inst[31:20];
         o_dec.illegal   = 1;
 
         case opcode {
@@ -166,6 +170,30 @@ pub module RvDecoder (
             RvPkg::OpFence: {
                 // メモリ順序の並べ替えを行わないため NOP として受理する
                 o_dec.illegal = 0;
+            }
+            RvPkg::OpSystem: if funct3 == 3'b000 {
+                // ECALL / EBREAK / MRET．それ以外の符号は未定義
+                case i_inst[31:20] {
+                    12'h000: {
+                        o_dec.sys_op  = RvPkg::SysOp::ecall;
+                        o_dec.illegal = 0;
+                    }
+                    12'h001: {
+                        o_dec.sys_op  = RvPkg::SysOp::ebreak;
+                        o_dec.illegal = 0;
+                    }
+                    12'h302: {
+                        o_dec.sys_op  = RvPkg::SysOp::mret;
+                        o_dec.illegal = 0;
+                    }
+                    default: {}
+                }
+            } else if funct3 != 3'b100 {
+                // CSRRW/S/C とその即値版
+                o_dec.sys_op    = RvPkg::SysOp::csr;
+                o_dec.wb_sel    = RvPkg::WbSel::csr;
+                o_dec.reg_write = 1;
+                o_dec.illegal   = 0;
             }
             default: {}
         }

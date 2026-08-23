@@ -70,6 +70,22 @@ pub package RvPkg {
         mem,
         /// 次命令のアドレス (JAL / JALR のリンク)
         pc4,
+        /// CSR の読み出し値
+        csr,
+    }
+
+    /// SYSTEM 命令の種別
+    enum SysOp: logic<3> {
+        /// SYSTEM 以外
+        none,
+        /// CSR 読み書き
+        csr,
+        /// ECALL
+        ecall,
+        /// EBREAK
+        ebreak,
+        /// MRET
+        mret,
     }
 
     /// メモリアクセス幅・符号 (funct3 と同じ符号)
@@ -124,6 +140,14 @@ pub package RvPkg {
         muldiv: logic,
         /// 乗除算の種別 (funct3)
         md_op: logic<3>,
+        /// SYSTEM 命令の種別
+        sys_op: SysOp,
+        /// CSR 操作 (01=RW / 10=RS / 11=RC)
+        csr_op: logic<2>,
+        /// CSR の書き込み元が即値 (uimm) である
+        csr_imm: logic,
+        /// CSR 番号
+        csr_addr: logic<12>,
         /// 未定義命令
         illegal: logic,
     }

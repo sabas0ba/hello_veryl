@@ -142,10 +142,52 @@ module test_rv_decoder {
         $assert_continue(dec.mem_read == 1'b0, "fence no mem_read");
         $assert_continue(dec.mem_write == 1'b0, "fence no mem_write");
 
-        // ecall -> 00000073 (SYSTEM は段階 9 まで未対応)
+        // ecall -> 00000073 (トラップ命令として受理する)
         iw               = 32'h00000073;
         clk.next        (1);
-        $assert_continue(dec.illegal == 1'b1, "ecall illegal");
+        $assert_continue(dec.illegal == 1'b0, "ecall は未定義ではない");
+        $assert_continue(dec.sys_op == RvPkg::SysOp::ecall, "ecall の種別");
+        $assert_continue(dec.reg_write == 1'b0, "ecall は書き込まない");
+
+        // ebreak -> 00100073
+        iw               = 32'h00100073;
+        clk.next        (1);
+        $assert_continue(dec.illegal == 1'b0, "ebreak は未定義ではない");
+        $assert_continue(dec.sys_op == RvPkg::SysOp::ebreak, "ebreak の種別");
+
+        // mret -> 30200073
+        iw               = 32'h30200073;
+        clk.next        (1);
+        $assert_continue(dec.illegal == 1'b0, "mret は未定義ではない");
+        $assert_continue(dec.sys_op == RvPkg::SysOp::mret, "mret の種別");
+
+        // csrrw t0, mtvec, t1 -> 305312f3 (funct3=001, csr=0x305, rs1=t1(6), rd=t0(5))
+        iw               = {12'h305, 5'd6, 3'b001, 5'd5, 7'b1110011};
+        clk.next        (1);
+        $assert_continue(dec.illegal == 1'b0, "csrrw は未定義ではない");
+        $assert_continue(dec.sys_op == RvPkg::SysOp::csr, "csrrw の種別");
+        $assert_continue(dec.csr_addr == 12'h305, "csrrw の CSR 番号");
+        $assert_continue(dec.csr_op == 2'b01, "csrrw の操作");
+        $assert_continue(dec.csr_imm == 1'b0, "csrrw はレジスタ形式");
+        $assert_continue(dec.wb_sel == RvPkg::WbSel::csr, "csrrw の書き戻し元");
+        $assert_continue(dec.reg_write == 1'b1, "csrrw は rd へ書く");
+
+        // csrrsi t0, mstatus, 8 -> funct3=110 (即値形式)
+        iw               = {12'h300, 5'd8, 3'b110, 5'd5, 7'b1110011};
+        clk.next        (1);
+        $assert_continue(dec.illegal == 1'b0, "csrrsi は未定義ではない");
+        $assert_continue(dec.csr_op == 2'b10, "csrrsi の操作");
+        $assert_continue(dec.csr_imm == 1'b1, "csrrsi は即値形式");
+
+        // SYSTEM の funct3=100 は未定義
+        iw               = {12'h000, 5'd0, 3'b100, 5'd0, 7'b1110011};
+        clk.next        (1);
+        $assert_continue(dec.illegal == 1'b1, "SYSTEM funct3=100");
+
+        // SYSTEM funct3=000 の未定義 imm
+        iw               = {12'h123, 5'd0, 3'b000, 5'd0, 7'b1110011};
+        clk.next        (1);
+        $assert_continue(dec.illegal == 1'b1, "SYSTEM の未定義 imm");
 
         // 未定義 opcode 1111111 -> 0000007f
         iw               = 32'h0000007f;
