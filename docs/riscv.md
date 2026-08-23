@@ -40,10 +40,15 @@ SHA-256 を記録する（[psram.md](psram.md) と同じ運用）．
 
 | 資料 | 用途 | 取得元 | 版数 | SHA-256 |
 | --- | --- | --- | --- | --- |
-| RISC-V Unprivileged ISA Specification | RV32I / M 拡張の命令定義・符号化 | riscv.org/technical/specifications/ | TBD | TBD |
-| RISC-V Privileged Specification | CSR・トラップ・CLINT（段階 9 以降） | 同上 | TBD | TBD |
+| RISC-V Instruction Set Manual（Unprivileged + Privileged 合本） | RV32I / M 拡張の命令定義・符号化，CSR・トラップ（段階 9 以降） | github.com/riscv/riscv-isa-manual/releases/download/riscv-isa-release-fcd15c1-2026-08-18/riscv-spec.pdf | release `riscv-isa-release-fcd15c1-2026-08-18`（commit fcd15c1） | `f2c7cb4940f5d49762e2b82a5e898e8d7caea398c17aec4a55b11516ae4af6bf` |
 
-取得までは命令符号化を仕様の公開表から実装し，取得後に照合する．
+SHA-256 は GitHub Releases API のアセット digest と照合済み（OSS CAD Suite / Veryl と
+同じ pin 方式．上流に署名はないため，この pin が保証するのは転送路改竄と
+pin 後の変更の検出まで）．
+
+RISC-V の仕様書は日次ビルドで公開されており「版数」に相当するのはリリースタグである．
+RV32I と M 拡張は批准済みで内容は変わらないため，引用可能な特定スナップショットを
+固定する方針とした．
 
 ## ISA スコープ
 
@@ -110,7 +115,7 @@ BSRAM は 26 ブロック中 23 が空いている（約 51 KB）ため，16 KB 
 | レイヤ | 内容 |
 | --- | --- |
 | L1 | 命令ごとの自作ネイティブテスト（RV32I 各命令・境界値・x0 の扱い・分岐条件） |
-| L2 | **riscv-tests（rv32ui-p-\*）** を Veryl シミュレータで実行し，`tohost` 規約で pass/fail を判定する |
+| L2 | **riscv-tests（rv32ui）** を Veryl シミュレータで実行し，MMIO への終了通知で pass/fail を判定する（環境は自前，下記） |
 | L3 | 合成後ネットリスト検査（`verif/`） |
 | L4 | 実機（UART 出力，LCD 表示） |
 
@@ -118,16 +123,35 @@ L1 と L2 の役割分担は PSRAM/TF カードと同じ考え方による．L1 
 DUT が同じ解釈を共有するため共通モード誤りを検出できない．riscv-tests は
 実装から独立した外部オラクルであり，命令解釈の誤りを反証できる唯一の層になる．
 
-**riscv-tests の取り込み方法は要判断**．
+### riscv-tests の取り込み（決定: コンテナで commit pin）
 
-| 案 | 内容 | 評価 |
-| --- | --- | --- |
-| (a) コンテナビルド時に pinned commit で取得 | OSS CAD Suite / Veryl と同じ pin 方式 | 推奨．依存の所在が Containerfile に一元化される |
-| (b) repo へ vendoring | 取得先の可用性に依存しない | repo が肥大する |
-| (c) 自前テストのみ | 外部依存なし | 共通モード誤りを反証できない |
+`container/Containerfile` で `riscv-software-src/riscv-tests` を
+commit `2ebecad997fa58cd9e5724340ba75aa4b59bd1d0`（2026-08-14）に固定して取得する．
+git の commit SHA が内容の完全性を担保するため，別途ハッシュ表は設けない．
+サブモジュール `env` は親コミットが記録する版に従う．
+
+#### テスト環境は自前に置き換える
+
+標準の `env/p`（machine-mode 物理アドレス環境）は起動時に `mtvec` / `mcause` /
+`mhartid` を触るため **Zicsr を要求する**（アセンブル時に
+`unrecognized opcode 'csrr t5,mcause', extension 'zicsr' required` で失敗することを確認）．
+Zicsr は段階 9 の予定であり，それまで rv32ui を回せない．
+
+そこで**環境（ブートと終了通知）だけを自前に置き換える**．
+`verif/riscv/env/riscv_test.h` と `verif/riscv/env/link.ld` がそれで，
+CSR を一切使わず，終了は `MMIO_TOHOST`（`0x2000_0000`）へのストアで通知する
+（値の規約は riscv-tests と同じく 1 = pass，`(テスト番号 << 1) | 1` = fail）．
+
+**テスト本体（`isa/rv64ui/*.S` と `isa/macros/scalar/test_macros.h`）は改変しない**．
+命令解釈のオラクルはテスト本体であり，環境は足場に過ぎないため，
+差し替えても外部オラクルとしての性質は保たれる．
+
+`verif/riscv/build_tests.sh` でビルドする（コンテナ内実行）。
+**rv32ui 42 件中 41 件のビルドを確認済み**．除外は `fence_i` のみで，
+`fence.i` は Zifencei 拡張であり本コアの対象外（「ISA スコープ」）．
 
 テストバイナリは ELF から Veryl の疎な case 関数へ変換して埋め込む
-（`scripts/gen_riscv_rom.py`，`gen_tf_test_image.py` と同じ方式）．
+（`scripts/gen_riscv_rom.py`，`gen_tf_test_image.py` と同じ方式．段階 5 で実装）．
 
 ## ツールチェーン
 
@@ -138,6 +162,7 @@ DUT が同じ解釈を共有するため共通モード誤りを検出できな�
 | --- | --- |
 | `riscv64-unknown-elf-gcc` | 14.2.0+19 |
 | `riscv64-unknown-elf-as`（binutils） | 2.44 |
+| riscv-tests | commit `2ebecad997fa58cd9e5724340ba75aa4b59bd1d0` |
 
 `-march=rv32i -mabi=ilp32` の multilib が存在することを確認済み
 （`-print-multi-directory` が `rv32i/ilp32` を返す）．libc は使わず
@@ -160,10 +185,10 @@ DUT が同じ解釈を共有するため共通モード誤りを検出できな�
 | # | 内容 | 検証 | 状態 |
 | --- | --- | --- | --- |
 | 1 | 本設計文書 | — | 済 |
-| 2 | コンテナへ RISC-V ツールチェーンを追加 | rv32i/ilp32 のアセンブル・リンク確認 | 済 |
+| 2 | コンテナへ RISC-V ツールチェーンと riscv-tests を追加 | rv32i/ilp32 のアセンブル・リンク確認 | 済 |
 | 3 | 命令デコーダ・レジスタファイル・ALU | L1 | 未 |
 | 4 | 多サイクルコア（RV32I）+ BSRAM 接続 | L1 | 未 |
-| 5 | riscv-tests 実行環境（rv32ui-p） | L2 | 未 |
+| 5 | riscv-tests 実行環境（rv32ui） | L2 | テスト環境とビルドは済（41 件）．ROM 変換とランナーは未 |
 | 6 | MMIO（UART / LED）と実機での文字列出力 | L4 | 未 |
 | 7 | AXI4-Lite マスタ化して PSRAM を接続 | L1 / L4 | 未 |
 | 8 | M 拡張（乗除算） | L1 / L2 | 未 |
@@ -177,6 +202,6 @@ DUT が同じ解釈を共有するため共通モード誤りを検出できな�
 | --- | --- | --- |
 | LUT 予算 | 画像デモ構成で 77% 使用．最小 RV32I コアは 1000〜2000 LUT4 と見込まれ，そのままでは載らない | Fat32Reader・TfImageDemo・PsramMemtest をソフトウェアへ移して確保する（段階 7 以降） |
 | PSRAM 帯域 | 2.25 MB/s．PSRAM 上のコード実行は 0.5 MIPS 相当 | ホットパスは BSRAM 常駐とする．線形バースト実装と BSRAM 命令キャッシュは段階 7 以降で評価 |
-| riscv-tests の取得方法 | 上記 (a)/(b)/(c) 未決 | 段階 5 の着手前に決める |
+| Zifencei（`fence.i`） | 対象外のため rv32ui の `fence_i` を除外している | 自己書き換えコードを扱う段階になったら再検討 |
 | 圧縮命令 C の要否 | コードサイズが BSRAM 容量に直結する | 段階 8 以降で費用対効果を評価 |
-| 一次資料の SHA-256 | 仕様書が未取得 | 取得後に版数と SHA-256 を記入し，命令符号化を照合する |
+| 命令符号化の照合 | 仕様書は取得済み（一次資料表） | デコーダ実装時に符号化表と 1 対 1 で照合する |
