@@ -271,16 +271,32 @@ PSRAM OK
 Tang Primer 20K を同時に接続していると，どちらも FTDI 0403:6010 として
 列挙されるため対象の取り違えが起こりうる．実測で分かったことは次のとおり．
 
-- **USB serial 文字列は判別に使えない**．`--scan-usb` は開けたデバイスの情報を
-  出すが，`FactoryAIOT Pro` という文字列は Tang Nano 9K を指していたり
-  Tang Primer 20K を指していたりした（同じ Sipeed のデバッガ実装のため）
-- **bus/dev 番号は再列挙で変わる**．同一セッション中に 001:020 → 001:019 と
-  変化し，指していたボードも入れ替わった
-- **確実なのは IDCODE のみ**（Tang Nano 9K = GW1N(R)-9C / 0x100481b，
+本環境での対応（Windows のデバイスインスタンスで確認したもの）:
+
+| ボード | 親デバイスインスタンス | UART | Interface 0 (JTAG) |
+| --- | --- | --- | --- |
+| Tang Nano 9K | `USB\VID_0403&PID_6010\FactoryAIOT_Pro` | COM4 | 要 WinUSB |
+| Tang Primer 20K | `USB\VID_0403&PID_6010&37c50c52&0&2` | COM5 | 要 WinUSB |
+
+**openFPGALoader (libusb) は Interface 0 のドライバが WinUSB のデバイスしか開けない．**
+FTDI 純正の FTDIBUS が当たっていると `unable to open ftdi device` / `Entity not found`
+となる．Interface 1 は UART の COM ポートとして使うため **FTDIBUS のままにする**
+（ここを差し替えると COM ポートが消える）．
+
+同一 VID:PID のボードが 2 台あると，一方に Zadig を当てた際にもう一方の
+Interface 0 が FTDIBUS へ戻ることがある（実際に Tang Primer 20K へ適用した後，
+Tang Nano 9K が開けなくなった）．その場合は対象ボードの Interface 0 へ
+改めて WinUSB を当てる．紛れを避けるため，もう一方を外してから作業するとよい．
+
+判別についての注意:
+
+- **`--scan-usb` の serial 表示は当てにならない**．同一 VID:PID が 2 台あると，
+  開けたデバイスに別のボードの serial が併記されることがあった
+- **bus/dev 番号は再列挙で変わる**（同一セッション中に 001:020 → 001:019）
+- **実行時に確実なのは IDCODE のみ**（Tang Nano 9K = GW1N(R)-9C / 0x100481b，
   Tang Primer 20K = GW2A(R)-18(C)）
-- COM ポートを掴んだままのプロセス（`uart-term.ps1` の取り残し）があると
-  openFPGALoader がデバイスを開けなくなる（`unable to open ftdi device`）．
-  UART キャプチャは必ず終了させてから書き込む
+- COM ポートを掴んだままのプロセス（`uart-term.ps1` の取り残し）があっても
+  デバイスを開けなくなる．UART キャプチャは必ず終了させてから書き込む
 
 そこで `scripts/flash.ps1` は，既定の選択で当たらなければ bus/dev を総当りして
 **IDCODE が GW1N(R)-9C のデバイスを探し**，見つからなければ中断する．
