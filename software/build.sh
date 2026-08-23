@@ -8,7 +8,7 @@ cd "$(dirname "$0")/.."
 OUT=build/software
 mkdir -p "$OUT"
 
-riscv64-unknown-elf-gcc -march=rv32i -mabi=ilp32 -nostdlib -nostartfiles \
+riscv64-unknown-elf-gcc -march=rv32im -mabi=ilp32 -nostdlib -nostartfiles \
     -T software/link.ld -o "$OUT/hello.elf" software/hello.S
 riscv64-unknown-elf-objcopy -O binary "$OUT/hello.elf" "$OUT/hello.bin"
 riscv64-unknown-elf-objdump -d "$OUT/hello.elf" > "$OUT/hello.dis"

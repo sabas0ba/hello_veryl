@@ -11,9 +11,11 @@
 ///     fetch --> rdreg: 命令語受領
 ///     rdreg --> exec: レジスタ読み出し確定
 ///     exec --> memacc: load / store
+///     exec --> mdwait: 乗除算 (M 拡張)
 ///     exec --> fetch: それ以外（分岐・ジャンプ含む）
 ///     exec --> halt: 未定義命令
 ///     memacc --> fetch: 完了
+///     mdwait --> fetch: 完了
 /// ```
 ///
 /// `rdreg` はレジスタファイルの読み出しレイテンシ（1 サイクル）を吸収する
@@ -50,6 +52,7 @@ pub module RvCore #(
         rdreg,
         exec,
         memacc,
+        mdwait,
         halt,
     }
 
@@ -149,6 +152,22 @@ pub module RvCore #(
         default         : i_mem_rdata,
     };
 
+    // ---- 乗除算 (M 拡張) ----
+    var md_start : logic    ;
+    var md_done  : logic    ;
+    var md_result: logic<32>;
+
+    inst muldiv: RvMulDiv (
+        i_clk              ,
+        i_rst              ,
+        i_start : md_start ,
+        i_funct3: dec.md_op,
+        i_a     : rd1      ,
+        i_b     : rd2      ,
+        o_result: md_result,
+        o_done  : md_done  ,
+    );
+
     // 書き戻し値（ALU / メモリ / リンクアドレス）
     let wb_value: logic<32> = case dec.wb_sel {
         RvPkg::WbSel::mem: load_data,
@@ -167,6 +186,7 @@ pub module RvCore #(
             rf_wdata    = 0;
             ld_addr_sel = 0;
             ld_op       = RvPkg::MemOp::w;
+            md_start    = 0;
             o_mem_valid = 0;
             o_mem_addr  = 0;
             o_mem_write = 0;
@@ -174,7 +194,8 @@ pub module RvCore #(
             o_mem_wstrb = 0;
             o_illegal   = 0;
         } else {
-            rf_we = 0;
+            rf_we    = 0;
+            md_start = 0;
 
             if state == State::fetch {
                 o_mem_valid = 1;
@@ -194,6 +215,9 @@ pub module RvCore #(
                 if dec.illegal {
                     o_illegal = 1;
                     state     = State::halt;
+                } else if dec.muldiv {
+                    md_start = 1;
+                    state    = State::mdwait;
                 } else if dec.mem_read || dec.mem_write {
                     o_mem_valid = 1;
                     o_mem_addr  = alu_y;
@@ -207,6 +231,13 @@ pub module RvCore #(
                     rf_we    = dec.reg_write;
                     rf_wdata = wb_value;
                     pc       = next_pc;
+                    state    = State::fetch;
+                }
+            } else if state == State::mdwait {
+                if md_done {
+                    rf_we    = dec.reg_write;
+                    rf_wdata = md_result;
+                    pc       = pc4;
                     state    = State::fetch;
                 }
             } else if state == State::memacc {

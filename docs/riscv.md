@@ -55,7 +55,7 @@ RV32I と M 拡張は批准済みで内容は変わらないため，引用可�
 | 段階 | 内容 |
 | --- | --- |
 | v1 | RV32I（基本整数命令）．M モードのみ |
-| v2 | M 拡張（乗除算） |
+| v2 | M 拡張（乗除算）**実装済み** |
 | v3 | Zicsr と割り込み（CLINT: mtime / mtimecmp，mstatus / mie / mip / mtvec / mepc / mcause） |
 
 **非対応**（現時点）: 圧縮命令 C・A 拡張・F/D 拡張・MMU（Sv32）・U/S モード・
@@ -211,7 +211,8 @@ CSR を一切使わず，終了は `MMIO_TOHOST`（`0x2000_0000`）へのスト�
 
 #### 結果（2026-08-23）
 
-**rv32ui 42 件中 40 件を実行し，全件 pass**．除外は 2 件．
+**rv32ui 42 件中 40 件 + rv32um 8 件を実行し，全 48 件 pass**．
+rv32ui の除外は 2 件（rv32um は全件対象）．
 
 | 除外 | 理由 |
 | --- | --- |
@@ -268,23 +269,31 @@ PSRAM OK
 #### 複数ボード接続時の誤書き込み防止
 
 Tang Primer 20K を同時に接続していると，どちらも FTDI 0403:6010 として
-列挙されるため対象の取り違えが起こりうる．実測では次のとおりだった．
+列挙されるため対象の取り違えが起こりうる．実測で分かったことは次のとおり．
 
-| デバイス | COM | 備考 |
-| --- | --- | --- |
-| Tang Nano 9K | COM4 | USB serial `FACTORYAIOT_PRO`，bus 001 dev 020．IDCODE 0x100481b = GW1N(R)-9C |
-| Tang Primer 20K | COM5 | openFPGALoader からは開けない状態だった |
+- **USB serial 文字列は判別に使えない**．`--scan-usb` は開けたデバイスの情報を
+  出すが，`FactoryAIOT Pro` という文字列は Tang Nano 9K を指していたり
+  Tang Primer 20K を指していたりした（同じ Sipeed のデバッガ実装のため）
+- **bus/dev 番号は再列挙で変わる**．同一セッション中に 001:020 → 001:019 と
+  変化し，指していたボードも入れ替わった
+- **確実なのは IDCODE のみ**（Tang Nano 9K = GW1N(R)-9C / 0x100481b，
+  Tang Primer 20K = GW2A(R)-18(C)）
+- COM ポートを掴んだままのプロセス（`uart-term.ps1` の取り残し）があると
+  openFPGALoader がデバイスを開けなくなる（`unable to open ftdi device`）．
+  UART キャプチャは必ず終了させてから書き込む
 
-`scripts/flash.ps1` は書き込み前に `--detect` で IDCODE を確認し，
-GW1N(R)-9C 以外なら中断するようにした．UART も `-Port` で明示指定する．
+そこで `scripts/flash.ps1` は，既定の選択で当たらなければ bus/dev を総当りして
+**IDCODE が GW1N(R)-9C のデバイスを探し**，見つからなければ中断する．
+UART も `-Port` で明示指定する．
 
 ### 資源（2026-08-23，TopRv）
 
 | 項目 | 値 |
 | --- | --- |
-| LUT4 | 3852 / 8640（44%，PSRAM サブシステム込み） |
+| LUT4 | 4339 / 8640（50%，PSRAM サブシステムと M 拡張込み） |
 | DFF | 1177 / 6480（18%） |
 | BSRAM | 4 / 26（`RvMem` のバイトレーン 4 面） |
+| MULT36X36 | 1 / 5（乗算が DSP へマップされた） |
 | 最大周波数 | clk_mem 121.27 MHz（54 MHz 制約）/ i_clk 53.57 MHz（27 MHz 制約） |
 
 PSRAM サブシステムを含まない段階 6 時点では LUT4 2729（31%）だった
@@ -317,7 +326,7 @@ PSRAM サブシステムを含まない段階 6 時点では LUT4 2729（31%）�
 | 5 | riscv-tests 実行環境（rv32ui） | L2 | 済（40 件全 pass） |
 | 6 | MMIO（UART / LED）と実機での文字列出力 | L4 | 済（実機で出力を確認） |
 | 7 | AXI4-Lite マスタ化して PSRAM を接続 | L1 / L4 | 済（実機で PSRAM OK） |
-| 8 | M 拡張（乗除算） | L1 / L2 | 未 |
+| 8 | M 拡張（乗除算） | L1 / L2 | RTL・L2（rv32um 8 件 pass）済．実機確認は保留（下記） |
 | 9 | Zicsr・割り込み・タイマ（CLINT） | L1 / L2 | 未 |
 | 10 | TF カードからのプログラムロード（第一段ローダ） | L4 | 未 |
 | 11 | LCD デモ（Donut / フレームバッファ描画） | L4 | 未 |

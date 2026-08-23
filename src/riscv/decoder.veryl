@@ -14,6 +14,9 @@
 /// | U | {inst[31:12], 12'b0} |
 /// | J | sext({inst[31], inst[19:12], inst[20], inst[30:21], 1'b0}) |
 ///
+/// OP かつ funct7=0000001 は M 拡張 (乗除算) として `muldiv` を立て，
+/// 種別を `md_op` (funct3) で渡す．
+///
 /// FENCE (MISC-MEM) は本コアではメモリ順序の並べ替えを行わないため NOP として
 /// 受理する．SYSTEM (ECALL/EBREAK) と未定義符号は `illegal` を立てる
 /// (Zicsr は段階 9)．
@@ -62,10 +65,12 @@ pub module RvDecoder (
     };
 
     // ---- 符号の妥当性 ----
-    // OP: funct7 は 0000000 か 0100000 のみ．0100000 は ADD/SUB と SRL/SRA だけ
+    // OP: funct7 は 0000000 / 0100000 / 0000001 (M 拡張) のみ．
+    // 0100000 は ADD/SUB と SRL/SRA だけ
     let f7_zero: logic = funct7 == 7'b0000000;
     let f7_alt : logic = funct7 == 7'b0100000;
-    let reg_ok : logic = f7_zero || (f7_alt && (funct3 == 3'b000 || funct3 == 3'b101));
+    let f7_mul : logic = funct7 == 7'b0000001;
+    let reg_ok : logic = f7_zero || (f7_alt && (funct3 == 3'b000 || funct3 == 3'b101)) || f7_mul;
     // OP-IMM: シフト系のみ funct7 を検査する (SLLI は 0000000，SRLI/SRAI は 0000000/0100000)
     let imm_shift: logic = funct3 == 3'b001 || funct3 == 3'b101;
     let imm_ok   : logic = if imm_shift ? (f7_zero || (f7_alt && funct3 == 3'b101)) : 1'b1;
@@ -91,6 +96,8 @@ pub module RvDecoder (
         o_dec.branch_op = RvPkg::BranchOp::beq;
         o_dec.jump      = 0;
         o_dec.jalr      = 0;
+        o_dec.muldiv    = 0;
+        o_dec.md_op     = funct3;
         o_dec.illegal   = 1;
 
         case opcode {
@@ -153,6 +160,7 @@ pub module RvDecoder (
                 o_dec.alu_op    = alu_reg;
                 o_dec.src_b     = RvPkg::SrcB::rs2;
                 o_dec.reg_write = 1;
+                o_dec.muldiv    = f7_mul;
                 o_dec.illegal   = !reg_ok;
             }
             RvPkg::OpFence: {

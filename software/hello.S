@@ -1,8 +1,10 @@
-# RV32I ソフトコアの実機ブリングアップ用プログラム (docs/riscv.md パッチ計画 #6, #7)
+# RV32IM ソフトコアの実機ブリングアップ用プログラム
+# (docs/riscv.md パッチ計画 #6, #7, #8)
 #
 # 1. UART へ挨拶を 1 行出力する
 # 2. PSRAM へパターンを書いて読み返し，一致を確認して結果を 1 行出力する
-# 3. LED を点滅させて生存を示す
+# 3. M 拡張 (乗除算) の代表値とゼロ除算の規定値を確認し結果を 1 行出力する
+# 4. LED を点滅させて生存を示す
 #
 # 同じプログラムを L1 (test_rv_soc，PSRAM は AXI メモリモデルで代替) と
 # L4 (実機) の双方で走らせる．
@@ -13,8 +15,8 @@
 # レジスタはリセットで初期化されない (RISC-V 仕様も初期値を定めない．
 # docs/riscv.md「レジスタファイルの実装」) ため，使用前に必ず設定する．
 
-    .equ MMIO_UART,  0x20000010          # W: 送信バイト / R: bit0 = 送信可
-    .equ MMIO_LED,   0x20000020          # W: 下位 6 bit
+    .equ MMIO_UART,  0x20000010       # W: 送信バイト / R: bit0 = 送信可
+    .equ MMIO_LED,   0x20000020       # W: 下位 6 bit
     .equ PSRAM_BASE, 0x10000000
     .equ TEST_WORDS, 64
 
@@ -52,11 +54,41 @@ rd_next:
     blt  t2, t1, rd_loop
 
     beqz s2, psram_ok
-    la   a0, msg_ng
+    la   a0, msg_ps_ng
     jal  ra, puts
     j    blink
 psram_ok:
-    la   a0, msg_ok
+    la   a0, msg_ps_ok
+    jal  ra, puts
+
+# ---- M 拡張 (乗除算) の確認 ----
+    li   t0, 123456
+    li   t1, 7891
+    mul  t2, t0, t1                   # 974191296
+    li   t3, 974191296
+    bne  t2, t3, md_ng
+    div  t4, t2, t1                   # 元の 123456 へ戻る
+    bne  t4, t0, md_ng
+    li   t0, -1000
+    li   t1, 3
+    div  t2, t0, t1                   # 0 方向へ切り捨て -> -333
+    li   t3, -333
+    bne  t2, t3, md_ng
+    rem  t2, t0, t1                   # 剰余の符号は被除数に従う -> -1
+    li   t3, -1
+    bne  t2, t3, md_ng
+    li   t1, 0
+    div  t2, t0, t1                   # ゼロ除算: DIV は -1
+    li   t3, -1
+    bne  t2, t3, md_ng
+    rem  t2, t0, t1                   # ゼロ除算: REM は被除数
+    li   t3, -1000
+    bne  t2, t3, md_ng
+    la   a0, msg_md_ok
+    jal  ra, puts
+    j    blink
+md_ng:
+    la   a0, msg_md_ng
     jal  ra, puts
 
 # ---- 生存表示 ----
@@ -90,7 +122,11 @@ puts_done:
 
 msg_hello:
     .asciz "Hello from the RV32I core on Tang Nano 9K!\r\n"
-msg_ok:
+msg_ps_ok:
     .asciz "PSRAM OK\r\n"
-msg_ng:
+msg_ps_ng:
     .asciz "PSRAM NG\r\n"
+msg_md_ok:
+    .asciz "MULDIV OK\r\n"
+msg_md_ng:
+    .asciz "MULDIV NG\r\n"

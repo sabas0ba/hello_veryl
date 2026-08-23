@@ -1,9 +1,10 @@
-// RvSoc の L1 テスト (docs/riscv.md パッチ計画 #6, #7)
+// RvSoc の L1 テスト (docs/riscv.md パッチ計画 #6, #7, #8)
 //
 // ブート ROM の software/hello.S をコアが実行し，
 //   1. UART へ挨拶を 1 行送出
-//   2. PSRAM へ 64 語のパターンを書いて読み返し照合
-//   3. 結果を 1 行送出して LED 点灯
+//   2. PSRAM へ 64 語のパターンを書いて読み返し照合し結果を 1 行送出
+//   3. M 拡張 (乗除算) の代表値とゼロ除算の規定値を確認し結果を 1 行送出
+//   4. LED 点灯
 // までを確認する．
 //
 // PSRAM は AxiLiteMemModel で代替する（実 PSRAM のタイミングは
@@ -12,9 +13,10 @@
 
 #[test(test_rv_soc)]
 module test_rv_soc {
-    const MaxCycles: u32 = 300_000;
-    // "Hello from the RV32I core on Tang Nano 9K!\r\n" (44) + "PSRAM OK\r\n" (10)
-    const MsgLen: u32 = 54;
+    const MaxCycles: u32 = 400_000;
+    // "Hello from the RV32I core on Tang Nano 9K!\r\n" (44)
+    // + "PSRAM OK\r\n" (10) + "MULDIV OK\r\n" (11)
+    const MsgLen: u32 = 65;
     // hello.S の TEST_WORDS と一致させる
     const TestWords: u32 = 64;
 
@@ -65,7 +67,7 @@ module test_rv_soc {
         o_rd_count : rd_count ,
     );
 
-    var got      : logic<8> [64];
+    var got      : logic<8> [80];
     var n        : logic<7>     ;
     var leds_seen: logic        ;
 
@@ -96,13 +98,13 @@ module test_rv_soc {
         $assert_continue(got[3] == 8'h6c, "'l'");
         $assert_continue(got[4] == 8'h6f, "'o'");
         $assert_continue(got[5] == 8'h20, "' '");
-        // 1 行目の末尾 "9K!\r\n"
+        // 1 行目の末尾 "9K!" + CR LF
         $assert_continue(got[39] == 8'h39, "'9'");
         $assert_continue(got[40] == 8'h4b, "'K'");
         $assert_continue(got[41] == 8'h21, "'!'");
         $assert_continue(got[42] == 8'h0d, "CR");
         $assert_continue(got[43] == 8'h0a, "LF");
-        // 2 行目 "PSRAM OK\r\n"．照合が失敗していれば 'N' 'G' になる
+        // 2 行目 "PSRAM OK"．照合が失敗していれば 'N' 'G' になる
         $assert_continue(got[44] == 8'h50, "'P'");
         $assert_continue(got[45] == 8'h53, "'S'");
         $assert_continue(got[46] == 8'h52, "'R'");
@@ -113,6 +115,18 @@ module test_rv_soc {
         $assert_continue(got[51] == 8'h4b, "PSRAM 照合結果 'K'");
         $assert_continue(got[52] == 8'h0d, "CR");
         $assert_continue(got[53] == 8'h0a, "LF");
+        // 3 行目 "MULDIV OK"．乗除算の照合が失敗していれば 'N' 'G' になる
+        $assert_continue(got[54] == 8'h4d, "'M'");
+        $assert_continue(got[55] == 8'h55, "'U'");
+        $assert_continue(got[56] == 8'h4c, "'L'");
+        $assert_continue(got[57] == 8'h44, "'D'");
+        $assert_continue(got[58] == 8'h49, "'I'");
+        $assert_continue(got[59] == 8'h56, "'V'");
+        $assert_continue(got[60] == 8'h20, "' '");
+        $assert_continue(got[61] == 8'h4f, "乗除算の照合結果 'O'");
+        $assert_continue(got[62] == 8'h4b, "乗除算の照合結果 'K'");
+        $assert_continue(got[63] == 8'h0d, "CR");
+        $assert_continue(got[64] == 8'h0a, "LF");
 
         // PSRAM への実アクセス回数（書き込みと読み返しで各 TestWords 回）
         $assert_continue(wr_count == TestWords, "PSRAM ライト回数");
