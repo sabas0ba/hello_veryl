@@ -73,6 +73,39 @@ flowchart LR
   動作確認後の引き上げは性能改善として別パッチで行う
 - 位相シフト量は初期値 90° とし，実機で調整する（L4 残余⑤）
 
+### クロック別タイミング制約（2026-08-23）
+
+nextpnr の `--freq` は設計中の全クロックに一律の目標周波数を与えるため，
+rPLL 出力 clk_mem（54 MHz）が基準クロック（27 MHz）想定で評価されていた．
+`nextpnr-himbaechel --sdc` で個別に制約できることを実測で確認し，
+`constraints/tangnano9k.sdc` を追加した（`--freq 27` は基準クロック側の
+既定値として残す）．
+
+```
+create_clock -name clk_mem -period 18.518 [get_nets clk_mem]
+```
+
+適用後のログ（`build/nextpnr.log`）:
+
+```
+Info: constraining clock net 'clk_mem' to 54.00 MHz
+Info: Max frequency for clock           'clk_mem': 106.06 MHz (PASS at 54.00 MHz)
+Info: Max frequency for clock 'blink_alive.i_clk':  45.63 MHz (PASS at 27.00 MHz)
+```
+
+実測で判明した注意点:
+
+- **マッチ対象は合成後ネットリストのネット名**である．トップの入力ポート
+  `i_clk` のクロックネットは yosys がシンク側の名前（`blink_alive.i_clk`）へ
+  改名するため，`[get_ports i_clk]` も `[get_nets i_clk]` もマッチしない
+  （`[get_nets blink_alive.i_clk]` ならマッチする）．`clk_mem` は
+  Veryl→SV→合成を通じて名前が保たれるためそのまま指定できる
+- **マッチしない `create_clock` は警告なく無視される**．制約の空振りは
+  「STA が緩いまま通る」形で顕在化しないため，`scripts/synth_pnr.sh` に
+  上記 `constraining clock net` 行のログ検査を入れて失格させる．
+  SDC のネット名を存在しない名前へ変えた反証テストで検出を確認済み
+- 制約違反は nextpnr のエラー（非ゼロ終了）となるため，CI でそのまま失格する
+
 ### バス IF: std::axi4_lite_if
 
 - `axi4_lite_pkg::<ADDR_W=22, DATA_W_BYTES=4, ID_W=1>`（ch0 の 4 MB 空間）
@@ -576,7 +609,7 @@ CS#/RESET# ファブリック化，OE 閉端延長）を実装し 27 MHz で試�
 | --- | --- | --- |
 | PSRAM マジックポートの制約方法 | 内蔵パッドを nextpnr-himbaechel / .cst でどう指定するか未確認 | **解決（2026-07-22）**: ポート名一致による自動配置を PnR で実証（「パッドマッピング」節）．実機疎通は spike (#2) で確認 |
 | nextpnr タイミングモデル | Gowin EDA との保守性差が未知 | 54 MHz の安全側初期値で開始 |
-| nextpnr のクロック別制約 | `--freq` は全クロック一律で，clk_mem (54 MHz) の STA が 27 MHz 想定で評価される（段2ビルドで確認．現状はスラック大で実害なし） | コントローラ実装時にクロック別制約の指定方法を確認する |
+| nextpnr のクロック別制約 | `--freq` は全クロック一律で，clk_mem (54 MHz) の STA が 27 MHz 想定で評価される | **解決（2026-08-23）**: `--sdc` で clk_mem のみ個別制約（「クロック別タイミング制約」節） |
 | sby の同梱確認 | pin 済み OSS CAD Suite 2026-07-20 での同梱未確認 | **解決（2026-07-22）**: sby と SMT ソルバ群の同梱を確認（[verification.md](verification.md)） |
 | 内蔵ダイの仕様差 | W955D8MBYA 相当は非公式情報 | IR0 の実機読み出しで確認し，本文書に結果を記録 |
 | CR0 デフォルト値 | 電源投入時のレイテンシ初期値に依存した初期化順序 | **解決（2026-07-22）**: POR デフォルトは固定 2x・6 クロック（8F1Fh）．CR0 書き込み前でもレイテンシは決定的（「プロトコル仕様」節） |
