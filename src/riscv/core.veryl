@@ -8,12 +8,18 @@
 /// ```mermaid
 /// stateDiagram-v2
 ///     [*] --> fetch
-///     fetch --> exec: 命令語受領
+///     fetch --> rdreg: 命令語受領
+///     rdreg --> exec: レジスタ読み出し確定
 ///     exec --> memacc: load / store
 ///     exec --> fetch: それ以外（分岐・ジャンプ含む）
 ///     exec --> halt: 未定義命令
 ///     memacc --> fetch: 完了
 /// ```
+///
+/// `rdreg` はレジスタファイルの読み出しレイテンシ（1 サイクル）を吸収する
+/// ための待ち状態．レジスタファイルをメモリマクロへ寄せて LUT を削った
+/// 代償だが，多サイクル実行なので状態を 1 つ足すだけで済む
+/// （パイプラインならフォワーディングの再設計が要る．docs/riscv.md）．
 ///
 /// 分岐条件の比較はコア内の専用比較器で行う（ALU は分岐先アドレスの
 /// 計算に使うため）．JALR の分岐先は仕様どおり最下位ビットを 0 にする．
@@ -39,8 +45,9 @@ pub module RvCore #(
     o_pc     : output logic<32>, /// 現在の PC（観測用）
     o_illegal: output logic    , /// 未定義命令で停止した
 ) {
-    enum State: logic<2> {
+    enum State: logic<3> {
         fetch,
+        rdreg,
         exec,
         memacc,
         halt,
@@ -177,8 +184,12 @@ pub module RvCore #(
                 if i_mem_done {
                     o_mem_valid = 0;
                     iw          = i_mem_rdata;
-                    state       = State::exec;
+                    state       = State::rdreg;
                 }
+            } else if state == State::rdreg {
+                // デコード結果の rs1 / rs2 は前サイクルから確定しているため，
+                // ここで 1 サイクル待てばレジスタ値が揃う
+                state = State::exec;
             } else if state == State::exec {
                 if dec.illegal {
                     o_illegal = 1;

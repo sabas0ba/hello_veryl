@@ -13,18 +13,19 @@
 //   2c: sb t0,272 / lbu t2,272 / sw t2,276
 //   38: sh t0,280 / lhu s0,280 / sw s0,284
 //   44: li s1,-1 / sb s1,288 / lb a0,288 / sw a0,292
-//   54: beq ra,ra,5c / (li a1,99 は飛ばされる)
-//   5c: addi a1,a1,5 / sw a1,296
+//   54: li a1,0 (レジスタはリセットで 0 にならないため明示初期化)
+//   58: beq ra,ra,60 / (li a1,99 は飛ばされる)
+//   60: addi a1,a1,5 / sw a1,296
 //   64: bne ra,ra,70 (不成立) / li a2,7 / sw a2,300
 //   70: blt sp,ra,7c (成立) / li a3,1 / sw a3,304
 //   84: bltu sp,ra,90 (不成立) / li a4,2 / sw a4,308
-//   98: jal a5,a8 / sw a6,312 / sw a5,316 / j end
-//   a8: li a6,291 / jr a5
+//   9c: jal a5,ac / sw a6,312 / sw a5,316 / j end
+//   ac: li a6,291 / jr a5
 
 #[test(test_rv_core)]
 module test_rv_core {
     const MaxCycles: u32 = 4000;
-    const ProgWords: u32 = 44;
+    const ProgWords: u32 = 45;
     const NumStores: u32 = 16;
 
     inst clk: $tb::clock_gen;
@@ -105,29 +106,30 @@ module test_rv_core {
         prog[18] = 32'h12900023;
         prog[19] = 32'h12000503;
         prog[20] = 32'h12a02223;
-        prog[21] = 32'h00108463;
-        prog[22] = 32'h06300593;
-        prog[23] = 32'h00558593;
-        prog[24] = 32'h12b02423;
-        prog[25] = 32'h00109663;
-        prog[26] = 32'h00700613;
-        prog[27] = 32'h12c02623;
-        prog[28] = 32'h00114663;
-        prog[29] = 32'h00000693;
-        prog[30] = 32'h0080006f;
-        prog[31] = 32'h00100693;
-        prog[32] = 32'h12d02823;
-        prog[33] = 32'h00116663;
-        prog[34] = 32'h00200713;
-        prog[35] = 32'h0080006f;
-        prog[36] = 32'h00000713;
-        prog[37] = 32'h12e02a23;
-        prog[38] = 32'h010007ef;
-        prog[39] = 32'h13002c23;
-        prog[40] = 32'h12f02e23;
-        prog[41] = 32'h0000006f;
-        prog[42] = 32'h12300813;
-        prog[43] = 32'h00078067;
+        prog[21] = 32'h00000593;
+        prog[22] = 32'h00108463;
+        prog[23] = 32'h06300593;
+        prog[24] = 32'h00558593;
+        prog[25] = 32'h12b02423;
+        prog[26] = 32'h00109663;
+        prog[27] = 32'h00700613;
+        prog[28] = 32'h12c02623;
+        prog[29] = 32'h00114663;
+        prog[30] = 32'h00000693;
+        prog[31] = 32'h0080006f;
+        prog[32] = 32'h00100693;
+        prog[33] = 32'h12d02823;
+        prog[34] = 32'h00116663;
+        prog[35] = 32'h00200713;
+        prog[36] = 32'h0080006f;
+        prog[37] = 32'h00000713;
+        prog[38] = 32'h12e02a23;
+        prog[39] = 32'h010007ef;
+        prog[40] = 32'h13002c23;
+        prog[41] = 32'h12f02e23;
+        prog[42] = 32'h0000006f;
+        prog[43] = 32'h12300813;
+        prog[44] = 32'h00078067;
 
         n          = 0;
         dbg_we     = 0;
@@ -179,7 +181,7 @@ module test_rv_core {
         $assert_continue(st_addr[13] == 32'h134 && st_data[13] == 32'd2, "bltu は符号なし比較");
         // ジャンプ
         $assert_continue(st_addr[14] == 32'h138 && st_data[14] == 32'd291, "jal 先で設定した値");
-        $assert_continue(st_addr[15] == 32'h13c && st_data[15] == 32'h9c, "jal の戻りアドレス");
+        $assert_continue(st_addr[15] == 32'h13c && st_data[15] == 32'ha0, "jal の戻りアドレス");
 
         $finish();
     }

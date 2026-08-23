@@ -1,39 +1,86 @@
 /// RV32I のレジスタファイル (docs/riscv.md「マイクロアーキテクチャ」)
 ///
-/// 32 x 32 bit．読み出し 2 ポート・書き込み 1 ポートで，読み出しは組合せ．
-/// BSRAM ではなくフリップフロップで持つ (992 bit は DFF の空きに対して小さく，
-/// 読み出し 2 ポートを 1 サイクルで取れる)．
+/// 32 x 32 bit．読み出し 2 ポート・書き込み 1 ポート．
+/// **読み出しは 1 サイクル遅れる**（`i_rs1` / `i_rs2` を与えた次のサイクルに
+/// `o_rd1` / `o_rd2` が確定する）．RvCore はこのために `rdreg` 状態を持つ．
 ///
-/// x0 は読み出し 0 固定・書き込み無効
-/// (RISC-V Instruction Set Manual の RV32I レジスタ定義)．
+/// 実装は `$std::ram` を 2 面（読み出しポートごとに 1 面）で，書き込みは
+/// 両面へ同じ内容を行う．フリップフロップ + マルチプレクサで作ると
+/// 32:1 x 32 bit のマルチプレクサが 2 組必要になり LUT を大きく食うため
+/// （実測でコア全体の LUT の大半を占めていた．docs/riscv.md「資源」），
+/// メモリマクロへ寄せて論理を削る．
+///
+/// x0 は読み出し 0 固定・書き込み無効（RV32I のレジスタ定義）．
+/// x0 のエントリは書かれないため RAM 上の値は不定だが，読み出し側で
+/// 定数 0 に置き換えるため観測されない．
 pub module RvRegFile (
     i_clk: input clock, /// クロック
     i_rst: input reset, /// リセット
 
     i_rs1: input  logic<5> , /// 読み出しレジスタ番号 1
-    o_rd1: output logic<32>, /// 読み出し値 1
+    o_rd1: output logic<32>, /// 読み出し値 1（1 サイクル遅れ）
     i_rs2: input  logic<5> , /// 読み出しレジスタ番号 2
-    o_rd2: output logic<32>, /// 読み出し値 2
+    o_rd2: output logic<32>, /// 読み出し値 2（1 サイクル遅れ）
 
     i_we   : input logic    , /// 書き込みイネーブル
     i_rd   : input logic<5> , /// 書き込み先レジスタ番号
     i_wdata: input logic<32>, /// 書き込みデータ
 ) {
-    var regs: logic<32> [32];
+    // x0 への書き込みは捨てる
+    let we: logic = i_we && i_rd != 0;
 
-    // x0 は常に 0．書き込みは下の always_ff で無効化する
-    assign o_rd1 = if i_rs1 == 0 ? 32'b0 : regs[i_rs1];
-    assign o_rd2 = if i_rs2 == 0 ? 32'b0 : regs[i_rs2];
+    var q1: logic<32>;
+    var q2: logic<32>;
+
+    // 読み出しポートごとに 1 面．書き込みは両面へ同じ内容を行う
+    inst ram1: $std::ram #(
+        WORD_SIZE : 32  ,
+        DATA_WIDTH: 32  ,
+        BUFFER_OUT: true,
+    ) (
+        i_clk          ,
+        i_rst          ,
+        i_clr : 0      ,
+        i_mea : 1      ,
+        i_wea : we     ,
+        i_adra: i_rd   ,
+        i_da  : i_wdata,
+        i_meb : 1      ,
+        i_adrb: i_rs1  ,
+        o_qb  : q1     ,
+    );
+
+    inst ram2: $std::ram #(
+        WORD_SIZE : 32  ,
+        DATA_WIDTH: 32  ,
+        BUFFER_OUT: true,
+    ) (
+        i_clk          ,
+        i_rst          ,
+        i_clr : 0      ,
+        i_mea : 1      ,
+        i_wea : we     ,
+        i_adra: i_rd   ,
+        i_da  : i_wdata,
+        i_meb : 1      ,
+        i_adrb: i_rs2  ,
+        o_qb  : q2     ,
+    );
+
+    // 読み出しアドレスを 1 サイクル遅らせ，出力と同じ位相で x0 を判定する
+    var rs1_d: logic<5>;
+    var rs2_d: logic<5>;
 
     always_ff (i_clk, i_rst) {
         if_reset {
-            for i in 0..32 {
-                regs[i] = 0;
-            }
+            rs1_d = 0;
+            rs2_d = 0;
         } else {
-            if i_we && i_rd != 0 {
-                regs[i_rd] = i_wdata;
-            }
+            rs1_d = i_rs1;
+            rs2_d = i_rs2;
         }
     }
+
+    assign o_rd1 = if rs1_d == 0 ? 32'b0 : q1;
+    assign o_rd2 = if rs2_d == 0 ? 32'b0 : q2;
 }
