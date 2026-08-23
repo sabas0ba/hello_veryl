@@ -269,7 +269,10 @@ rv32mi はテスト側で `mtvec_handler` を定義し，環境の `trap_vector`
 | 対象 | 合成スクリプト | 制約 | 出力 |
 | --- | --- | --- | --- |
 | `Top` | `scripts/synth.ys` / `synth_pnr.sh` | `constraints/tangnano9k.cst` | `build/top.fs` |
-| `TopRv` | `scripts/synth_rv.ys` / `synth_pnr_rv.sh` | `constraints/tangnano9k_rv.cst` | `build/top_rv.fs` |
+| `TopRv` | `scripts/synth_rv.ys` / `synth_pnr_rv.sh` | `constraints/tangnano9k_rv.cst` / `.sdc` | `build/top_rv.fs` |
+
+`TopRv` は UART TX を傍受して LCD へ表示する `TextConsole` を含む（既存 `Top` と
+同じ構成）．UART を PC へ繋がなくてもボード上で出力を確認できる．
 
 `TopRv` は PLL を持たない 27 MHz 単一クロックのため，`--sdc` によるクロック別制約は不要．
 
@@ -333,7 +336,7 @@ UART も `-Port` で明示指定する．
 
 | 項目 | 値 |
 | --- | --- |
-| LUT4 | 5302 / 8640（61%，PSRAM サブシステム・M 拡張・Zicsr/トラップ込み） |
+| LUT4 | 6840 / 8640（79%，PSRAM・M 拡張・Zicsr/トラップ・LCD コンソール込み） |
 | DFF | 1177 / 6480（18%） |
 | BSRAM | 4 / 26（`RvMem` のバイトレーン 4 面） |
 | MULT36X36 | 1 / 5（乗算が DSP へマップされた） |
