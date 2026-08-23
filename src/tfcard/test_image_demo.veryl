@@ -1,0 +1,381 @@
+// TfImageDemo の L1 テスト: TfCtrl + Fat32Reader + TfCardModel +
+// 生成ディスクイメージ (IMAGE.BMP 4x2) + AXI メモリモデルのフルスタックで，
+// BMP 解析・BGR→RGB565 変換・ボトムアップの行反転・報告行を検証する
+// (docs/tfcard.md「画像表示デモ仕様」，パッチ #8)．
+//
+// 期待するフレームバッファ (1 ワード = 2 px，下位が偶数画素):
+//   画像 行0 (上): 赤 F800 / 緑 07E0 / 青 001F / 白 FFFF
+//   画像 行1 (下): 黒 0000 / 黄 FFE0 / シアン 07FF / マゼンタ F81F
+//   word0 = 07E0_F800, word1 = FFFF_001F,
+//   word2 = FFE0_0000, word3 = F81F_07FF
+
+#[test(test_tf_image_demo)]
+module test_tf_image_demo {
+    const MaxWait: u32 = 400_000;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    inst blk_st: stream_if; // TfCtrl -> Fat32Reader
+    inst f_st  : stream_if; // Fat32Reader -> TfImageDemo
+    inst msg_st: stream_if; // TfImageDemo -> テストベンチ
+
+    inst axi: $std::axi4_lite_if::<$std::axi4_lite_pkg::<22, 4, 1>>;
+
+    assign axi.awid = 0;
+    assign axi.arid = 0;
+
+    var sclk: logic;
+    var mosi: logic;
+    var miso: logic;
+    var cs_n: logic;
+
+    var blk_req_valid: logic             ;
+    var blk_req_lba  : logic         <32>;
+    var blk_req_ready: logic             ;
+    var tf_init_done : logic             ;
+    var tf_init_err  : TfTypes::Error    ;
+    var blk_done     : logic             ;
+    var blk_err      : TfTypes::Error    ;
+
+    var req_valid : logic               ;
+    var req_name  : logic           <88>;
+    var req_offset: logic           <32>;
+    var req_len   : logic           <32>;
+    var req_ready : logic               ;
+    var f_done    : logic               ;
+    var f_err     : TfTypes::FsError    ;
+    var f_size    : logic           <32>;
+
+    var img_lba : logic<32>;
+    var img_off : logic<9> ;
+    var img_data: logic<8> ;
+
+    var img_done : logic    ;
+    var dbg_word : logic<20>;
+    var dbg_data : logic<32>;
+    var wr_count : logic<16>;
+    var _rd_count: logic<16>;
+
+    inst ctrl: TfCtrl #(
+        InitDivider: 8,
+    ) (
+        i_clk      : clk          ,
+        i_rst      : rst          ,
+        i_req_valid: blk_req_valid,
+        i_req_lba  : blk_req_lba  ,
+        o_req_ready: blk_req_ready,
+        o_init_done: tf_init_done ,
+        o_init_err : tf_init_err  ,
+        o_done     : blk_done     ,
+        o_err      : blk_err      ,
+        data       : blk_st       ,
+        o_sclk     : sclk         ,
+        o_mosi     : mosi         ,
+        o_cs_n     : cs_n         ,
+        i_miso     : miso         ,
+    );
+
+    inst card: TfCardModel (
+        i_clk            : clk     ,
+        i_rst            : rst     ,
+        i_sclk           : sclk    ,
+        i_cs_n           : cs_n    ,
+        i_mosi           : mosi    ,
+        o_miso           : miso    ,
+        i_cfg_legacy_cmd8: 1'b0    ,
+        i_cfg_ccs        : 1'b1    ,
+        i_cfg_never_ready: 1'b0    ,
+        i_cfg_no_token   : 1'b0    ,
+        i_cfg_corrupt_crc: 1'b0    ,
+        o_img_lba        : img_lba ,
+        o_img_off        : img_off ,
+        i_img_data       : img_data,
+    );
+
+    assign img_data = TfTestImg::Byte(img_lba, img_off);
+
+    inst fat: Fat32Reader (
+        i_clk       : clk          ,
+        i_rst       : rst          ,
+        i_req_valid : req_valid    ,
+        i_req_name  : req_name     ,
+        i_req_offset: req_offset   ,
+        i_req_len   : req_len      ,
+        o_req_ready : req_ready    ,
+        o_done      : f_done       ,
+        o_err       : f_err        ,
+        o_file_size : f_size       ,
+        data        : f_st         ,
+        o_blk_valid : blk_req_valid,
+        o_blk_lba   : blk_req_lba  ,
+        i_blk_ready : blk_req_ready,
+        i_blk_done  : blk_done     ,
+        i_blk_err   : blk_err      ,
+        blk         : blk_st       ,
+    );
+
+    inst dut: TfImageDemo #(
+        SrcW: 4,
+        SrcH: 2,
+    ) (
+        i_clk       : clk         ,
+        i_rst       : rst         ,
+        i_init_done : tf_init_done,
+        i_init_err  : tf_init_err ,
+        o_req_valid : req_valid   ,
+        o_req_name  : req_name    ,
+        o_req_offset: req_offset  ,
+        o_req_len   : req_len     ,
+        i_req_ready : req_ready   ,
+        i_done      : f_done      ,
+        i_err       : f_err       ,
+        fdat        : f_st        ,
+        msg         : msg_st      ,
+        m_axi       : axi         ,
+        o_img_done  : img_done    ,
+    );
+
+    inst mem: AxiLiteMemModel #(
+        Words: 8,
+    ) (
+        i_clk      : clk      ,
+        i_rst      : rst      ,
+        s_axi      : axi      ,
+        i_dbg_word : dbg_word ,
+        i_dbg_we   : 0        ,
+        i_dbg_wdata: 0        ,
+        o_dbg_data : dbg_data ,
+        o_wr_count : wr_count ,
+        o_rd_count : _rd_count,
+    );
+
+    var exp: logic<8> [8];
+
+    initial {
+        // "IMG OK\r\n"
+        exp[0] = 8'h49;
+        exp[1] = 8'h4d;
+        exp[2] = 8'h47;
+        exp[3] = 8'h20;
+        exp[4] = 8'h4f;
+        exp[5] = 8'h4b;
+        exp[6] = 8'h0d;
+        exp[7] = 8'h0a;
+
+        msg_st.ready = 1;
+        dbg_word     = 0;
+        rst.assert  ();
+
+        for n in 0..8 {
+            for _w in 0..MaxWait {
+                if msg_st.valid == 1'b1 {
+                    break;
+                }
+                clk.next(1);
+            }
+            $assert_continue(msg_st.data == exp[n], "report byte");
+            clk.next        (1);
+        }
+
+        $assert_continue(img_done == 1'b1, "img_done");
+        $assert_continue(wr_count == 16'd4, "write count");
+
+        dbg_word         = 0;
+        clk.next        (1);
+        $assert_continue(dbg_data == 32'h07e0_f800, "word0 (red, green)");
+        dbg_word         = 1;
+        clk.next        (1);
+        $assert_continue(dbg_data == 32'hffff_001f, "word1 (blue, white)");
+        dbg_word         = 2;
+        clk.next        (1);
+        $assert_continue(dbg_data == 32'hffe0_0000, "word2 (black, yellow)");
+        dbg_word         = 3;
+        clk.next        (1);
+        $assert_continue(dbg_data == 32'hf81f_07ff, "word3 (cyan, magenta)");
+
+        $finish();
+    }
+}
+
+// 寸法不一致 (DUT は 8x2 を要求，画像は 4x2) で IMG ERR 3 を報告する
+#[test(test_tf_image_demo_size_err)]
+module test_tf_image_demo_size_err {
+    const MaxWait: u32 = 400_000;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    inst blk_st: stream_if;
+    inst f_st  : stream_if;
+    inst msg_st: stream_if;
+
+    inst axi: $std::axi4_lite_if::<$std::axi4_lite_pkg::<22, 4, 1>>;
+
+    assign axi.awid = 0;
+    assign axi.arid = 0;
+
+    var sclk: logic;
+    var mosi: logic;
+    var miso: logic;
+    var cs_n: logic;
+
+    var blk_req_valid: logic             ;
+    var blk_req_lba  : logic         <32>;
+    var blk_req_ready: logic             ;
+    var tf_init_done : logic             ;
+    var tf_init_err  : TfTypes::Error    ;
+    var blk_done     : logic             ;
+    var blk_err      : TfTypes::Error    ;
+
+    var req_valid : logic               ;
+    var req_name  : logic           <88>;
+    var req_offset: logic           <32>;
+    var req_len   : logic           <32>;
+    var req_ready : logic               ;
+    var f_done    : logic               ;
+    var f_err     : TfTypes::FsError    ;
+    var f_size    : logic           <32>;
+
+    var img_lba : logic<32>;
+    var img_off : logic<9> ;
+    var img_data: logic<8> ;
+
+    var img_done : logic    ;
+    var _dbg_data: logic<32>;
+    var wr_count : logic<16>;
+    var _rd_count: logic<16>;
+
+    inst ctrl: TfCtrl #(
+        InitDivider: 8,
+    ) (
+        i_clk      : clk          ,
+        i_rst      : rst          ,
+        i_req_valid: blk_req_valid,
+        i_req_lba  : blk_req_lba  ,
+        o_req_ready: blk_req_ready,
+        o_init_done: tf_init_done ,
+        o_init_err : tf_init_err  ,
+        o_done     : blk_done     ,
+        o_err      : blk_err      ,
+        data       : blk_st       ,
+        o_sclk     : sclk         ,
+        o_mosi     : mosi         ,
+        o_cs_n     : cs_n         ,
+        i_miso     : miso         ,
+    );
+
+    inst card: TfCardModel (
+        i_clk            : clk     ,
+        i_rst            : rst     ,
+        i_sclk           : sclk    ,
+        i_cs_n           : cs_n    ,
+        i_mosi           : mosi    ,
+        o_miso           : miso    ,
+        i_cfg_legacy_cmd8: 1'b0    ,
+        i_cfg_ccs        : 1'b1    ,
+        i_cfg_never_ready: 1'b0    ,
+        i_cfg_no_token   : 1'b0    ,
+        i_cfg_corrupt_crc: 1'b0    ,
+        o_img_lba        : img_lba ,
+        o_img_off        : img_off ,
+        i_img_data       : img_data,
+    );
+
+    assign img_data = TfTestImg::Byte(img_lba, img_off);
+
+    inst fat: Fat32Reader (
+        i_clk       : clk          ,
+        i_rst       : rst          ,
+        i_req_valid : req_valid    ,
+        i_req_name  : req_name     ,
+        i_req_offset: req_offset   ,
+        i_req_len   : req_len      ,
+        o_req_ready : req_ready    ,
+        o_done      : f_done       ,
+        o_err       : f_err        ,
+        o_file_size : f_size       ,
+        data        : f_st         ,
+        o_blk_valid : blk_req_valid,
+        o_blk_lba   : blk_req_lba  ,
+        i_blk_ready : blk_req_ready,
+        i_blk_done  : blk_done     ,
+        i_blk_err   : blk_err      ,
+        blk         : blk_st       ,
+    );
+
+    inst dut: TfImageDemo #(
+        SrcW: 8,
+        SrcH: 2,
+    ) (
+        i_clk       : clk         ,
+        i_rst       : rst         ,
+        i_init_done : tf_init_done,
+        i_init_err  : tf_init_err ,
+        o_req_valid : req_valid   ,
+        o_req_name  : req_name    ,
+        o_req_offset: req_offset  ,
+        o_req_len   : req_len     ,
+        i_req_ready : req_ready   ,
+        i_done      : f_done      ,
+        i_err       : f_err       ,
+        fdat        : f_st        ,
+        msg         : msg_st      ,
+        m_axi       : axi         ,
+        o_img_done  : img_done    ,
+    );
+
+    inst mem: AxiLiteMemModel #(
+        Words: 8,
+    ) (
+        i_clk      : clk      ,
+        i_rst      : rst      ,
+        s_axi      : axi      ,
+        i_dbg_word : 0        ,
+        i_dbg_we   : 0        ,
+        i_dbg_wdata: 0        ,
+        o_dbg_data : _dbg_data,
+        o_wr_count : wr_count ,
+        o_rd_count : _rd_count,
+    );
+
+    var exp: logic<8> [16];
+
+    initial {
+        // "IMG ERR 3\r\n"
+        exp[0]  = 8'h49;
+        exp[1]  = 8'h4d;
+        exp[2]  = 8'h47;
+        exp[3]  = 8'h20;
+        exp[4]  = 8'h45;
+        exp[5]  = 8'h52;
+        exp[6]  = 8'h52;
+        exp[7]  = 8'h20;
+        exp[8]  = 8'h33;
+        exp[9]  = 8'h20;
+        exp[10] = 8'h30;
+        exp[11] = 8'h34;
+        exp[12] = 8'h30;
+        exp[13] = 8'h32;
+        exp[14] = 8'h0d;
+        exp[15] = 8'h0a;
+
+        msg_st.ready = 1;
+        rst.assert  ();
+
+        for n in 0..16 {
+            for _w in 0..MaxWait {
+                if msg_st.valid == 1'b1 {
+                    break;
+                }
+                clk.next(1);
+            }
+            $assert_continue(msg_st.data == exp[n], "report byte");
+            clk.next        (1);
+        }
+
+        $assert_continue(img_done == 1'b0, "img_done stays low");
+        $assert_continue(wr_count == 16'd0, "no writes");
+        $finish         ();
+    }
+}
