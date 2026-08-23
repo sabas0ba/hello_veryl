@@ -223,6 +223,30 @@ CSR を一切使わず，終了は `MMIO_TOHOST`（`0x2000_0000`）へのスト�
 
 `TopRv` は PLL を持たない 27 MHz 単一クロックのため，`--sdc` によるクロック別制約は不要．
 
+### 実機結果（2026-08-23）
+
+`build/top_rv.fs` を SRAM へロードし，UART で以下を確認した．
+
+```
+Hello from the RV32I core on Tang Nano 9K!
+```
+
+自作 RV32I コアがブート ROM から起動し，MMIO の UART ステータスをポーリングしながら
+1 バイトずつ送出できている．続く LED 点滅ループも同じプログラムに含まれる．
+
+#### 複数ボード接続時の誤書き込み防止
+
+Tang Primer 20K を同時に接続していると，どちらも FTDI 0403:6010 として
+列挙されるため対象の取り違えが起こりうる．実測では次のとおりだった．
+
+| デバイス | COM | 備考 |
+| --- | --- | --- |
+| Tang Nano 9K | COM4 | USB serial `FACTORYAIOT_PRO`，bus 001 dev 020．IDCODE 0x100481b = GW1N(R)-9C |
+| Tang Primer 20K | COM5 | openFPGALoader からは開けない状態だった |
+
+`scripts/flash.ps1` は書き込み前に `--detect` で IDCODE を確認し，
+GW1N(R)-9C 以外なら中断するようにした．UART も `-Port` で明示指定する．
+
 ### 資源（2026-08-23，TopRv）
 
 | 項目 | 値 |
@@ -259,7 +283,7 @@ LUT を大きく減らせる（読み出しが 1 サイクル遅れるが多サ�
 | 3 | 命令デコーダ・レジスタファイル・ALU | L1 | 済（L1 4 件） |
 | 4 | 多サイクルコア（RV32I）+ BSRAM 接続 | L1 | 済（L1 2 件） |
 | 5 | riscv-tests 実行環境（rv32ui） | L2 | 済（40 件全 pass） |
-| 6 | MMIO（UART / LED）と実機での文字列出力 | L4 | RTL・ブートプログラム・ビットストリームまで済．実機書き込みは未 |
+| 6 | MMIO（UART / LED）と実機での文字列出力 | L4 | 済（実機で出力を確認） |
 | 7 | AXI4-Lite マスタ化して PSRAM を接続 | L1 / L4 | 未 |
 | 8 | M 拡張（乗除算） | L1 / L2 | 未 |
 | 9 | Zicsr・割り込み・タイマ（CLINT） | L1 / L2 | 未 |
