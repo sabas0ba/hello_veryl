@@ -30,6 +30,18 @@ IO_PORT "uart_tx" IO_TYPE=LVCMOS33 PULL_MODE=UP;
 IO_LOC  "uart_rx" 18;
 IO_PORT "uart_rx" IO_TYPE=LVCMOS33 PULL_MODE=UP;
 
+// TF card slot, SPI mode (pins per Sipeed official examples; docs/tfcard.md)
+// Pull-ups keep MISO reading 0xFF with no card inserted and CS# high while
+// the FPGA is unconfigured.
+IO_LOC  "tf_sclk" 36;
+IO_PORT "tf_sclk" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+IO_LOC  "tf_mosi" 37;
+IO_PORT "tf_mosi" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+IO_LOC  "tf_cs_n" 38;
+IO_PORT "tf_cs_n" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+IO_LOC  "tf_miso" 39;
+IO_PORT "tf_miso" IO_TYPE=LVCMOS33 PULL_MODE=UP;
+
 // LCD (Sipeed公式 lcd_4.3/src/Tang_nano_9K_LCD.cst 準拠)
 IO_LOC  "lcd_clk" 35;
 IO_PORT "lcd_clk" IO_TYPE=LVCMOS33 PULL_MODE=UP DRIVE=24;

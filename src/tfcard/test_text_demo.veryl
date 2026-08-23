@@ -1,0 +1,312 @@
+// TfTextDemo の L1 テスト: TfCtrl + Fat32Reader + TfCardModel +
+// 生成ディスクイメージのフルスタックで，報告行とファイル内容の
+// ストリームを検証する (docs/tfcard.md パッチ #6)．
+
+#[test(test_tf_text_demo)]
+module test_tf_text_demo {
+    const MaxWait: u32 = 400_000;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    inst blk_st: stream_if; // TfCtrl -> Fat32Reader
+    inst f_st  : stream_if; // Fat32Reader -> TfTextDemo
+    inst msg_st: stream_if; // TfTextDemo -> テストベンチ
+
+    var sclk: logic;
+    var mosi: logic;
+    var miso: logic;
+    var cs_n: logic;
+
+    var blk_req_valid: logic             ;
+    var blk_req_lba  : logic         <32>;
+    var blk_req_ready: logic             ;
+    var tf_init_done : logic             ;
+    var tf_init_err  : TfTypes::Error    ;
+    var blk_done     : logic             ;
+    var blk_err      : TfTypes::Error    ;
+
+    var req_valid : logic               ;
+    var req_name  : logic           <88>;
+    var req_offset: logic           <32>;
+    var req_len   : logic           <32>;
+    var req_ready : logic               ;
+    var f_done    : logic               ;
+    var f_err     : TfTypes::FsError    ;
+    var f_size    : logic           <32>;
+
+    var img_lba : logic<32>;
+    var img_off : logic<9> ;
+    var img_data: logic<8> ;
+
+    inst ctrl: TfCtrl #(
+        InitDivider: 8, // テスト短縮 (実機は 80 = 337.5 kHz)
+    ) (
+        i_clk      : clk          ,
+        i_rst      : rst          ,
+        i_req_valid: blk_req_valid,
+        i_req_lba  : blk_req_lba  ,
+        o_req_ready: blk_req_ready,
+        o_init_done: tf_init_done ,
+        o_init_err : tf_init_err  ,
+        o_done     : blk_done     ,
+        o_err      : blk_err      ,
+        data       : blk_st       ,
+        o_sclk     : sclk         ,
+        o_mosi     : mosi         ,
+        o_cs_n     : cs_n         ,
+        i_miso     : miso         ,
+    );
+
+    inst card: TfCardModel (
+        i_clk            : clk     ,
+        i_rst            : rst     ,
+        i_sclk           : sclk    ,
+        i_cs_n           : cs_n    ,
+        i_mosi           : mosi    ,
+        o_miso           : miso    ,
+        i_cfg_legacy_cmd8: 1'b0    ,
+        i_cfg_ccs        : 1'b1    ,
+        i_cfg_never_ready: 1'b0    ,
+        i_cfg_no_token   : 1'b0    ,
+        i_cfg_corrupt_crc: 1'b0    ,
+        o_img_lba        : img_lba ,
+        o_img_off        : img_off ,
+        i_img_data       : img_data,
+    );
+
+    assign img_data = TfTestImg::Byte(img_lba, img_off);
+
+    inst fat: Fat32Reader (
+        i_clk       : clk          ,
+        i_rst       : rst          ,
+        i_req_valid : req_valid    ,
+        i_req_name  : req_name     ,
+        i_req_offset: req_offset   ,
+        i_req_len   : req_len      ,
+        o_req_ready : req_ready    ,
+        o_done      : f_done       ,
+        o_err       : f_err        ,
+        o_file_size : f_size       ,
+        data        : f_st         ,
+        o_blk_valid : blk_req_valid,
+        o_blk_lba   : blk_req_lba  ,
+        i_blk_ready : blk_req_ready,
+        i_blk_done  : blk_done     ,
+        i_blk_err   : blk_err      ,
+        blk         : blk_st       ,
+    );
+
+    inst dut: TfTextDemo (
+        i_clk       : clk         ,
+        i_rst       : rst         ,
+        i_init_done : tf_init_done,
+        i_init_err  : tf_init_err ,
+        o_req_valid : req_valid   ,
+        o_req_name  : req_name    ,
+        o_req_offset: req_offset  ,
+        o_req_len   : req_len     ,
+        i_req_ready : req_ready   ,
+        i_done      : f_done      ,
+        i_err       : f_err       ,
+        fdat        : f_st        ,
+        msg         : msg_st      ,
+    );
+
+    var hdr : logic<8> [7];
+    var expb: logic<8>    ;
+
+    initial {
+        // "TF OK\r\n"
+        hdr[0] = 8'h54;
+        hdr[1] = 8'h46;
+        hdr[2] = 8'h20;
+        hdr[3] = 8'h4f;
+        hdr[4] = 8'h4b;
+        hdr[5] = 8'h0d;
+        hdr[6] = 8'h0a;
+
+        msg_st.ready = 1;
+        rst.assert  ();
+
+        for n in 0..7 {
+            for _w in 0..MaxWait {
+                if msg_st.valid == 1'b1 {
+                    break;
+                }
+                clk.next(1);
+            }
+            $assert_continue(msg_st.data == hdr[n], "header byte");
+            clk.next        (1); // handshake
+        }
+
+        // 続けてルート最初の *.TXT = README.TXT の内容 (i*31+7 mod 256)
+        expb = 8'd7;
+        for _n in 0..2348 {
+            for _w in 0..MaxWait {
+                if msg_st.valid == 1'b1 {
+                    break;
+                }
+                clk.next(1);
+            }
+            $assert_continue(msg_st.data == expb, "readme byte");
+            clk.next        (1);
+            expb             = expb + 8'd31;
+        }
+
+        // ファイル末尾で停止 (追加バイトなし)
+        for _w in 0..2000 {
+            $assert_continue(msg_st.valid == 1'b0, "no extra bytes");
+            clk.next        (1);
+        }
+        $finish();
+    }
+}
+
+#[test(test_tf_text_demo_init_err)]
+module test_tf_text_demo_init_err {
+    const MaxWait: u32 = 400_000;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    inst blk_st: stream_if;
+    inst f_st  : stream_if;
+    inst msg_st: stream_if;
+
+    var sclk: logic;
+    var mosi: logic;
+    var miso: logic;
+    var cs_n: logic;
+
+    var blk_req_valid: logic             ;
+    var blk_req_lba  : logic         <32>;
+    var blk_req_ready: logic             ;
+    var tf_init_done : logic             ;
+    var tf_init_err  : TfTypes::Error    ;
+    var blk_done     : logic             ;
+    var blk_err      : TfTypes::Error    ;
+
+    var req_valid : logic               ;
+    var req_name  : logic           <88>;
+    var req_offset: logic           <32>;
+    var req_len   : logic           <32>;
+    var req_ready : logic               ;
+    var f_done    : logic               ;
+    var f_err     : TfTypes::FsError    ;
+    var f_size    : logic           <32>;
+
+    var img_lba : logic<32>;
+    var img_off : logic<9> ;
+    var img_data: logic<8> ;
+
+    inst ctrl: TfCtrl #(
+        InitDivider: 8,
+    ) (
+        i_clk      : clk          ,
+        i_rst      : rst          ,
+        i_req_valid: blk_req_valid,
+        i_req_lba  : blk_req_lba  ,
+        o_req_ready: blk_req_ready,
+        o_init_done: tf_init_done ,
+        o_init_err : tf_init_err  ,
+        o_done     : blk_done     ,
+        o_err      : blk_err      ,
+        data       : blk_st       ,
+        o_sclk     : sclk         ,
+        o_mosi     : mosi         ,
+        o_cs_n     : cs_n         ,
+        i_miso     : miso         ,
+    );
+
+    inst card: TfCardModel (
+        i_clk            : clk     ,
+        i_rst            : rst     ,
+        i_sclk           : sclk    ,
+        i_cs_n           : cs_n    ,
+        i_mosi           : mosi    ,
+        o_miso           : miso    ,
+        i_cfg_legacy_cmd8: 1'b1    , // 旧世代カード → TF ERR 4 (unsupported)
+        i_cfg_ccs        : 1'b1    ,
+        i_cfg_never_ready: 1'b0    ,
+        i_cfg_no_token   : 1'b0    ,
+        i_cfg_corrupt_crc: 1'b0    ,
+        o_img_lba        : img_lba ,
+        o_img_off        : img_off ,
+        i_img_data       : img_data,
+    );
+
+    assign img_data = TfTestImg::Byte(img_lba, img_off);
+
+    inst fat: Fat32Reader (
+        i_clk       : clk          ,
+        i_rst       : rst          ,
+        i_req_valid : req_valid    ,
+        i_req_name  : req_name     ,
+        i_req_offset: req_offset   ,
+        i_req_len   : req_len      ,
+        o_req_ready : req_ready    ,
+        o_done      : f_done       ,
+        o_err       : f_err        ,
+        o_file_size : f_size       ,
+        data        : f_st         ,
+        o_blk_valid : blk_req_valid,
+        o_blk_lba   : blk_req_lba  ,
+        i_blk_ready : blk_req_ready,
+        i_blk_done  : blk_done     ,
+        i_blk_err   : blk_err      ,
+        blk         : blk_st       ,
+    );
+
+    inst dut: TfTextDemo (
+        i_clk       : clk         ,
+        i_rst       : rst         ,
+        i_init_done : tf_init_done,
+        i_init_err  : tf_init_err ,
+        o_req_valid : req_valid   ,
+        o_req_name  : req_name    ,
+        o_req_offset: req_offset  ,
+        o_req_len   : req_len     ,
+        i_req_ready : req_ready   ,
+        i_done      : f_done      ,
+        i_err       : f_err       ,
+        fdat        : f_st        ,
+        msg         : msg_st      ,
+    );
+
+    var line: logic<8> [10];
+
+    initial {
+        // "TF ERR 4\r\n" (4 = unsupported)
+        line[0] = 8'h54;
+        line[1] = 8'h46;
+        line[2] = 8'h20;
+        line[3] = 8'h45;
+        line[4] = 8'h52;
+        line[5] = 8'h52;
+        line[6] = 8'h20;
+        line[7] = 8'h34;
+        line[8] = 8'h0d;
+        line[9] = 8'h0a;
+
+        msg_st.ready = 1;
+        rst.assert  ();
+
+        for n in 0..10 {
+            for _w in 0..MaxWait {
+                if msg_st.valid == 1'b1 {
+                    break;
+                }
+                clk.next(1);
+            }
+            $assert_continue(msg_st.data == line[n], "err line byte");
+            clk.next        (1);
+        }
+
+        for _w in 0..2000 {
+            $assert_continue(msg_st.valid == 1'b0, "no extra bytes");
+            clk.next        (1);
+        }
+        $finish();
+    }
+}

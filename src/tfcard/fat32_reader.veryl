@@ -1,0 +1,525 @@
+/// FAT32 リーダ v2 (docs/tfcard.md「FAT32 リーダ仕様」)
+///
+/// TfCtrl (v1) のブロックリードを下位に使い，8.3 名で指定されたファイルを
+/// ルートディレクトリから探して内容を stream_if で送出する．リード専用．
+///
+/// - MBR パーティション 1 (タイプ 0Bh/0Ch) と，スーパーフロッピー形式
+///   (セクタ 0 が JMP + BytsPerSec=512 の BPB) の両方に対応
+/// - 8.3 名 11 バイト照合．要求名の `'?'` (3Fh) は任意 1 文字に一致
+/// - LFN (属性 0Fh)・削除済み (E5h)・ボリュームラベル・サブディレクトリはスキップ，
+///   先頭バイト 00h で列挙終端
+/// - オフセット起点はクラスタチェーン追跡とセクタ内バイト破棄で実現し，
+///   範囲外セクタの CMD17 は発行しない
+/// - FAT 参照はクラスタ遷移毎に該当 FAT セクタを 1 ブロックリードする
+///   (キャッシュなし)
+/// - マウント (MBR/BPB 解釈) は初回要求時に行い，以降の要求で再利用する
+///
+/// 注意: 下位 TfCtrl の初期化失敗時は要求が受理されない (ブロック要求が
+/// 受け付けられないため停止する)．利用側は TfCtrl の o_init_err を確認すること．
+pub module Fat32Reader (
+    i_clk: input clock, /// クロック
+    i_rst: input reset, /// リセット
+
+    // 要求 IF
+    i_req_valid : input  logic               , /// ファイル読み出し要求
+    i_req_name  : input  logic           <88>, /// 8.3 名 11 バイト ([87:80] が先頭文字，'?'=任意)
+    i_req_offset: input  logic           <32>, /// 開始バイトオフセット
+    i_req_len   : input  logic           <32>, /// 読み出しバイト数 (ファイル末尾で打ち切り)
+    o_req_ready : output logic               , /// 要求受付可能
+    o_done      : output logic               , /// 完了 (1 サイクルパルス)
+    o_err       : output TfTypes::FsError    , /// 完了時のエラー種別
+    o_file_size : output logic           <32>, /// 発見したファイルのサイズ (found 以降有効)
+
+    data: modport stream_if::source, /// ファイル内容 (要求範囲のみ)
+
+    // TfCtrl v1 ブロックリード IF
+    o_blk_valid: output logic             , /// ブロックリード要求
+    o_blk_lba  : output logic         <32>, /// 要求 LBA
+    i_blk_ready: input  logic             , /// 要求受付可能
+    i_blk_done : input  logic             , /// ブロック完了 (1 サイクルパルス)
+    i_blk_err  : input  TfTypes::Error    , /// ブロック完了時のエラー種別
+
+    blk: modport stream_if::sink, /// ブロックデータ (512 バイト/ブロック)
+) {
+    enum State: logic<4> {
+        idle,
+        m_sec0,
+        m_bpb,
+        m_calc,
+        d_issue,
+        d_sector,
+        fat_read,
+        f_prep,
+        f_step,
+        f_sector,
+    }
+
+    var state: State;
+
+    // 要求の latch．name_sh は照合位置のバイトを常に先頭 ([87:80]) に置く
+    // ローテートシフトコピー (シミュレータが配列の動的インデックス参照に
+    // 未対応のため，バイト選択をシフトで実現する)
+    var name_r  : logic<88>;
+    var name_sh : logic<88>;
+    var offset_r: logic<32>;
+    var len_r   : logic<32>;
+
+    // BPB / マウント結果
+    var mounted  : logic    ;
+    var part_lba : logic<32>;
+    var fat_lba  : logic<32>;
+    var data_lba : logic<32>;
+    var bps      : logic<16>;
+    var spc      : logic<8> ;
+    var spc_shift: logic<3> ;
+    var rsvd     : logic<16>;
+    var nfats    : logic<8> ;
+    var fatsz16  : logic<16>;
+    var fatsz32  : logic<32>;
+    var root_clus: logic<32>;
+    var jump_ok  : logic    ;
+    var sig55    : logic    ;
+    var sigaa    : logic    ;
+    var ptype    : logic<8> ;
+    var pcap     : logic<32>;
+    var calc_ph  : logic    ;
+    var calc_i   : logic<8> ;
+
+    // ディレクトリ列挙
+    var found    : logic    ;
+    var end_dir  : logic    ;
+    var match_e  : logic    ;
+    var e_clus_hi: logic<16>;
+    var e_clus_lo: logic<16>;
+    var e_size   : logic<24>;
+    var f_clus   : logic<32>;
+
+    // クラスタ / セクタ走査
+    var cur_clus   : logic<32>;
+    var sec_in_clus: logic<8> ;
+    var nxt_clus   : logic<32>;
+    var in_file    : logic    ;
+    var pos        : logic<32>;
+    var end_pos    : logic<32>;
+    var boff       : logic<10>;
+
+    // 現クラスタ内セクタの LBA と FAT エントリの LBA
+    let clus_lba   : logic<32> = data_lba + ((cur_clus - 32'd2) << spc_shift) + {24'h000000, sec_in_clus};
+    let fat_ent_lba: logic<32> = fat_lba + {7'b0000000, cur_clus[31:7]};
+
+    // ファイル本文の転送窓 (要求範囲のみ通す組合せフォワーディング)
+    let win_pos  : logic<32> = pos + {22'b0000000000000000000000, boff};
+    let in_window: logic     = win_pos >= offset_r && win_pos <: end_pos;
+
+    assign data.data  = blk.data;
+    assign data.valid = state == State::f_sector && blk.valid && in_window;
+    assign blk.ready  = if state == State::f_sector ?
+        (if in_window ? data.ready : 1'b1)
+    : if state == State::m_sec0 || state == State::m_bpb || state == State::d_sector || state == State::fat_read ?
+        1'b1
+    :
+        1'b0
+    ;
+
+    let blk_take: logic = blk.valid && blk.ready;
+
+    always_ff (i_clk, i_rst) {
+        if_reset {
+            state       = State::idle;
+            name_r      = 0;
+            name_sh     = 0;
+            offset_r    = 0;
+            len_r       = 0;
+            mounted     = 0;
+            part_lba    = 0;
+            fat_lba     = 0;
+            data_lba    = 0;
+            bps         = 0;
+            spc         = 0;
+            spc_shift   = 0;
+            rsvd        = 0;
+            nfats       = 0;
+            fatsz16     = 0;
+            fatsz32     = 0;
+            root_clus   = 0;
+            jump_ok     = 0;
+            sig55       = 0;
+            sigaa       = 0;
+            ptype       = 0;
+            pcap        = 0;
+            calc_ph     = 0;
+            calc_i      = 0;
+            found       = 0;
+            end_dir     = 0;
+            match_e     = 0;
+            e_clus_hi   = 0;
+            e_clus_lo   = 0;
+            e_size      = 0;
+            f_clus      = 0;
+            cur_clus    = 0;
+            sec_in_clus = 0;
+            nxt_clus    = 0;
+            in_file     = 0;
+            pos         = 0;
+            end_pos     = 0;
+            boff        = 0;
+            o_req_ready = 0;
+            o_done      = 0;
+            o_err       = TfTypes::FsError::none;
+            o_file_size = 0;
+            o_blk_valid = 0;
+            o_blk_lba   = 0;
+        } else {
+            if o_done {
+                o_done = 0;
+            }
+            if o_blk_valid && i_blk_ready {
+                o_blk_valid = 0;
+            }
+
+            // ---- ブロックデータのバイト消費 ----
+            if blk_take {
+                boff = boff + 1;
+                if state == State::m_sec0 || state == State::m_bpb {
+                    // BPB 共通フィールド (m_sec0 では MBR フィールドも重ねて捕捉)
+                    if boff == 10'd0 {
+                        jump_ok = blk.data == 8'heb || blk.data == 8'he9;
+                    }
+                    if boff == 10'd11 {
+                        bps[7:0] = blk.data;
+                    }
+                    if boff == 10'd12 {
+                        bps[15:8] = blk.data;
+                    }
+                    if boff == 10'd13 {
+                        spc = blk.data;
+                    }
+                    if boff == 10'd14 {
+                        rsvd[7:0] = blk.data;
+                    }
+                    if boff == 10'd15 {
+                        rsvd[15:8] = blk.data;
+                    }
+                    if boff == 10'd16 {
+                        nfats = blk.data;
+                    }
+                    if boff == 10'd22 {
+                        fatsz16[7:0] = blk.data;
+                    }
+                    if boff == 10'd23 {
+                        fatsz16[15:8] = blk.data;
+                    }
+                    if boff == 10'd36 {
+                        fatsz32[7:0] = blk.data;
+                    }
+                    if boff == 10'd37 {
+                        fatsz32[15:8] = blk.data;
+                    }
+                    if boff == 10'd38 {
+                        fatsz32[23:16] = blk.data;
+                    }
+                    if boff == 10'd39 {
+                        fatsz32[31:24] = blk.data;
+                    }
+                    if boff == 10'd44 {
+                        root_clus[7:0] = blk.data;
+                    }
+                    if boff == 10'd45 {
+                        root_clus[15:8] = blk.data;
+                    }
+                    if boff == 10'd46 {
+                        root_clus[23:16] = blk.data;
+                    }
+                    if boff == 10'd47 {
+                        root_clus[31:24] = blk.data;
+                    }
+                    if boff == 10'd450 {
+                        ptype = blk.data;
+                    }
+                    if boff == 10'd454 {
+                        pcap[7:0] = blk.data;
+                    }
+                    if boff == 10'd455 {
+                        pcap[15:8] = blk.data;
+                    }
+                    if boff == 10'd456 {
+                        pcap[23:16] = blk.data;
+                    }
+                    if boff == 10'd457 {
+                        pcap[31:24] = blk.data;
+                    }
+                    if boff == 10'd510 {
+                        sig55 = blk.data == 8'h55;
+                    }
+                    if boff == 10'd511 {
+                        sigaa = blk.data == 8'haa;
+                    }
+                } else if state == State::d_sector {
+                    // 32 バイト/エントリ x 16 エントリ
+                    if boff[4:0] == 5'd0 {
+                        match_e = 1;
+                        if blk.data == 8'h00 {
+                            end_dir = 1;
+                            match_e = 0;
+                        }
+                        if blk.data == 8'he5 {
+                            match_e = 0; // 削除済み ('?' との誤一致防止)
+                        }
+                    }
+                    if boff[4:0] <: 5'd11 {
+                        // 8.3 名照合 ('?' = 任意 1 文字)．照合後に次バイトへローテート
+                        if name_sh[87:80] != 8'h3f && blk.data != name_sh[87:80] {
+                            match_e = 0;
+                        }
+                        name_sh = {name_sh[79:0], name_sh[87:80]};
+                    }
+                    if boff[4:0] == 5'd11 {
+                        // 属性: LFN / ボリュームラベル / サブディレクトリをスキップ
+                        if (blk.data & 8'h0f) == 8'h0f || blk.data[3] == 1'b1 || blk.data[4] == 1'b1 {
+                            match_e = 0;
+                        }
+                    }
+                    if boff[4:0] == 5'd20 {
+                        e_clus_hi[7:0] = blk.data;
+                    }
+                    if boff[4:0] == 5'd21 {
+                        e_clus_hi[15:8] = blk.data;
+                    }
+                    if boff[4:0] == 5'd26 {
+                        e_clus_lo[7:0] = blk.data;
+                    }
+                    if boff[4:0] == 5'd27 {
+                        e_clus_lo[15:8] = blk.data;
+                    }
+                    if boff[4:0] == 5'd28 {
+                        e_size[7:0] = blk.data;
+                    }
+                    if boff[4:0] == 5'd29 {
+                        e_size[15:8] = blk.data;
+                    }
+                    if boff[4:0] == 5'd30 {
+                        e_size[23:16] = blk.data;
+                    }
+                    if boff[4:0] == 5'd31 {
+                        name_sh = name_r; // 次エントリの照合に備える
+                        if match_e && !found {
+                            found       = 1;
+                            f_clus      = {4'b0000, e_clus_hi[11:0], e_clus_lo};
+                            o_file_size = {blk.data, e_size};
+                        }
+                    }
+                } else if state == State::fat_read {
+                    // 該当 FAT エントリ (4 バイト，上位 4 bit は予約でマスク)
+                    if boff[8:2] == cur_clus[6:0] {
+                        if boff[1:0] == 2'd0 {
+                            nxt_clus[7:0] = blk.data;
+                        }
+                        if boff[1:0] == 2'd1 {
+                            nxt_clus[15:8] = blk.data;
+                        }
+                        if boff[1:0] == 2'd2 {
+                            nxt_clus[23:16] = blk.data;
+                        }
+                        if boff[1:0] == 2'd3 {
+                            nxt_clus[31:24] = blk.data & 8'h0f;
+                        }
+                    }
+                }
+            }
+
+            // ---- ブロック完了によるフェーズ遷移 ----
+            if i_blk_done {
+                if i_blk_err != TfTypes::Error::none {
+                    o_done      = 1;
+                    o_err       = TfTypes::FsError::io;
+                    state       = State::idle;
+                    o_req_ready = 1;
+                } else if state == State::m_sec0 {
+                    if jump_ok && bps == 16'd512 && sig55 && sigaa {
+                        // スーパーフロッピー: セクタ 0 が BPB
+                        part_lba = 0;
+                        state    = State::m_calc;
+                        calc_ph  = 0;
+                    } else if sig55 && sigaa && (ptype == 8'h0b || ptype == 8'h0c) {
+                        part_lba    = pcap;
+                        state       = State::m_bpb;
+                        o_blk_valid = 1;
+                        o_blk_lba   = pcap;
+                        boff        = 0;
+                        sig55       = 0;
+                        sigaa       = 0;
+                    } else {
+                        o_done      = 1;
+                        o_err       = TfTypes::FsError::no_fs;
+                        state       = State::idle;
+                        o_req_ready = 1;
+                    }
+                } else if state == State::m_bpb {
+                    state   = State::m_calc;
+                    calc_ph = 0;
+                } else if state == State::d_sector {
+                    if found {
+                        state = State::f_prep;
+                    } else if end_dir {
+                        o_done      = 1;
+                        o_err       = TfTypes::FsError::not_found;
+                        state       = State::idle;
+                        o_req_ready = 1;
+                    } else if sec_in_clus + 1 <: spc {
+                        sec_in_clus = sec_in_clus + 1;
+                        state       = State::d_issue;
+                    } else {
+                        // クラスタ内セクタを使い切った: FAT で次クラスタへ
+                        state       = State::fat_read;
+                        o_blk_valid = 1;
+                        o_blk_lba   = fat_ent_lba;
+                        boff        = 0;
+                        nxt_clus    = 0;
+                    }
+                } else if state == State::fat_read {
+                    if nxt_clus >= 32'h0fff_fff8 || nxt_clus <: 32'd2 {
+                        // チェーン終端
+                        if in_file {
+                            // ファイルサイズより短いチェーンでも打ち切って完了
+                            o_done      = 1;
+                            o_err       = TfTypes::FsError::none;
+                            state       = State::idle;
+                            o_req_ready = 1;
+                        } else {
+                            o_done      = 1;
+                            o_err       = TfTypes::FsError::not_found;
+                            state       = State::idle;
+                            o_req_ready = 1;
+                        }
+                    } else {
+                        cur_clus    = nxt_clus;
+                        sec_in_clus = 0;
+                        state       = if in_file ? State::f_step : State::d_issue;
+                    }
+                } else if state == State::f_sector {
+                    pos         = pos + 32'd512;
+                    sec_in_clus = sec_in_clus + 1;
+                    state       = State::f_step;
+                }
+            }
+
+            // ---- ブロック非依存の遷移 ----
+            if state == State::m_calc {
+                if calc_ph == 1'b0 {
+                    // BPB 検証と FAT/データ領域の起点計算
+                    if bps != 16'd512 || fatsz16 != 16'd0 || fatsz32 == 32'd0 || !sig55 || !sigaa || root_clus
+                        <: 32'd2 {
+                        o_done      = 1;
+                        o_err       = TfTypes::FsError::no_fs;
+                        state       = State::idle;
+                        o_req_ready = 1;
+                    } else if spc == 8'd1 || spc == 8'd2 || spc == 8'd4 || spc == 8'd8 || spc == 8'd16 || spc == 8'd32
+                        || spc == 8'd64 || spc == 8'd128 {
+                        spc_shift = case spc {
+                            8'd1   : 3'd0,
+                            8'd2   : 3'd1,
+                            8'd4   : 3'd2,
+                            8'd8   : 3'd3,
+                            8'd16  : 3'd4,
+                            8'd32  : 3'd5,
+                            8'd64  : 3'd6,
+                            default: 3'd7,
+                        };
+                        fat_lba  = part_lba + {16'h0000, rsvd};
+                        data_lba = part_lba + {16'h0000, rsvd};
+                        calc_i   = nfats;
+                        calc_ph  = 1;
+                    } else {
+                        // セクタ/クラスタが 2 冪でない
+                        o_done      = 1;
+                        o_err       = TfTypes::FsError::no_fs;
+                        state       = State::idle;
+                        o_req_ready = 1;
+                    }
+                } else {
+                    if calc_i == 8'd0 {
+                        mounted     = 1;
+                        cur_clus    = root_clus & 32'h0fff_ffff;
+                        sec_in_clus = 0;
+                        state       = State::d_issue;
+                    } else {
+                        data_lba = data_lba + fatsz32;
+                        calc_i   = calc_i - 1;
+                    }
+                }
+            } else if state == State::d_issue {
+                // ルート dir セクタの発行 (cur_clus / sec_in_clus 確定後の 1 サイクル)
+                state       = State::d_sector;
+                o_blk_valid = 1;
+                o_blk_lba   = clus_lba;
+                boff        = 0;
+                name_sh     = name_r;
+            } else if state == State::f_prep {
+                if f_clus <: 32'd2 || offset_r >= o_file_size {
+                    // 空ファイル / 範囲外オフセット: 0 バイトで正常完了
+                    o_done      = 1;
+                    o_err       = TfTypes::FsError::none;
+                    state       = State::idle;
+                    o_req_ready = 1;
+                } else {
+                    end_pos     = if len_r >: o_file_size - offset_r ? o_file_size : offset_r + len_r;
+                    cur_clus    = f_clus;
+                    sec_in_clus = 0;
+                    pos         = 0;
+                    in_file     = 1;
+                    state       = State::f_step;
+                }
+            } else if state == State::f_step {
+                if pos >= end_pos {
+                    o_done      = 1;
+                    o_err       = TfTypes::FsError::none;
+                    state       = State::idle;
+                    o_req_ready = 1;
+                } else if sec_in_clus >= spc {
+                    // クラスタを使い切った: FAT で次クラスタへ
+                    state       = State::fat_read;
+                    o_blk_valid = 1;
+                    o_blk_lba   = fat_ent_lba;
+                    boff        = 0;
+                    nxt_clus    = 0;
+                } else if pos + 32'd512 <= offset_r {
+                    // オフセット前のセクタは読まずにスキップ
+                    pos         = pos + 32'd512;
+                    sec_in_clus = sec_in_clus + 1;
+                } else {
+                    state       = State::f_sector;
+                    o_blk_valid = 1;
+                    o_blk_lba   = clus_lba;
+                    boff        = 0;
+                }
+            } else if state == State::idle {
+                if !o_req_ready && !o_done {
+                    o_req_ready = 1;
+                } else if i_req_valid && o_req_ready {
+                    o_req_ready = 0;
+                    name_r      = i_req_name;
+                    name_sh     = i_req_name;
+                    offset_r    = i_req_offset;
+                    len_r       = i_req_len;
+                    found       = 0;
+                    end_dir     = 0;
+                    in_file     = 0;
+                    o_err       = TfTypes::FsError::none;
+                    if mounted {
+                        cur_clus    = root_clus & 32'h0fff_ffff;
+                        sec_in_clus = 0;
+                        state       = State::d_issue;
+                    } else {
+                        state       = State::m_sec0;
+                        o_blk_valid = 1;
+                        o_blk_lba   = 0;
+                        boff        = 0;
+                        sig55       = 0;
+                        sigaa       = 0;
+                        jump_ok     = 0;
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1,8 +1,8 @@
 # RTL 設計
 
 本文書は現行デザイン（Lチカ・UART エコー・LCD テキストコンソール）の設計を記述する．
-PSRAM サブシステムの設計は [psram.md](psram.md)，検証方針は
-[verification.md](verification.md) を参照．
+PSRAM サブシステムの設計は [psram.md](psram.md)，TF カードサブシステムは
+[tfcard.md](tfcard.md)，検証方針は [verification.md](verification.md) を参照．
 
 ## クロック・リセット方針
 
@@ -17,8 +17,9 @@ PSRAM サブシステムの設計は [psram.md](psram.md)，検証方針は
 ```mermaid
 flowchart LR
     PC["PC (COMポート)"] -- uart_rx --> RX["Uart RX"]
-    RX -- "echo" --> ARB["TX arbiter"]
+    RX -- "echo" --> ARB["TX arbiter<br>(memtest &gt; TF &gt; echo)"]
     MT["PsramMemtest"] -- "結果1行" --> ARB
+    TFD["TfCtrl → Fat32Reader → TfTextDemo<br>(TFカード, tfcard.md)"] -- "報告行 + *.TXT 内容" --> ARB
     ARB --> TX["Uart TX"] -- uart_tx --> PC
     ARB -. "傍受 (valid && ready)" .-> CON["TextConsole<br>100列x30行 / BSRAM"]
     FONT["FontRom 8x16<br>(font/ から生成)"] --> CON
@@ -50,6 +51,11 @@ LED 割当（すべて active-low）:
 | PsramPhy / PsramCtrl / PsramAxiBridge | src/psram/ | PSRAM サブシステム（[psram.md](psram.md)） |
 | PsramMemtest | src/psram/memtest.veryl | 起動時 PSRAM 検査と結果報告（[psram.md](psram.md)） |
 | PsramSpikeBitbang | src/psram/spike_bitbang.veryl | PSRAM spike 段1（未接続で残置，[psram.md](psram.md)） |
+| SpiMaster | src/tfcard/spi_master.veryl | SPI mode 0 マスタ，分周切替（[tfcard.md](tfcard.md)） |
+| TfSpikeInit | src/tfcard/spike_init.veryl | TF カード初期化 + セクタ 0 リード spike（ブリングアップ用，Top 非接続） |
+| TfCtrl | src/tfcard/tf_ctrl.veryl | TF カードブロックリードコントローラ v1（[tfcard.md](tfcard.md)） |
+| Fat32Reader | src/tfcard/fat32_reader.veryl | FAT32 リーダ v2（8.3 名照合・チェーン追跡，[tfcard.md](tfcard.md)） |
+| TfTextDemo | src/tfcard/text_demo.veryl | TF カード報告行 + ルート最初の *.TXT を UART/LCD 表示 |
 | stream_if | src/common/stream.veryl | valid/ready ハンドシェイクの汎用 stream interface |
 | Uart | src/uart/uart.veryl | 115200bps 8N1．RX は 2FF 同期 + 中央サンプリング，ノンブロッキング供給 |
 | VideoTiming | src/video/timing.veryl | LCD タイミング生成（datasheet 導出の 27MHz 直結 59.1Hz，HTotal=890 x VTotal=513） |
@@ -85,6 +91,8 @@ python .\scripts\gen_font_rom.py
 | lcd_r[4:0] | 75,74,73,72,71 | RGB565 |
 | lcd_g[5:0] | 70,69,68,57,56,55 | |
 | lcd_b[4:0] | 54,53,51,42,41 | |
+| tf_sclk / tf_mosi | 36 / 37 | TF カードスロット（SPI モード，[tfcard.md](tfcard.md)） |
+| tf_cs_n / tf_miso | 38 / 39 | 全ピン PULL_MODE=UP |
 
 ## References（ボード・デバイス）
 

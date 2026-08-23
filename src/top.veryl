@@ -1,16 +1,21 @@
 /// トップモジュール (Tang Nano 9K)
 ///
-/// UART エコー + テキストコンソール (LCD) + PSRAM サブシステム + LED 表示の統合．
+/// UART エコー + テキストコンソール (LCD) + PSRAM サブシステム
+/// + TF カードテキスト表示デモ + LED 表示の統合．
 ///
 /// ```mermaid
 /// flowchart LR
 ///     PC["PC (COMポート)"] -- uart_rx --> RX["Uart RX"]
-///     RX -- "echo" --> ARB["TX arbiter<br>(memtest優先)"]
+///     RX -- "echo" --> ARB["TX arbiter<br>(memtest &gt; TF &gt; echo)"]
 ///     MT["PsramMemtest"] -- "結果1行" --> ARB
+///     DEMO["TfTextDemo"] -- "報告行 + *.TXT 内容" --> ARB
+///     FAT["Fat32Reader"] --> DEMO
+///     TFC["TfCtrl"] --> FAT
 ///     ARB --> TX["Uart TX"] -- uart_tx --> PC
 ///     ARB -. "傍受" .-> CON["TextConsole"] --> LCD["5inch LCD"]
 ///     MT -- AXI4-Lite --> BR["PsramAxiBridge<br>(CDC)"] --> CTRL["PsramCtrl"]
 ///     CTRL --> PHY["PsramPhySdr<br>(CK 13.5MHz)"] <--> RAM["内蔵 PSRAM ch0"]
+///     TFC <--> TF["TF カード (SPI)"]
 ///     PLL["PsramClkGen<br>(rPLL 54MHz)"] --> CTRL
 /// ```
 ///
@@ -19,7 +24,13 @@
 /// phy は SDR fallback (IOLOGIC 不使用．apicula ODDR の実挙動により DDR phy は
 /// 保留中．docs/psram.md「apicula ODDR 実挙動の調査」参照)．
 ///
-/// LED 割当は docs/rtl.md，PSRAM サブシステムは docs/psram.md を参照．
+/// TX アービタは memtest > TF デモ > エコーの固定優先度とし，行の混在を避けるため
+/// TF デモは memtest の報告が完了してから起動する (下記 psram_msg_done)．
+/// TF カードのブリングアップ時は TfSpikeInit (Top 非接続の spike) を
+/// 本デモ一式と差し替えて使う (docs/tfcard.md「spike の構成」)．
+///
+/// LED 割当は docs/rtl.md，PSRAM サブシステムは docs/psram.md，
+/// TF カードサブシステムは docs/tfcard.md を参照．
 pub module Top #(
     /// オシレータ周波数 [Hz]
     param OscFreq: u32 = 27_000_000,
@@ -39,6 +50,11 @@ pub module Top #(
     lcd_r    : output logic<5>, /// LCD R (RGB565)
     lcd_g    : output logic<6>, /// LCD G (RGB565)
     lcd_b    : output logic<5>, /// LCD B (RGB565)
+    // TF カードスロット (SPI モード，docs/tfcard.md)
+    tf_sclk: output logic, /// TF SCK
+    tf_mosi: output logic, /// TF MOSI (CMD)
+    tf_cs_n: output logic, /// TF CS# (DAT3)
+    tf_miso: input  logic, /// TF MISO (DAT0)
     // PSRAM (GW1NR-9 内蔵)．ポート名をマジックポート名に一致させることで
     // nextpnr が cst なしで内蔵パッドへ自動配置する (docs/psram.md)
     O_psram_ck     : output logic    <2> , /// PSRAM CK (ch1:ch0)
@@ -238,12 +254,110 @@ pub module Top #(
         OEN: 1'b1            ,
     );
 
-    // TX arbiter: memtest メッセージ優先．起動直後に 1 回送出するのみのため
-    // エコーとの競合は実用上起きない (競合時はエコー側が待たされる)
-    assign tx_stream.valid   = psram_msg.valid || echo_stream.valid;
-    assign tx_stream.data    = if psram_msg.valid ? psram_msg.data : echo_stream.data;
+    // TF カードテキスト表示デモ: 初期化報告行 + ルート最初の *.TXT の内容を
+    // 送出する (TfCtrl → Fat32Reader → TfTextDemo，docs/tfcard.md)
+    inst tf_blk_st: stream_if; // TfCtrl → Fat32Reader
+    inst tf_f_st  : stream_if; // Fat32Reader → TfTextDemo
+    inst tf_msg   : stream_if; // TfTextDemo → TX アービタ
+
+    var tf_blk_req_valid: logic             ;
+    var tf_blk_req_lba  : logic         <32>;
+    var tf_blk_req_ready: logic             ;
+    var tf_init_done    : logic             ;
+    var tf_init_err     : TfTypes::Error    ;
+    var tf_blk_done     : logic             ;
+    var tf_blk_err      : TfTypes::Error    ;
+
+    var tf_freq_valid : logic               ;
+    var tf_freq_name  : logic           <88>;
+    var tf_freq_offset: logic           <32>;
+    var tf_freq_len   : logic           <32>;
+    var tf_freq_ready : logic               ;
+    var tf_f_done     : logic               ;
+    var tf_f_err      : TfTypes::FsError    ;
+    var _tf_f_size    : logic           <32>; // デモでは未使用
+
+    inst tf_ctrl: TfCtrl (
+        i_clk                        ,
+        i_rst                        ,
+        i_req_valid: tf_blk_req_valid,
+        i_req_lba  : tf_blk_req_lba  ,
+        o_req_ready: tf_blk_req_ready,
+        o_init_done: tf_init_done    ,
+        o_init_err : tf_init_err     ,
+        o_done     : tf_blk_done     ,
+        o_err      : tf_blk_err      ,
+        data       : tf_blk_st       ,
+        o_sclk     : tf_sclk         ,
+        o_mosi     : tf_mosi         ,
+        o_cs_n     : tf_cs_n         ,
+        i_miso     : tf_miso         ,
+    );
+
+    inst tf_fat: Fat32Reader (
+        i_clk                         ,
+        i_rst                         ,
+        i_req_valid : tf_freq_valid   ,
+        i_req_name  : tf_freq_name    ,
+        i_req_offset: tf_freq_offset  ,
+        i_req_len   : tf_freq_len     ,
+        o_req_ready : tf_freq_ready   ,
+        o_done      : tf_f_done       ,
+        o_err       : tf_f_err        ,
+        o_file_size : _tf_f_size      ,
+        data        : tf_f_st         ,
+        o_blk_valid : tf_blk_req_valid,
+        o_blk_lba   : tf_blk_req_lba  ,
+        i_blk_ready : tf_blk_req_ready,
+        i_blk_done  : tf_blk_done     ,
+        i_blk_err   : tf_blk_err      ,
+        blk         : tf_blk_st       ,
+    );
+
+    // memtest の報告行と TF デモの出力が混ざらないよう，memtest の 1 行が
+    // 出終わってからデモを起動する (msg.valid は行の途中で落ちない)
+    var psram_msg_started: logic;
+    var psram_msg_done   : logic;
+
+    always_ff (i_clk, i_rst) {
+        if_reset {
+            psram_msg_started = 0;
+            psram_msg_done    = 0;
+        } else {
+            if psram_msg.valid && psram_msg.ready {
+                psram_msg_started = 1;
+            }
+            if psram_msg_started && !psram_msg.valid {
+                psram_msg_done = 1;
+            }
+        }
+    }
+
+    inst tf_demo: TfTextDemo (
+        i_clk                                       ,
+        i_rst                                       ,
+        i_init_done : tf_init_done && psram_msg_done,
+        i_init_err  : tf_init_err                   ,
+        o_req_valid : tf_freq_valid                 ,
+        o_req_name  : tf_freq_name                  ,
+        o_req_offset: tf_freq_offset                ,
+        o_req_len   : tf_freq_len                   ,
+        i_req_ready : tf_freq_ready                 ,
+        i_done      : tf_f_done                     ,
+        i_err       : tf_f_err                      ,
+        fdat        : tf_f_st                       ,
+        msg         : tf_msg                        ,
+    );
+
+    // TX arbiter: memtest > TF デモ > エコーの優先順位．いずれも
+    // リセット直後のみ送出するためエコーとの競合は実用上起きない
+    // (競合時は下位側が待たされる)．TF デモのファイル転送中の
+    // ブロック間ギャップではエコーが割り込みうるが，デモ用途では許容する
+    assign tx_stream.valid   = psram_msg.valid || tf_msg.valid || echo_stream.valid;
+    assign tx_stream.data    = if psram_msg.valid ? psram_msg.data : if tf_msg.valid ? tf_msg.data : echo_stream.data;
     assign psram_msg.ready   = tx_stream.ready;
-    assign echo_stream.ready = tx_stream.ready && !psram_msg.valid;
+    assign tf_msg.ready      = tx_stream.ready && !psram_msg.valid;
+    assign echo_stream.ready = tx_stream.ready && !psram_msg.valid && !tf_msg.valid;
 
     // LCD: UART TXへ流れるバイト列を傍受してテキスト表示 (白文字/黒背景)
     var vt_de    : logic    ;

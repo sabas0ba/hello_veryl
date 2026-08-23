@@ -16,3 +16,6 @@ docs/datasheets/
 
 # veryl doc output (published via CI)
 /doc/
+
+# Simulation waveforms (veryl test --wave)
+*.vcd

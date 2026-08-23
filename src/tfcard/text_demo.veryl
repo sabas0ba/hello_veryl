@@ -1,0 +1,167 @@
+/// TF カードテキスト表示デモ (docs/tfcard.md パッチ #6)
+///
+/// TfCtrl の初期化結果を 1 行で報告した後，ルートディレクトリの最初の
+/// `*.TXT` ファイル (8.3 名 `"????????TXT"`) を Fat32Reader で開き，
+/// 内容を stream として送出する．Top の TX アービタ経由で UART へ流れ，
+/// TextConsole の傍受により LCD にも表示される．
+///
+/// 報告行:
+///
+/// - `TF OK`     : 初期化成功 (続けてファイル内容)
+/// - `TF ERR <d>`: 初期化失敗 (d は TfTypes::Error の値: 2=timeout /
+///   4=unsupported / 5=resp)
+/// - `FS ERR <d>`: ファイル読み出し失敗 (d は TfTypes::FsError の値:
+///   1=no_fs / 2=not_found / 3=io)
+pub module TfTextDemo #(
+    /// 読み出しバイト数の上限 (巨大ファイルのダンプ抑止)
+    param MaxLen: u32 = 4096,
+) (
+    i_clk: input clock, /// クロック
+    i_rst: input reset, /// リセット
+
+    // TfCtrl の初期化状態
+    i_init_done: input logic         , /// 初期化完了
+    i_init_err : input TfTypes::Error, /// 初期化エラー
+
+    // Fat32Reader 要求 IF
+    o_req_valid : output logic               , /// ファイル読み出し要求
+    o_req_name  : output logic           <88>, /// 8.3 名
+    o_req_offset: output logic           <32>, /// 開始オフセット
+    o_req_len   : output logic           <32>, /// 読み出し長
+    i_req_ready : input  logic               , /// 要求受付可能
+    i_done      : input  logic               , /// 完了パルス
+    i_err       : input  TfTypes::FsError    , /// 完了時のエラー種別
+
+    fdat: modport stream_if::sink  , /// ファイル内容 (Fat32Reader から)
+    msg : modport stream_if::source, /// 表示ストリーム (TX アービタへ)
+) {
+    enum State: logic<3> {
+        wait_init,
+        send_line,
+        open_req,
+        streaming,
+        done,
+    }
+
+    function ErrDigit (
+        e: input TfTypes::Error,
+    ) -> logic<8> {
+        return case e {
+            TfTypes::Error::not_init   : 8'h31,
+            TfTypes::Error::timeout    : 8'h32,
+            TfTypes::Error::crc        : 8'h33,
+            TfTypes::Error::unsupported: 8'h34,
+            TfTypes::Error::resp       : 8'h35,
+            default                    : 8'h30,
+        };
+    }
+
+    function FsErrDigit (
+        e: input TfTypes::FsError,
+    ) -> logic<8> {
+        return case e {
+            TfTypes::FsError::no_fs    : 8'h31,
+            TfTypes::FsError::not_found: 8'h32,
+            TfTypes::FsError::io       : 8'h33,
+            default                    : 8'h30,
+        };
+    }
+
+    var state    : State   ;
+    var line_sel : logic<2>; // 0: "TF OK" / 1: "TF ERR d" / 2: "FS ERR d"
+    var err_digit: logic<8>;
+    var send_idx : logic<4>;
+    var line_len : logic<4>;
+    var after    : State   ; // 行送出後の遷移先
+
+    // 行 ROM: sel0 = "TF OK\r\n" (7)，sel1 = "TF ERR d\r\n" (10)，
+    // sel2 = "FS ERR d\r\n" (10)
+    function LineChar (
+        sel: input logic<2>,
+        idx: input logic<4>,
+        d  : input logic<8>,
+    ) -> logic<8> {
+        return case idx {
+            0      : if sel == 2'd2 ? 8'h46 : 8'h54, // 'F' / 'T'
+            1      : if sel == 2'd2 ? 8'h53 : 8'h46, // 'S' / 'F'
+            2      : 8'h20,
+            3      : if sel == 2'd0 ? 8'h4f : 8'h45, // 'O' / 'E'
+            4      : if sel == 2'd0 ? 8'h4b : 8'h52, // 'K' / 'R'
+            5      : if sel == 2'd0 ? 8'h0d : 8'h52, // CR / 'R'
+            6      : if sel == 2'd0 ? 8'h0a : 8'h20, // LF / ' '
+            7      : d,
+            8      : 8'h0d,
+            9      : 8'h0a,
+            default: 8'h00,
+        };
+    }
+
+    // 表示ストリーム: 行送出中は ROM，ファイル転送中は fdat のパススルー
+    assign msg.data   = if state == State::streaming ? fdat.data : LineChar(line_sel, send_idx, err_digit);
+    assign msg.valid  = if state == State::streaming ? fdat.valid : state == State::send_line;
+    assign fdat.ready = state == State::streaming && msg.ready;
+
+    always_ff (i_clk, i_rst) {
+        if_reset {
+            state        = State::wait_init;
+            line_sel     = 0;
+            err_digit    = 0;
+            send_idx     = 0;
+            line_len     = 0;
+            after        = State::done;
+            o_req_valid  = 0;
+            o_req_name   = 0;
+            o_req_offset = 0;
+            o_req_len    = 0;
+        } else {
+            if state == State::wait_init {
+                if i_init_done {
+                    line_sel = 0;
+                    line_len = 7;
+                    send_idx = 0;
+                    after    = State::open_req;
+                    state    = State::send_line;
+                } else if i_init_err != TfTypes::Error::none {
+                    line_sel  = 1;
+                    err_digit = ErrDigit(i_init_err);
+                    line_len  = 10;
+                    send_idx  = 0;
+                    after     = State::done;
+                    state     = State::send_line;
+                }
+            } else if state == State::send_line {
+                if msg.valid && msg.ready {
+                    if send_idx == line_len - 1 {
+                        state = after;
+                    } else {
+                        send_idx = send_idx + 1;
+                    }
+                }
+            } else if state == State::open_req {
+                // ルート直下の最初の *.TXT を開く
+                o_req_name   = {8'h3f, 8'h3f, 8'h3f, 8'h3f, 8'h3f, 8'h3f, 8'h3f, 8'h3f, 8'h54, 8'h58, 8'h54};
+                o_req_offset = 0;
+                o_req_len    = MaxLen;
+                o_req_valid  = 1;
+                if o_req_valid && i_req_ready {
+                    o_req_valid = 0;
+                    state       = State::streaming;
+                }
+            } else if state == State::streaming {
+                if i_done {
+                    if i_err == TfTypes::FsError::none {
+                        state = State::done;
+                    } else {
+                        line_sel  = 2;
+                        err_digit = FsErrDigit(i_err);
+                        line_len  = 10;
+                        send_idx  = 0;
+                        after     = State::done;
+                        state     = State::send_line;
+                    }
+                }
+            }
+            // State::done: リセットまで何もしない
+        }
+    }
+}

@@ -1,0 +1,51 @@
+/// TF カード用 CRC 計算 (docs/tfcard.md「プロトコル仕様」)
+///
+/// - CRC7 (x^7 + x^3 + 1): コマンドフレーム (cmd + arg の 5 バイト)
+/// - CRC16-CCITT (x^16 + x^12 + x^5 + 1，初期値 0): データブロック 512 バイト
+///
+/// いずれも MSB first のバイト単位更新．コントローラとビヘイビアモデルの
+/// 双方から参照する．同一実装の共有は解釈の共通モード誤りになりうるため，
+/// 実装と独立の既知検査値 (CMD0=95h 等) による固定を test_crc.veryl で行う．
+pub package TfCrc {
+    /// CRC7 の 1 ビット更新
+    function Crc7Bit (
+        c: input logic<7>,
+        b: input logic   ,
+    ) -> logic<7> {
+        return if (b ^ c[6]) ? {c[5:0], 1'b0} ^ 7'h09 : {c[5:0], 1'b0};
+    }
+
+    /// CRC7 の 1 バイト更新 (MSB first)
+    function Crc7Byte (
+        c: input logic<7>,
+        d: input logic<8>,
+    ) -> logic<7> {
+        var t: logic<7>;
+        t = c;
+        for i in 0..8 {
+            t = Crc7Bit(t, d[7 - i]);
+        }
+        return t;
+    }
+
+    /// CRC16-CCITT の 1 ビット更新
+    function Crc16Bit (
+        c: input logic<16>,
+        b: input logic    ,
+    ) -> logic<16> {
+        return if (b ^ c[15]) ? {c[14:0], 1'b0} ^ 16'h1021 : {c[14:0], 1'b0};
+    }
+
+    /// CRC16-CCITT の 1 バイト更新 (MSB first)
+    function Crc16Byte (
+        c: input logic<16>,
+        d: input logic<8> ,
+    ) -> logic<16> {
+        var t: logic<16>;
+        t = c;
+        for i in 0..8 {
+            t = Crc16Bit(t, d[7 - i]);
+        }
+        return t;
+    }
+}
