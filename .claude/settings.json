@@ -8,7 +8,11 @@
       "PowerShell(veryl test*)",
       "PowerShell(veryl build*)",
       "PowerShell(veryl check*)",
-      "PowerShell(veryl fmt*)"
+      "PowerShell(veryl fmt*)",
+      "PowerShell(.\\scripts\\veryl.ps1*)",
+      "PowerShell(.\\scripts\\verif.ps1*)",
+      "PowerShell(.\\scripts\\fpga-run.ps1*)",
+      "PowerShell(.\\scripts\\build-container.ps1*)"
     ]
   }
 }

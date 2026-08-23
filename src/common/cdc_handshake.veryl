@@ -1,0 +1,171 @@
+/// 非同期ハンドシェイク CDC (トグルハンドシェイク + 2FF 同期)
+///
+/// 単一データのクロックドメイン間転送．src 側で valid/ready 成立時に
+/// データをラッチしてトグルを反転，dst 側は同期したトグルの変化で
+/// データを取り込み od_valid を立てる．dst の消費で dst 状態が反転し，
+/// src へ同期して ready が回復する（単一アウトスタンディング）．
+///
+/// データレジスタは転送中不変（トグルハンドシェイクの保証）のため，
+/// 'd 側でのラッチは安全（unsafe (cdc) で明示）．
+///
+/// 注: std::async_handshake と同方式だが，同部品は内部で導出リセットを
+/// 用いるため veryl 0.20.2 のネイティブシミュレーションで初期化されず
+/// L1 検証不能だった（docs/psram.md「CDC」）．本実装はリセットを各
+/// ドメインの FF へ直結し，検証可能性を確保する．
+pub module CdcHandshake #(
+    /// 転送データ型
+    param TYPE: type = logic<8>,
+) (
+    is_clk  : input  's clock, /// src クロック
+    is_rst  : input  's reset, /// src リセット
+    is_valid: input  's logic, /// src データ有効
+    os_ready: output 's logic, /// src 受理可能
+    is_data : input  's TYPE , /// src データ
+    id_clk  : input  'd clock, /// dst クロック
+    id_rst  : input  'd reset, /// dst リセット
+    od_valid: output 'd logic, /// dst データ有効
+    id_ready: input  'd logic, /// dst 受理可能
+    od_data : output 'd TYPE , /// dst データ
+) {
+    var req_t_s: 's logic   ; // src 要求トグル
+    var ack_t_s: 's logic<2>; // dst 状態の 2FF 同期 (src 域)
+    var data_q : 's TYPE    ; // 転送データ (転送中不変)
+
+    var req_t_d: 'd logic<2>; // src トグルの 2FF 同期 (dst 域)
+    var st_d   : 'd logic   ; // dst 状態 (消費で反転)
+    var valid_q: 'd logic   ;
+    var data_d : 'd TYPE    ;
+
+    assign os_ready = req_t_s == ack_t_s[msb];
+    assign od_valid = valid_q;
+    assign od_data  = data_d;
+
+    // src: 受理でトグル反転
+    always_ff (is_clk, is_rst) {
+        if_reset {
+            req_t_s = 0;
+        } else if is_valid && os_ready {
+            req_t_s = ~req_t_s;
+        }
+    }
+
+    // データラッチはリセット不要 (プロトコルが write-before-read を保証)
+    always_ff (is_clk) {
+        if is_valid && os_ready {
+            data_q = is_data;
+        }
+    }
+
+    // 同期化 (2FF) と dst 側ラッチ
+    unsafe (cdc) {
+        always_ff (id_clk, id_rst) {
+            if_reset {
+                req_t_d = '0;
+            } else {
+                req_t_d = {req_t_d[lsb], req_t_s};
+            }
+        }
+        always_ff (id_clk) {
+            if !valid_q && req_t_d[msb] != st_d {
+                data_d = data_q;
+            }
+        }
+        always_ff (is_clk, is_rst) {
+            if_reset {
+                ack_t_s = '0;
+            } else {
+                ack_t_s = {ack_t_s[lsb], st_d};
+            }
+        }
+    }
+
+    // dst: 到着で valid，消費で状態反転
+    always_ff (id_clk, id_rst) {
+        if_reset {
+            st_d    = 0;
+            valid_q = 0;
+        } else if valid_q && id_ready {
+            valid_q = 0;
+            st_d    = ~st_d;
+        } else if !valid_q && req_t_d[msb] != st_d {
+            valid_q = 1;
+        }
+    }
+}
+
+#[test(test_cdc_handshake)]
+module test_cdc_handshake {
+    const MaxWait: u32 = 100;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    var s_valid: logic   ;
+    var s_ready: logic   ;
+    var s_data : logic<8>;
+    var d_valid: logic   ;
+    var d_data : logic<8>;
+
+    // テストでは両ドメインへ同一クロックを供給する
+    unsafe (cdc) {
+        inst dut: CdcHandshake (
+            is_clk  : clk    ,
+            is_rst  : rst    ,
+            is_valid: s_valid,
+            os_ready: s_ready,
+            is_data : s_data ,
+            id_clk  : clk    ,
+            id_rst  : rst    ,
+            od_valid: d_valid,
+            id_ready: 1'b1   ,
+            od_data : d_data ,
+        );
+    }
+
+    initial {
+        s_valid    = 0;
+        s_data     = 0;
+        rst.assert();
+        $assert   (s_ready == 1'b1, "src ready after reset");
+
+        // ---- 転送 1 語目 ----
+        s_data   = 8'ha5;
+        s_valid  = 1;
+        clk.next(1);
+        s_valid  = 0;
+        for _w in 0..MaxWait {
+            if d_valid == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        $assert (d_valid == 1'b1, "dst valid");
+        $assert (d_data == 8'ha5, "dst data");
+        clk.next(1);
+        $assert (d_valid == 1'b0, "dst consumed");
+
+        for _w in 0..MaxWait {
+            if s_ready == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        $assert(s_ready == 1'b1, "src ready recovered");
+
+        // ---- 転送 2 語目 (往復再利用) ----
+        s_data   = 8'h3c;
+        s_valid  = 1;
+        clk.next(1);
+        s_valid  = 0;
+        for _w in 0..MaxWait {
+            if d_valid == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        $assert (d_data == 8'h3c, "dst data 2nd");
+        clk.next(1);
+
+        $finish();
+    }
+}

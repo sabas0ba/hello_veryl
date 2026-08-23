@@ -17,12 +17,14 @@ PSRAM サブシステムの設計は [psram.md](psram.md)，検証方針は
 ```mermaid
 flowchart LR
     PC["PC (COMポート)"] -- uart_rx --> RX["Uart RX"]
-    RX -- "stream_if (echo)" --> TX["Uart TX"]
-    TX -- uart_tx --> PC
-    RX -. "傍受 (valid && ready)" .-> CON["TextConsole<br>100列x30行 / BSRAM"]
+    RX -- "echo" --> ARB["TX arbiter"]
+    MT["PsramMemtest"] -- "結果1行" --> ARB
+    ARB --> TX["Uart TX"] -- uart_tx --> PC
+    ARB -. "傍受 (valid && ready)" .-> CON["TextConsole<br>100列x30行 / BSRAM"]
     FONT["FontRom 8x16<br>(font/ から生成)"] --> CON
     VT["VideoTiming<br>800x480 DEモード"] --> CON
     CON -- "RGB565 (白文字/黒背景)" --> LCD["5inch LCD<br>050QG32-40"]
+    MT -- AXI4-Lite --> PS["PSRAM サブシステム<br>(bridge/ctrl/phy, psram.md)"] <--> RAM["内蔵 PSRAM ch0"]
     BL["Blink x3 + PLL lock"] --> LEDS["leds[3:0]"]
     ACT["ActivityLed x2<br>(UART TX/RX 傍受)"] --> LEDS2["leds[5:4]"]
 ```
@@ -43,8 +45,11 @@ LED 割当（すべて active-low）:
 | Top | src/top.veryl | 全体統合（UARTエコー + 傍受テキスト表示 + LED点滅） |
 | Blink | src/blink.veryl | 分周点滅（LED 割当表を参照） |
 | ActivityLed | src/common/activity_led.veryl | UART TX/RX ラインの Low を 100 ms 引き伸ばすインジケータ（leds[5:4]） |
-| PsramSpikeBitbang | src/psram/spike_bitbang.veryl | PSRAM ch0 レジスタ読み出し spike（[psram.md](psram.md)） |
+| CdcHandshake | src/common/cdc_handshake.veryl | トグルハンドシェイク + 2FF の汎用 CDC（単一データ転送） |
 | PsramClkGen | src/psram/clkgen.veryl | rPLL による clk_mem 54 MHz 生成（[psram.md](psram.md)） |
+| PsramPhy / PsramCtrl / PsramAxiBridge | src/psram/ | PSRAM サブシステム（[psram.md](psram.md)） |
+| PsramMemtest | src/psram/memtest.veryl | 起動時 PSRAM 検査と結果報告（[psram.md](psram.md)） |
+| PsramSpikeBitbang | src/psram/spike_bitbang.veryl | PSRAM spike 段1（未接続で残置，[psram.md](psram.md)） |
 | stream_if | src/common/stream.veryl | valid/ready ハンドシェイクの汎用 stream interface |
 | Uart | src/uart/uart.veryl | 115200bps 8N1．RX は 2FF 同期 + 中央サンプリング，ノンブロッキング供給 |
 | VideoTiming | src/video/timing.veryl | LCD タイミング生成（datasheet 導出の 27MHz 直結 59.1Hz，HTotal=890 x VTotal=513） |

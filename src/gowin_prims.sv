@@ -14,6 +14,37 @@ module IOBUF (
 );
 endmodule
 
+// ODDR: ports/parameters per UG289 Table 4-25 / 4-26
+// D0=立上り側データ, D1=立下り側データ, TX=トライステート制御 (Q1 へ),
+// Q0=DDR データ出力 (OBUF/IOBUF I へ), Q1=IOBUF/TBUF の OEN へ
+(* blackbox *)
+module ODDR #(
+    parameter TXCLK_POL = 1'b0,
+    parameter INIT      = 1'b0
+) (
+    input  D0 ,
+    input  D1 ,
+    input  TX ,
+    input  CLK,
+    output Q0 ,
+    output Q1
+);
+endmodule
+
+// IDDR: ports/parameters per UG289 Table 4-1 / 4-2
+// Q0=立上り取り込み, Q1=立下り取り込み (同一立上りエッジで同時に更新)
+(* blackbox *)
+module IDDR #(
+    parameter Q0_INIT = 1'b0,
+    parameter Q1_INIT = 1'b0
+) (
+    input  D  ,
+    input  CLK,
+    output Q0 ,
+    output Q1
+);
+endmodule
+
 // rPLL: ports/parameters per UG286 Table 5-2 / 5-3
 // fCLKOUT = fCLKIN * FBDIV / IDIV (divider = *_SEL + 1), fVCO = fCLKOUT * ODIV
 (* blackbox *)
