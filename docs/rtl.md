@@ -19,7 +19,10 @@ flowchart LR
     PC["PC (COMポート)"] -- uart_rx --> RX["Uart RX"]
     RX -- "echo" --> ARB["TX arbiter<br>(memtest &gt; TF &gt; echo)"]
     MT["PsramMemtest"] -- "結果1行" --> ARB
-    TFD["TfCtrl → Fat32Reader → TfTextDemo<br>(TFカード, tfcard.md)"] -- "報告行 + *.TXT 内容" --> ARB
+    TFD["TfCtrl → Fat32Reader → TfImageDemo<br>(TFカード, tfcard.md)"] -- "報告行" --> ARB
+    TFD -- "AXI4-Lite W" --> PS
+    SC["ImageScanout<br>8x8複製 + ラインバッファ"] -- "AXI4-Lite R" --> PS
+    SC -- "RGB565 (背景)" --> LCD
     ARB --> TX["Uart TX"] -- uart_tx --> PC
     ARB -. "傍受 (valid && ready)" .-> CON["TextConsole<br>100列x30行 / BSRAM"]
     FONT["FontRom 8x16<br>(font/ から生成)"] --> CON
@@ -43,7 +46,7 @@ LED 割当（すべて active-low）:
 
 | モジュール | ファイル | 概要 |
 | --- | --- | --- |
-| Top | src/top.veryl | 全体統合（UARTエコー + 傍受テキスト表示 + LED点滅） |
+| Top | src/top.veryl | 全体統合（UARTエコー + 傍受テキスト表示 + PSRAM/TF カード画像デモ + LED点滅） |
 | Blink | src/blink.veryl | 分周点滅（LED 割当表を参照） |
 | ActivityLed | src/common/activity_led.veryl | UART TX/RX ラインの Low を 100 ms 引き伸ばすインジケータ（leds[5:4]） |
 | CdcHandshake | src/common/cdc_handshake.veryl | トグルハンドシェイク + 2FF の汎用 CDC（単一データ転送） |
@@ -55,7 +58,11 @@ LED 割当（すべて active-low）:
 | TfSpikeInit | src/tfcard/spike_init.veryl | TF カード初期化 + セクタ 0 リード spike（ブリングアップ用，Top 非接続） |
 | TfCtrl | src/tfcard/tf_ctrl.veryl | TF カードブロックリードコントローラ v1（[tfcard.md](tfcard.md)） |
 | Fat32Reader | src/tfcard/fat32_reader.veryl | FAT32 リーダ v2（8.3 名照合・チェーン追跡，[tfcard.md](tfcard.md)） |
-| TfTextDemo | src/tfcard/text_demo.veryl | TF カード報告行 + ルート最初の *.TXT を UART/LCD 表示 |
+| TfTextDemo | src/tfcard/text_demo.veryl | TF カード報告行 + ルート最初の *.TXT を UART/LCD 表示（Top 非接続で残置） |
+| TfImageDemo | src/tfcard/image_demo.veryl | ルート直下の IMAGE.BMP を解析し PSRAM フレームバッファへ展開（[tfcard.md](tfcard.md)） |
+| ImageScanout | src/video/image_scanout.veryl | PSRAM フレームバッファを 8x8 複製で LCD へスキャンアウト（[tfcard.md](tfcard.md)） |
+| PsramAxiArb2 | src/psram/axi_arb2.veryl | AXI4-Lite 2 マスタ固定優先度アービタ（2 段で 3 マスタを合成） |
+| AxiLiteMemModel | src/psram/axi_mem_model.veryl | L1 用 AXI4-Lite メモリモデル（合成対象外） |
 | stream_if | src/common/stream.veryl | valid/ready ハンドシェイクの汎用 stream interface |
 | Uart | src/uart/uart.veryl | 115200bps 8N1．RX は 2FF 同期 + 中央サンプリング，ノンブロッキング供給 |
 | VideoTiming | src/video/timing.veryl | LCD タイミング生成（datasheet 導出の 27MHz 直結 59.1Hz，HTotal=890 x VTotal=513） |

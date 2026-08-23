@@ -176,6 +176,108 @@ spike の実測で CRC 不一致が観測された場合に再検討する．
   （キャッシュなし．シーケンシャルリード主体の用途では十分）
 - 書き込み系の構造（FSInfo 更新等）は一切触れない
 
+## 画像表示デモ仕様（パッチ #8）
+
+TF カード上の BMP を PSRAM のフレームバッファへ展開し，LCD へ表示する．
+TF カードサブシステムと PSRAM サブシステムを結合する最終デモにあたる．
+
+```mermaid
+flowchart LR
+    TF["TF カード"] --> TFC["TfCtrl"] --> FAT["Fat32Reader"] --> LD["TfImageDemo<br>BMP 解析 + RGB565 変換"]
+    LD -- "AXI4-Lite W" --> ARB["PsramAxiArb2 x2<br>(memtest &gt; loader &gt; scanout)"]
+    MT["PsramMemtest"] -- "AXI4-Lite R/W" --> ARB
+    SC["ImageScanout<br>ラインバッファ + 8x8 複製"] -- "AXI4-Lite R" --> ARB
+    ARB --> BR["PsramAxiBridge"] --> PS["PSRAM ch0"]
+    SC -- RGB565 --> CMP["合成<br>文字を前面"]
+    CON["TextConsole"] -- "前景 1bit" --> CMP --> LCD["5inch LCD"]
+```
+
+### 帯域の制約と解像度の決定
+
+PsramCtrl v1 は 16 bit 単発トランザクションで，1 トランザクションは
+CS# アサート（cyc0）→ CA 3 CK → 固定 2x レイテンシ（IL=3）→ データ cyc9 →
+ギャップ 2 CK の約 12 CK を要する．CK 13.5 MHz では 889 ns/語 =
+**実効 2.25 MB/s** となる．
+
+LCD の全画面スキャンアウトは 800x480x2 B x 59.1 Hz = **45.4 MB/s** を要し，
+実効帯域の約 20 倍にあたる．線形バーストを実装して 1 語 = 1 CK まで償却しても
+上限は 27 MB/s であり，全画面のライブ表示はこの設計では到達できない．
+
+したがって縮小画像を画素複製で拡大する方式とし，v1 では次を採る．
+
+| 項目 | 値 |
+| --- | --- |
+| ソース解像度 | 100x60（LCD と同じ 5:3） |
+| 複製 | 8x8 ブロック → 800x480 |
+| フレームバッファ | RGB565 12,000 byte（PSRAM 先頭，行優先・上から下） |
+| 必要帯域 | 100x60x2 B x 59.1 Hz = 709 kB/s（実効比 32%） |
+
+ソース 1 行は LCD の 8 ラインぶん（8 x 890 = 7,120 画素クロック = 264 µs）
+表示されるため，その間に次の 1 行 100 語を読めばよい（2.64 µs/語 の予算に対し
+889 ns/語）．余裕は約 3 倍あり，ラインバッファの二重化で吸収できる．
+
+映像系（VideoTiming）と AXI ブリッジのマスタ側はいずれも i_clk 27 MHz の
+ため，スキャンアウト経路に新規の CDC は不要である．
+
+### 画像フォーマット: 無圧縮 BMP（24 bpp）
+
+一般のツールで作成した画像をそのままカードへ置けることを優先し，
+無圧縮 BMP を採用する（当初 TBD だった項目の確定）．
+
+- 対象ファイルは**固定名 `IMAGE.BMP`** とする．拡張子だけのワイルドカード照合
+  （`????????BMP`）も可能だが，中身が BMP でない `.bmp` ファイルを拾いうるため
+  既定にはしない（実機で遭遇．「実機結果」参照）
+- `BITMAPFILEHEADER`(14) の `'BM'` と `bfOffBits`，`BITMAPINFOHEADER`(40) の
+  `biWidth` / `biHeight` / `biBitCount` / `biCompression` を検査する
+- 受理条件: `biBitCount=24`，`biCompression=0`（BI_RGB），`biWidth` は偶数
+  かつ上限以下，`|biHeight|` は上限以下．満たさない場合はエラー行を表示する
+- 行は 4 バイト境界パディング（行バイト数 = `(biWidth*3 + 3) & ~3`）
+- `biHeight > 0` はボトムアップ（最終行が画像の最上行）．書き込み先の行を
+  反転して PSRAM 上は常に上から下の順にする．`biHeight < 0` はトップダウン
+- 画素は B, G, R の順．`RGB565 = {R[7:3], G[7:2], B[7:3]}` へ変換する
+- 幅を偶数に限るのは，32 bit AXI の 1 ワード = 2 画素として WSTRB 部分書き込みを
+  避けるため（100x60 なら 1 行 = 50 ワード）
+
+### モジュール構成
+
+| モジュール | 役割 |
+| --- | --- |
+| `TfImageDemo` | Fat32Reader からルート直下の `IMAGE.BMP`（要求名は `ReqName` パラメータ）を読み，ヘッダ検査・RGB565 変換・PSRAM への AXI ライトと報告行の出力を行う |
+| `ImageScanout` | 映像座標に追従して PSRAM からソース 1 行を先読みし，ラインバッファ二重化で 8x8 複製出力する AXI リードマスタ |
+| `PsramAxiArb2` | AXI4-Lite の 2 マスタ固定優先度アービタ．2 段に積んで memtest > loader > scanout の 3 マスタを合成する．各マスタは単一アウトスタンディングで，グラントはトランザクション完了まで保持する |
+| `AxiLiteMemModel` | L1 用の AXI4-Lite メモリモデル（合成対象外）．ライト内容・回数の検証とスキャンアウトのリード応答に使う |
+
+`ImageScanout` はロード完了までリードを発行しない（未展開のフレームバッファを
+表示しないため）．3 マスタは実際には起動フェーズで排他になるが，
+アービタを置くことで順序の前提をモジュール境界に閉じ込める．
+
+### デモ画像の用意
+
+`scripts/gen_demo_bmp.py`（Python 標準ライブラリのみ）で受理条件を満たす
+BMP を生成し，TF カードのルートへ `*.BMP` の名前で置く．
+
+```
+python scripts/gen_demo_bmp.py                    # テストパターン (カラーバー + グラデーション + 赤枠)
+python scripts/gen_demo_bmp.py --from photo.png   # 既存画像を最近傍で縮小して変換
+```
+
+`--from` は無圧縮 24 bpp BMP と非インタレース PNG（ビット深度 8/16，
+カラータイプ 0/2/3/4/6）を受け付ける．形式は拡張子ではなくシグネチャで
+判別するため，`.bmp` という名前の PNG も正しく扱える．PNG のアルファは
+`--bg white|black` の背景色へ合成する．JPEG は非対応
+（標準ライブラリのみを使う方針のため）．
+
+### 表示の合成
+
+LCD 出力は `TextConsole` の前景 1 bit を最前面とし，背景に画像を置く．
+
+```
+lcd_rgb = if text_px ? 白 : image_rgb
+```
+
+`TextConsole` は de/hsync/vsync を 2 サイクル遅延して出すため，
+`ImageScanout` の画素出力も同じ段数に揃える．
+
 ## 検証
 
 レイヤ定義は [verification.md](verification.md) に従う．
@@ -199,6 +301,37 @@ hello_veryl!
 
 TX アービタは memtest > TF デモ > エコーの固定優先度で，行の混在を避けるため
 TF デモは memtest の報告行が出終わってから起動する（[src/top.veryl](../src/top.veryl)）．
+
+#### 画像デモ（パッチ #8）の実機経過
+
+Top を `TfImageDemo` + `ImageScanout` 構成へ切り替えた初回の実機では
+
+```
+PSRAM INIT=1 MEMTEST=PASS ERR=0000 K=00000 RD=00000000
+IMG ERR 1 8950
+```
+
+となった．診断値 `8950` はファイル先頭 2 バイトで，`89 50` は PNG の
+シグネチャである．すなわちカード上の `*.BMP` は拡張子だけ BMP の PNG であり，
+TF 初期化・FAT32 マウント・ディレクトリ照合・ファイル読み出し・ヘッダ検査までは
+正常に動作していた．この事例を受けて対象ファイルを固定名 `IMAGE.BMP` へ変更した
+（ワイルドカードでは同名拡張子の非 BMP を拾うため）．
+
+`scripts/gen_demo_bmp.py` で生成したテストパターンを `IMAGE.BMP` として置いた
+状態で
+
+```
+PSRAM INIT=1 MEMTEST=PASS ERR=0000 K=00000 RD=00000000
+IMG OK
+```
+
+となり，**LCD 上にテストパターンの表示を確認した**（2026-08-23）．
+これで TF カード → FAT32 → PSRAM フレームバッファ → LCD の経路が
+実機で通ったことになる．
+
+なお 1 度だけ `TF ERR 5`（予期しない応答）で初期化に失敗した．カードの
+抜き差し直後に発生し，再コンフィグで復帰したため，カード側の状態依存と
+みられる（残課題「カード相性」に含める）．
 
 ### L4 でしか反証できない項目（spike の存在理由）
 
@@ -279,7 +412,7 @@ spike 実機結果: **未実施**（実機確認は利用者に委ねる．結�
 | 5 | `feat: add fat32 reader` | Fat32Reader + イメージ生成スクリプト + テスト | なし | 済 |
 | 6 | `feat: add tfcard text display demo` | ルートのテキストファイルを LCD 表示 | なし | 済 |
 | 7 | `test: add formal properties for tfcard controller` | formal ハーネス（ホワイトリスト等） | なし | 未（sby 実行環境で実施） |
-| 8 | `feat: add tfcard image display demo` | 画像ファイルを PSRAM フレームバッファへ展開し LCD 表示 | **あり** | 保留（PSRAM 復旧待ち） |
+| 8 | `feat: add tfcard image display demo` | 画像ファイルを PSRAM フレームバッファへ展開し LCD 表示（100x60 を 8x8 複製，「画像表示デモ仕様」節） | **あり** | 済（L1 5 件追加，実機で LCD 表示を確認） |
 
 ## 残課題・リスク
 
@@ -290,4 +423,4 @@ spike 実機結果: **未実施**（実機確認は利用者に委ねる．結�
 | 一次資料の SHA-256 | Simplified Spec 9.00（クリックスルー経由）・fatgen103 1.03（直接 URL）とも版数・入手経路は確定，実体未取得 | 取得後に SHA-256 と参照節番号を記入し，実装採用値を照合 |
 | カード相性 | 仕様逸脱気味の安価カードの存在が知られる | spike を複数カードで実施し結果を記録．非対応カードはエラー報告で明示 |
 | formal（パッチ #7） | 本実装環境に sby / OSS CAD Suite がなく未実施 | コンテナ環境（[environment.md](environment.md)）で formal ハーネスを追加する |
-| 画像デモのフォーマット | 無圧縮 BMP か raw RGB565 か | パッチ #8 設計時に決定（PSRAM 側 IF 確定後） |
+| 画像デモのフォーマット | 無圧縮 BMP か raw RGB565 か | **解決（2026-08-23）**: 無圧縮 BMP 24 bpp を採用（「画像表示デモ仕様」節） |
