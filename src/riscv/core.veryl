@@ -1,0 +1,215 @@
+/// RV32I 多サイクルコア (docs/riscv.md「マイクロアーキテクチャ」)
+///
+/// 1 命令を fetch → exec（→ mem）で処理する非パイプライン実装．
+/// メモリが律速（PSRAM 実効 2.25 MB/s = 約 0.56 MIPS）でパイプライン化の
+/// 利得が小さく，面積が最小で，1 命令 = 1 トランザクション境界という性質が
+/// L1 検証を単純にする．
+///
+/// ```mermaid
+/// stateDiagram-v2
+///     [*] --> fetch
+///     fetch --> exec: 命令語受領
+///     exec --> memacc: load / store
+///     exec --> fetch: それ以外（分岐・ジャンプ含む）
+///     exec --> halt: 未定義命令
+///     memacc --> fetch: 完了
+/// ```
+///
+/// 分岐条件の比較はコア内の専用比較器で行う（ALU は分岐先アドレスの
+/// 計算に使うため）．JALR の分岐先は仕様どおり最下位ビットを 0 にする．
+///
+/// 未定義命令は `halt` へ落ちて `o_illegal` を上げたまま停止する
+/// （トラップは Zicsr と併せて段階 9）．
+pub module RvCore #(
+    /// リセット後の開始アドレス
+    param ResetPc: u32 = 0,
+) (
+    i_clk: input clock, /// クロック
+    i_rst: input reset, /// リセット
+
+    // メモリ IF（RvMem のプロトコル）
+    o_mem_valid: output logic    , /// アクセス要求
+    o_mem_addr : output logic<32>, /// バイトアドレス
+    o_mem_write: output logic    , /// 1 でストア
+    o_mem_wdata: output logic<32>, /// ストアデータ（整列済み）
+    o_mem_wstrb: output logic<4> , /// バイトイネーブル
+    i_mem_done : input  logic    , /// 完了
+    i_mem_rdata: input  logic<32>, /// リードデータ
+
+    o_pc     : output logic<32>, /// 現在の PC（観測用）
+    o_illegal: output logic    , /// 未定義命令で停止した
+) {
+    enum State: logic<2> {
+        fetch,
+        exec,
+        memacc,
+        halt,
+    }
+
+    var state: State    ;
+    var pc   : logic<32>;
+    var iw   : logic<32>; // 実行中の命令語
+
+    // ---- デコード（組合せ）----
+    var dec: RvPkg::Decoded;
+
+    inst decoder: RvDecoder (
+        i_inst: iw ,
+        o_dec : dec,
+    );
+
+    // ---- レジスタファイル ----
+    var rf_we   : logic    ;
+    var rf_wdata: logic<32>;
+    var rd1     : logic<32>;
+    var rd2     : logic<32>;
+
+    inst regfile: RvRegFile (
+        i_clk            ,
+        i_rst            ,
+        i_rs1  : dec.rs1 ,
+        o_rd1  : rd1     ,
+        i_rs2  : dec.rs2 ,
+        o_rd2  : rd2     ,
+        i_we   : rf_we   ,
+        i_rd   : dec.rd  ,
+        i_wdata: rf_wdata,
+    );
+
+    // ---- ALU ----
+    let alu_a: logic<32> = if dec.src_a == RvPkg::SrcA::pc ? pc : rd1;
+    let alu_b: logic<32> = if dec.src_b == RvPkg::SrcB::imm ? dec.imm : rd2;
+    var alu_y: logic<32>;
+
+    inst alu: RvAlu (
+        i_op: dec.alu_op,
+        i_a : alu_a     ,
+        i_b : alu_b     ,
+        o_y : alu_y     ,
+    );
+
+    // ---- 分岐条件 ----
+    let eq : logic = rd1 == rd2;
+    let ltu: logic = rd1 <: rd2;
+    let lts: logic = if rd1[31] != rd2[31] ? rd1[31] : ltu;
+
+    let take_branch: logic = case dec.branch_op {
+        RvPkg::BranchOp::beq : eq,
+        RvPkg::BranchOp::bne : !eq,
+        RvPkg::BranchOp::blt : lts,
+        RvPkg::BranchOp::bge : !lts,
+        RvPkg::BranchOp::bltu: ltu,
+        RvPkg::BranchOp::bgeu: !ltu,
+        default              : 1'b0,
+    };
+
+    let pc4: logic<32> = pc + 4;
+
+    // JALR は分岐先の最下位ビットを 0 にする（RV32I 仕様）
+    let jump_target  : logic<32> = if dec.jalr ? {alu_y[31:1], 1'b0} : alu_y;
+    let branch_target: logic<32> = alu_y;
+
+    let next_pc: logic<32> = if dec.jump ? jump_target : if dec.branch && take_branch ? branch_target : pc4;
+
+    // ---- ロード / ストアのバイト整列 ----
+    let byte_sel: logic<2> = alu_y[1:0];
+
+    // ストア: rd2 を対象バイトレーンへ複製し，wstrb で選ぶ
+    let store_wdata: logic<32> = case dec.mem_op {
+        RvPkg::MemOp::b: {rd2[7:0] repeat 4},
+        RvPkg::MemOp::h: {rd2[15:0] repeat 2},
+        default        : rd2,
+    };
+
+    let store_wstrb: logic<4> = case dec.mem_op {
+        RvPkg::MemOp::b: 4'b0001 << byte_sel,
+        RvPkg::MemOp::h: if byte_sel[1] ? 4'b1100 : 4'b0011,
+        default        : 4'b1111,
+    };
+
+    // ロード: メモリ語から対象バイト / 半語を切り出して拡張する
+    var ld_addr_sel: logic       <2>; // memacc 中に保持したアドレス下位
+    var ld_op      : RvPkg::MemOp   ;
+
+    let ld_byte: logic<8>  = i_mem_rdata[8 * ld_addr_sel+:8];
+    let ld_half: logic<16> = if ld_addr_sel[1] ? i_mem_rdata[31:16] : i_mem_rdata[15:0];
+
+    let load_data: logic<32> = case ld_op {
+        RvPkg::MemOp::b : {ld_byte[7] repeat 24, ld_byte},
+        RvPkg::MemOp::h : {ld_half[15] repeat 16, ld_half},
+        RvPkg::MemOp::bu: {1'b0 repeat 24, ld_byte},
+        RvPkg::MemOp::hu: {1'b0 repeat 16, ld_half},
+        default         : i_mem_rdata,
+    };
+
+    // 書き戻し値（ALU / メモリ / リンクアドレス）
+    let wb_value: logic<32> = case dec.wb_sel {
+        RvPkg::WbSel::mem: load_data,
+        RvPkg::WbSel::pc4: pc4,
+        default          : alu_y,
+    };
+
+    assign o_pc = pc;
+
+    always_ff (i_clk, i_rst) {
+        if_reset {
+            state       = State::fetch;
+            pc          = ResetPc;
+            iw          = 0;
+            rf_we       = 0;
+            rf_wdata    = 0;
+            ld_addr_sel = 0;
+            ld_op       = RvPkg::MemOp::w;
+            o_mem_valid = 0;
+            o_mem_addr  = 0;
+            o_mem_write = 0;
+            o_mem_wdata = 0;
+            o_mem_wstrb = 0;
+            o_illegal   = 0;
+        } else {
+            rf_we = 0;
+
+            if state == State::fetch {
+                o_mem_valid = 1;
+                o_mem_addr  = pc;
+                o_mem_write = 0;
+                o_mem_wstrb = 0;
+                if i_mem_done {
+                    o_mem_valid = 0;
+                    iw          = i_mem_rdata;
+                    state       = State::exec;
+                }
+            } else if state == State::exec {
+                if dec.illegal {
+                    o_illegal = 1;
+                    state     = State::halt;
+                } else if dec.mem_read || dec.mem_write {
+                    o_mem_valid = 1;
+                    o_mem_addr  = alu_y;
+                    o_mem_write = dec.mem_write;
+                    o_mem_wdata = store_wdata;
+                    o_mem_wstrb = if dec.mem_write ? store_wstrb : 4'b0000;
+                    ld_addr_sel = byte_sel;
+                    ld_op       = dec.mem_op;
+                    state       = State::memacc;
+                } else {
+                    rf_we    = dec.reg_write;
+                    rf_wdata = wb_value;
+                    pc       = next_pc;
+                    state    = State::fetch;
+                }
+            } else if state == State::memacc {
+                if i_mem_done {
+                    o_mem_valid = 0;
+                    o_mem_write = 0;
+                    o_mem_wstrb = 0;
+                    rf_we       = dec.reg_write; // ロードのみ 1（ストアは 0）
+                    rf_wdata    = wb_value;
+                    pc          = pc4;
+                    state       = State::fetch;
+                }
+            }
+            // State::halt: 停止したまま
+        }
+    }
+}

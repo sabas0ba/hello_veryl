@@ -1,0 +1,264 @@
+// RvCore の L1 テスト (docs/riscv.md「検証」)
+//
+// riscv64-unknown-elf-gcc でアセンブルした実プログラムを RvMem へプリロードし，
+// コアが実行するストアトランザクションの列を照合する．
+// ストア値は直前のロード・演算・分岐の結果であるため，
+// 命令実行の正しさがストア列に集約して現れる．
+//
+// プログラム (build/riscv_probe/core_prog.S 相当，逆アセンブル結果):
+//   00: li ra,10 / li sp,-3 / add gp,ra,sp / sw gp,256
+//   10: sub tp,ra,sp / sw tp,260
+//   18: lui t0,0x12345 / addi t0,t0,1656 / sw t0,264
+//   24: lw t1,264 / sw t1,268
+//   2c: sb t0,272 / lbu t2,272 / sw t2,276
+//   38: sh t0,280 / lhu s0,280 / sw s0,284
+//   44: li s1,-1 / sb s1,288 / lb a0,288 / sw a0,292
+//   54: beq ra,ra,5c / (li a1,99 は飛ばされる)
+//   5c: addi a1,a1,5 / sw a1,296
+//   64: bne ra,ra,70 (不成立) / li a2,7 / sw a2,300
+//   70: blt sp,ra,7c (成立) / li a3,1 / sw a3,304
+//   84: bltu sp,ra,90 (不成立) / li a4,2 / sw a4,308
+//   98: jal a5,a8 / sw a6,312 / sw a5,316 / j end
+//   a8: li a6,291 / jr a5
+
+#[test(test_rv_core)]
+module test_rv_core {
+    const MaxCycles: u32 = 4000;
+    const ProgWords: u32 = 44;
+    const NumStores: u32 = 16;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    var mem_valid: logic    ;
+    var mem_addr : logic<32>;
+    var mem_write: logic    ;
+    var mem_wdata: logic<32>;
+    var mem_wstrb: logic<4> ;
+    var mem_done : logic    ;
+    var mem_rdata: logic<32>;
+
+    var dbg_we   : logic    ;
+    var dbg_word : logic<32>;
+    var dbg_wdata: logic<32>;
+
+    var pc     : logic<32>;
+    var illegal: logic    ;
+
+    inst core: RvCore (
+        i_clk      : clk      ,
+        i_rst      : rst      ,
+        o_mem_valid: mem_valid,
+        o_mem_addr : mem_addr ,
+        o_mem_write: mem_write,
+        o_mem_wdata: mem_wdata,
+        o_mem_wstrb: mem_wstrb,
+        i_mem_done : mem_done ,
+        i_mem_rdata: mem_rdata,
+        o_pc       : pc       ,
+        o_illegal  : illegal  ,
+    );
+
+    inst mem: RvMem #(
+        Words: 256,
+    ) (
+        i_clk      : clk      ,
+        i_rst      : rst      ,
+        i_valid    : mem_valid,
+        i_addr     : mem_addr ,
+        i_write    : mem_write,
+        i_wdata    : mem_wdata,
+        i_wstrb    : mem_wstrb,
+        o_done     : mem_done ,
+        o_rdata    : mem_rdata,
+        i_dbg_we   : dbg_we   ,
+        i_dbg_word : dbg_word ,
+        i_dbg_wdata: dbg_wdata,
+    );
+
+    var prog: logic<32> [ProgWords];
+
+    var st_addr: logic<32> [NumStores];
+    var st_data: logic<32> [NumStores];
+    var st_strb: logic<4>  [NumStores];
+    var n      : logic<5>             ;
+
+    initial {
+        prog[0]  = 32'h00a00093;
+        prog[1]  = 32'hffd00113;
+        prog[2]  = 32'h002081b3;
+        prog[3]  = 32'h10302023;
+        prog[4]  = 32'h40208233;
+        prog[5]  = 32'h10402223;
+        prog[6]  = 32'h123452b7;
+        prog[7]  = 32'h67828293;
+        prog[8]  = 32'h10502423;
+        prog[9]  = 32'h10802303;
+        prog[10] = 32'h10602623;
+        prog[11] = 32'h10500823;
+        prog[12] = 32'h11004383;
+        prog[13] = 32'h10702a23;
+        prog[14] = 32'h10501c23;
+        prog[15] = 32'h11805403;
+        prog[16] = 32'h10802e23;
+        prog[17] = 32'hfff00493;
+        prog[18] = 32'h12900023;
+        prog[19] = 32'h12000503;
+        prog[20] = 32'h12a02223;
+        prog[21] = 32'h00108463;
+        prog[22] = 32'h06300593;
+        prog[23] = 32'h00558593;
+        prog[24] = 32'h12b02423;
+        prog[25] = 32'h00109663;
+        prog[26] = 32'h00700613;
+        prog[27] = 32'h12c02623;
+        prog[28] = 32'h00114663;
+        prog[29] = 32'h00000693;
+        prog[30] = 32'h0080006f;
+        prog[31] = 32'h00100693;
+        prog[32] = 32'h12d02823;
+        prog[33] = 32'h00116663;
+        prog[34] = 32'h00200713;
+        prog[35] = 32'h0080006f;
+        prog[36] = 32'h00000713;
+        prog[37] = 32'h12e02a23;
+        prog[38] = 32'h010007ef;
+        prog[39] = 32'h13002c23;
+        prog[40] = 32'h12f02e23;
+        prog[41] = 32'h0000006f;
+        prog[42] = 32'h12300813;
+        prog[43] = 32'h00078067;
+
+        n          = 0;
+        dbg_we     = 0;
+        dbg_word   = 0;
+        dbg_wdata  = 0;
+        rst.assert();
+
+        // プログラムをプリロードする (この間コアの要求は受理されない)
+        dbg_we = 1;
+        for i in 0..ProgWords {
+            dbg_word  = i;
+            dbg_wdata = prog[i];
+            clk.next (1);
+        }
+        dbg_we = 0;
+
+        // 実行し，ストアトランザクションを記録する
+        for _c in 0..MaxCycles {
+            if mem_done == 1'b1 && mem_write == 1'b1 && n <: NumStores {
+                st_addr[n] = mem_addr;
+                st_data[n] = mem_wdata;
+                st_strb[n] = mem_wstrb;
+                n          = n + 1;
+            }
+            clk.next(1);
+        }
+
+        $assert_continue(illegal == 1'b0, "未定義命令に落ちていない");
+        $assert_continue(n == NumStores, "ストア回数");
+
+        // 演算
+        $assert_continue(st_addr[0] == 32'h100 && st_data[0] == 32'd7, "add: 10 + (-3)");
+        $assert_continue(st_addr[1] == 32'h104 && st_data[1] == 32'd13, "sub: 10 - (-3)");
+        $assert_continue(st_addr[2] == 32'h108 && st_data[2] == 32'h12345678, "lui + addi");
+        // ロード / ストアの幅と符号
+        $assert_continue(st_addr[3] == 32'h10c && st_data[3] == 32'h12345678, "lw");
+        $assert_continue(st_addr[4] == 32'h110 && st_strb[4] == 4'b0001, "sb の wstrb");
+        $assert_continue(st_data[4][7:0] == 8'h78, "sb のバイトレーン");
+        $assert_continue(st_addr[5] == 32'h114 && st_data[5] == 32'h00000078, "lbu");
+        $assert_continue(st_addr[6] == 32'h118 && st_strb[6] == 4'b0011, "sh の wstrb");
+        $assert_continue(st_data[6][15:0] == 16'h5678, "sh のハーフレーン");
+        $assert_continue(st_addr[7] == 32'h11c && st_data[7] == 32'h00005678, "lhu");
+        $assert_continue(st_addr[8] == 32'h120 && st_strb[8] == 4'b0001, "sb (-1) の wstrb");
+        $assert_continue(st_addr[9] == 32'h124 && st_data[9] == 32'hffffffff, "lb の符号拡張");
+        // 分岐
+        $assert_continue(st_addr[10] == 32'h128 && st_data[10] == 32'd5, "beq 成立で 99 を飛ばす");
+        $assert_continue(st_addr[11] == 32'h12c && st_data[11] == 32'd7, "bne 不成立で落ちる");
+        $assert_continue(st_addr[12] == 32'h130 && st_data[12] == 32'd1, "blt は符号付き比較");
+        $assert_continue(st_addr[13] == 32'h134 && st_data[13] == 32'd2, "bltu は符号なし比較");
+        // ジャンプ
+        $assert_continue(st_addr[14] == 32'h138 && st_data[14] == 32'd291, "jal 先で設定した値");
+        $assert_continue(st_addr[15] == 32'h13c && st_data[15] == 32'h9c, "jal の戻りアドレス");
+
+        $finish();
+    }
+}
+
+// 未定義命令で halt へ落ち o_illegal が立つ
+#[test(test_rv_core_illegal)]
+module test_rv_core_illegal {
+    const MaxCycles: u32 = 200;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    var mem_valid: logic    ;
+    var mem_addr : logic<32>;
+    var mem_write: logic    ;
+    var mem_wdata: logic<32>;
+    var mem_wstrb: logic<4> ;
+    var mem_done : logic    ;
+    var mem_rdata: logic<32>;
+
+    var dbg_we   : logic    ;
+    var dbg_word : logic<32>;
+    var dbg_wdata: logic<32>;
+
+    var _pc    : logic<32>;
+    var illegal: logic    ;
+
+    inst core: RvCore (
+        i_clk      : clk      ,
+        i_rst      : rst      ,
+        o_mem_valid: mem_valid,
+        o_mem_addr : mem_addr ,
+        o_mem_write: mem_write,
+        o_mem_wdata: mem_wdata,
+        o_mem_wstrb: mem_wstrb,
+        i_mem_done : mem_done ,
+        i_mem_rdata: mem_rdata,
+        o_pc       : _pc      ,
+        o_illegal  : illegal  ,
+    );
+
+    inst mem: RvMem #(
+        Words: 16,
+    ) (
+        i_clk      : clk      ,
+        i_rst      : rst      ,
+        i_valid    : mem_valid,
+        i_addr     : mem_addr ,
+        i_write    : mem_write,
+        i_wdata    : mem_wdata,
+        i_wstrb    : mem_wstrb,
+        o_done     : mem_done ,
+        o_rdata    : mem_rdata,
+        i_dbg_we   : dbg_we   ,
+        i_dbg_word : dbg_word ,
+        i_dbg_wdata: dbg_wdata,
+    );
+
+    initial {
+        dbg_we     = 0;
+        dbg_word   = 0;
+        dbg_wdata  = 0;
+        rst.assert();
+
+        dbg_we    = 1;
+        dbg_word  = 0;
+        dbg_wdata = 32'h00a00093; // li ra,10
+        clk.next (1);
+        dbg_word  = 1;
+        dbg_wdata = 32'h00000073; // ecall (段階 9 まで未対応)
+        clk.next (1);
+        dbg_we    = 0;
+
+        for _c in 0..MaxCycles {
+            clk.next(1);
+        }
+        $assert_continue(illegal == 1'b1, "ecall で halt する");
+        $assert_continue(mem_valid == 1'b0, "halt 後はメモリ要求を出さない");
+        $finish         ();
+    }
+}
