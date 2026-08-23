@@ -255,10 +255,15 @@ CSR を一切使わず，終了は `MMIO_TOHOST`（`0x2000_0000`）へのスト�
 
 ```
 Hello from the RV32I core on Tang Nano 9K!
+PSRAM OK
 ```
 
-自作 RV32I コアがブート ROM から起動し，MMIO の UART ステータスをポーリングしながら
-1 バイトずつ送出できている．続く LED 点滅ループも同じプログラムに含まれる．
+1 行目は自作 RV32I コアがブート ROM から起動し，MMIO の UART ステータスを
+ポーリングしながら 1 バイトずつ送出できていることを示す．
+2 行目は **コアが PSRAM へ 64 語のパターンを書き，読み返して全て一致した**
+ことを示す（`software/hello.S`）．経路は
+コア → `RvAxiMaster` → AXI4-Lite → `PsramAxiBridge`（CDC 27↔54 MHz）→
+`PsramCtrl` → `PsramPhySdr` → HyperBus．続く LED 点滅ループも同じプログラムに含まれる．
 
 #### 複数ボード接続時の誤書き込み防止
 
@@ -277,15 +282,17 @@ GW1N(R)-9C 以外なら中断するようにした．UART も `-Port` で明示�
 
 | 項目 | 値 |
 | --- | --- |
-| LUT4 | 2729 / 8640（31%） |
-| DFF | 510 / 6480（7%） |
+| LUT4 | 3852 / 8640（44%，PSRAM サブシステム込み） |
+| DFF | 1177 / 6480（18%） |
 | BSRAM | 4 / 26（`RvMem` のバイトレーン 4 面） |
-| 最大周波数 | 49.91 MHz（27 MHz 制約に対して PASS） |
+| 最大周波数 | clk_mem 121.27 MHz（54 MHz 制約）/ i_clk 53.57 MHz（27 MHz 制約） |
 
-レジスタファイルのメモリマクロ化による（「レジスタファイルの実装」節）．
-既存 Top が 77% のため単純合算では 108% となり依然として同居できないが，
-差は縮まった．次の削減は Fat32Reader・TfImageDemo・PsramMemtest の
-ソフトウェア移行（段階 7）．
+PSRAM サブシステムを含まない段階 6 時点では LUT4 2729（31%）だった
+（レジスタファイルのメモリマクロ化による．「レジスタファイルの実装」節）。
+
+`TopRv` も `clk_mem` を持つため，`Top` と同じく `--sdc` でクロック別制約を与える
+（`constraints/tangnano9k_rv.sdc`）．ネット名は `PsramSubsystem` の
+インスタンス名を含む `psram.clk_mem` になる．
 
 ## LCD デモ
 
@@ -309,7 +316,7 @@ GW1N(R)-9C 以外なら中断するようにした．UART も `-Port` で明示�
 | 4 | 多サイクルコア（RV32I）+ BSRAM 接続 | L1 | 済（L1 2 件） |
 | 5 | riscv-tests 実行環境（rv32ui） | L2 | 済（40 件全 pass） |
 | 6 | MMIO（UART / LED）と実機での文字列出力 | L4 | 済（実機で出力を確認） |
-| 7 | AXI4-Lite マスタ化して PSRAM を接続 | L1 / L4 | 未 |
+| 7 | AXI4-Lite マスタ化して PSRAM を接続 | L1 / L4 | 済（実機で PSRAM OK） |
 | 8 | M 拡張（乗除算） | L1 / L2 | 未 |
 | 9 | Zicsr・割り込み・タイマ（CLINT） | L1 / L2 | 未 |
 | 10 | TF カードからのプログラムロード（第一段ローダ） | L4 | 未 |
@@ -319,7 +326,8 @@ GW1N(R)-9C 以外なら中断するようにした．UART も `-Port` で明示�
 
 | 項目 | 内容 | 対応 |
 | --- | --- | --- |
-| LUT 予算 | 既存 Top が 77%，TopRv 単独で 31%（レジスタファイル改訂後）．単純合算では同居できない | Fat32Reader・TfImageDemo・PsramMemtest をソフトウェアへ移して削減する（段階 7） |
+| LUT 予算 | 既存 Top が 77%，TopRv が 44%（PSRAM 込み）．単純合算では同居できない | Fat32Reader・TfImageDemo・PsramMemtest をソフトウェアへ移して削減する |
+| PSRAM サブシステムの重複 | `PsramSubsystem` へ切り出したが，既存 `Top` はまだインライン実装のまま | `Top` 側も `PsramSubsystem` へ寄せる（挙動不変のリファクタ．実機再確認が要る） |
 | PSRAM 帯域 | 2.25 MB/s．PSRAM 上のコード実行は 0.5 MIPS 相当 | ホットパスは BSRAM 常駐とする．線形バースト実装と BSRAM 命令キャッシュは段階 7 以降で評価 |
 | Zifencei（`fence.i`） | 対象外のため rv32ui の `fence_i` を除外している | 自己書き換えコードを扱う段階になったら再検討 |
 | 非整列アクセス | 未対応（`ma_data` を除外）．現状は含まれるワードを読み書きしてしまい，仕様が許す 2 つの挙動（ハードウェア対応 / 例外送出）のどちらでもない | 段階 9（Zicsr・トラップ）でアドレス非整列例外を送出する形に揃える．ハードウェア対応は面積と引き換えになるため採らない |

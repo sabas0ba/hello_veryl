@@ -9,6 +9,7 @@
 /// flowchart LR
 ///     ROM["RvBootRom<br>(software/hello.S)"] --> SOC
 ///     SOC["RvSoc<br>RvCore + ROM + RAM + MMIO"] -- "stream_if" --> TX["Uart TX"] -- uart_tx --> PC["PC (COMポート)"]
+///     SOC -- "AXI4-Lite" --> PS["PsramSubsystem<br>rPLL + SDR phy + ctrl + bridge"] <--> RAM["内蔵 PSRAM ch0"]
 ///     SOC --> LEDS["leds (active-low)"]
 /// ```
 pub module TopRv #(
@@ -22,7 +23,19 @@ pub module TopRv #(
     leds   : output logic<NumLeds>, /// LED (active-low)
     uart_tx: output logic         , /// UART TX
     uart_rx: input  logic         , /// UART RX (未使用．読み捨てる)
+    // PSRAM (GW1NR-9 内蔵)．ポート名をマジックポート名に一致させることで
+    // nextpnr が cst なしで内蔵パッドへ自動配置する (docs/psram.md)
+    O_psram_ck     : output logic    <2> , /// PSRAM CK (ch1:ch0)
+    O_psram_ck_n   : output logic    <2> , /// PSRAM CK# (差動)
+    O_psram_cs_n   : output logic    <2> , /// PSRAM CS#
+    O_psram_reset_n: output logic    <2> , /// PSRAM RESET#
+    IO_psram_dq    : inout  tri logic<16>, /// PSRAM DQ (ch0=下位8bit)
+    IO_psram_rwds  : inout  tri logic<2> , /// PSRAM RWDS (ch0=bit0)
 ) {
+    inst ps_axi: $std::axi4_lite_if::<$std::axi4_lite_pkg::<22, 4, 1>>;
+
+    assign ps_axi.awid = 0;
+    assign ps_axi.arid = 0;
     inst tx_stream: stream_if;
     inst rx_stream: stream_if;
 
@@ -53,11 +66,31 @@ pub module TopRv #(
         i_clk                        ,
         i_rst                        ,
         tx            : tx_stream    ,
+        m_psram       : ps_axi       ,
         o_leds        : soc_leds     ,
         o_tohost_valid: _tohost_valid,
         o_tohost      : _tohost      ,
         o_pc          : _pc          ,
         o_illegal     : illegal      ,
+    );
+
+    var _ps_init_done: logic;
+    var _ps_init_ok  : logic;
+    var _ps_pll_lock : logic;
+
+    inst psram: PsramSubsystem (
+        i_clk                         ,
+        i_rst                         ,
+        s_axi          : ps_axi       ,
+        o_init_done    : _ps_init_done,
+        o_init_ok      : _ps_init_ok  ,
+        o_pll_lock     : _ps_pll_lock ,
+        O_psram_ck                    ,
+        O_psram_ck_n                  ,
+        O_psram_cs_n                  ,
+        O_psram_reset_n               ,
+        IO_psram_dq                   ,
+        IO_psram_rwds                 ,
     );
 
     // LED は active-low．未定義命令で停止した場合は全点灯にして異常を示す

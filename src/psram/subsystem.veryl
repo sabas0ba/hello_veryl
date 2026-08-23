@@ -1,0 +1,174 @@
+/// PSRAM サブシステム一式 (docs/psram.md)
+///
+/// rPLL・SDR phy・コントローラ FSM・AXI4-Lite ブリッジと，内蔵パッド
+/// (マジックポート) の配線をまとめたもの．利用側は AXI4-Lite スレーブ端子だけを
+/// 見ればよい．
+///
+/// - phy は PsramPhySdr (ファブリック FF 駆動，IOLOGIC 不使用) を clk_mem
+///   (rPLL 54 MHz) で駆動し，CK 13.5 MHz を得る (apicula ODDR の実挙動により
+///   DDR phy は保留中．docs/psram.md「apicula ODDR 実挙動の調査」)
+/// - ctrl は phy の位相イネーブル ps_en (1/4 レート) で歩調を合わせ，
+///   ブリッジの mem 側へ渡す o_req_ready / o_rsp_valid は ps_en で修飾する
+///   (非イネーブルサイクルでの取りこぼし・二重送信防止．ctrl.veryl 参照)
+/// - リセットは全ドメインで共有する (デアサート後は各 FSM が
+///   RESET# パルス / tVCS 待機で吸収する)
+/// - ch1 は未使用．CS#/RESET# を非アクティブ固定にし，パッドは入力で終端する
+pub module PsramSubsystem (
+    i_clk: input clock, /// AXI 側クロック (27 MHz)
+    i_rst: input reset, /// リセット
+
+    s_axi: modport $std::axi4_lite_if::<$std::axi4_lite_pkg::<22, 4, 1>>::slave, /// AXI4-Lite スレーブ
+
+    o_init_done: output logic, /// 初期化完了 (mem 域の値をそのまま出す)
+    o_init_ok  : output logic, /// IR0 照合結果
+    o_pll_lock : output logic, /// rPLL lock
+
+    // 内蔵 PSRAM のマジックポート (Top からそのまま繋ぐ)
+    O_psram_ck     : output logic    <2> , /// PSRAM CK (ch1:ch0)
+    O_psram_ck_n   : output logic    <2> , /// PSRAM CK# (差動)
+    O_psram_cs_n   : output logic    <2> , /// PSRAM CS#
+    O_psram_reset_n: output logic    <2> , /// PSRAM RESET#
+    IO_psram_dq    : inout  tri logic<16>, /// PSRAM DQ (ch0=下位8bit)
+    IO_psram_rwds  : inout  tri logic<2> , /// PSRAM RWDS (ch0=bit0)
+) {
+    var clk_mem   : 'mem  clock;
+    var _clk_mem_p: 'memp clock;
+
+    inst psram_clkgen: PsramClkGen (
+        i_clk                  ,
+        o_clk_mem  : clk_mem   ,
+        o_clk_mem_p: _clk_mem_p,
+        o_lock     : o_pll_lock,
+    );
+
+    var ps_pad_ck     : 'mem logic              ;
+    var ps_pad_ck_n   : 'mem logic              ;
+    var ps_pad_cs_n   : 'mem logic              ;
+    var ps_pad_reset_n: 'mem logic              ;
+    var ps_en         : 'mem logic              ;
+    var ps_ck_en      : 'mem logic              ;
+    var ps_cs_n       : 'mem logic              ;
+    var ps_reset_n    : 'mem logic              ;
+    var ps_dq_a_o     : 'mem logic           <8>;
+    var ps_dq_b_o     : 'mem logic           <8>;
+    var ps_dq_oe      : 'mem logic              ;
+    var ps_rwds_a_o   : 'mem logic              ;
+    var ps_rwds_b_o   : 'mem logic              ;
+    var ps_rwds_oe    : 'mem logic              ;
+    var ps_dq_a_i     : 'mem logic           <8>;
+    var ps_dq_b_i     : 'mem logic           <8>;
+    var ps_rwds_a_i   : 'mem logic              ;
+    var ps_rwds_b_i   : 'mem logic              ;
+    var ps_req_valid  : 'mem logic              ;
+    var ps_req_ready  : 'mem logic              ;
+    var ps_req        : 'mem psram_pkg::req_t   ;
+    var ps_rsp_valid  : 'mem logic              ;
+    var ps_rsp_ready  : 'mem logic              ;
+    var ps_rsp        : 'mem psram_pkg::rsp_t   ;
+    var ps_init_done  : 'mem logic              ;
+    var ps_init_ok    : 'mem logic              ;
+    var _ps_dq_in_1   :      logic           <8>; // ch1 DQ 読み値 (未使用)
+    var _ps_rwds_in_1 :      logic              ; // ch1 RWDS 読み値 (未使用)
+
+    // ctrl は ps_en のサイクルしか req/rsp を観測しないため，全速 (clk_mem) で
+    // 動く CdcHandshake 側の ready/valid 授受を ps_en のサイクルへ限定する
+    let ps_req_ready_g: 'mem logic = ps_req_ready && ps_en;
+    let ps_rsp_valid_g: 'mem logic = ps_rsp_valid && ps_en;
+
+    unsafe (cdc) {
+        inst psram_phy: PsramPhySdr (
+            i_clk        : clk_mem         ,
+            i_rst        : i_rst           ,
+            o_en         : ps_en           ,
+            i_ck_en      : ps_ck_en        ,
+            i_cs_n       : ps_cs_n         ,
+            i_reset_n    : ps_reset_n      ,
+            i_dq_a       : ps_dq_a_o       ,
+            i_dq_b       : ps_dq_b_o       ,
+            i_dq_oe      : ps_dq_oe        ,
+            i_rwds_a     : ps_rwds_a_o     ,
+            i_rwds_b     : ps_rwds_b_o     ,
+            i_rwds_oe    : ps_rwds_oe      ,
+            o_dq_a       : ps_dq_a_i       ,
+            o_dq_b       : ps_dq_b_i       ,
+            o_rwds_a     : ps_rwds_a_i     ,
+            o_rwds_b     : ps_rwds_b_i     ,
+            o_pad_ck     : ps_pad_ck       ,
+            o_pad_ck_n   : ps_pad_ck_n     ,
+            o_pad_cs_n   : ps_pad_cs_n     ,
+            o_pad_reset_n: ps_pad_reset_n  ,
+            io_pad_dq    : IO_psram_dq[7:0],
+            io_pad_rwds  : IO_psram_rwds[0],
+        );
+
+        inst psram_ctrl: PsramCtrl #(
+            // CS# Low 上限 tCSM 4 µs (CK 13.5 MHz → 74 ns/CK で 24 CK ≈ 1.8 µs)
+            TimeoutCyc: 24,
+        ) (
+            i_clk      : clk_mem     ,
+            i_rst      : i_rst       ,
+            i_en       : ps_en       ,
+            i_req_valid: ps_req_valid,
+            o_req_ready: ps_req_ready,
+            i_req      : ps_req      ,
+            o_rsp_valid: ps_rsp_valid,
+            i_rsp_ready: ps_rsp_ready,
+            o_rsp      : ps_rsp      ,
+            o_init_done: ps_init_done,
+            o_init_ok  : ps_init_ok  ,
+            o_ck_en    : ps_ck_en    ,
+            o_cs_n     : ps_cs_n     ,
+            o_reset_n  : ps_reset_n  ,
+            o_dq_a     : ps_dq_a_o   ,
+            o_dq_b     : ps_dq_b_o   ,
+            o_dq_oe    : ps_dq_oe    ,
+            o_rwds_a   : ps_rwds_a_o ,
+            o_rwds_b   : ps_rwds_b_o ,
+            o_rwds_oe  : ps_rwds_oe  ,
+            i_dq_a     : ps_dq_a_i   ,
+            i_dq_b     : ps_dq_b_i   ,
+            i_rwds_a   : ps_rwds_a_i ,
+            i_rwds_b   : ps_rwds_b_i ,
+        );
+
+        inst psram_bridge: PsramAxiBridge (
+            i_clk_axi  : i_clk         ,
+            i_rst_axi  : i_rst         ,
+            i_clk_mem  : clk_mem       ,
+            i_rst_mem  : i_rst         ,
+            s_axi      : s_axi         ,
+            o_req_valid: ps_req_valid  ,
+            i_req_ready: ps_req_ready_g,
+            o_req      : ps_req        ,
+            i_rsp_valid: ps_rsp_valid_g,
+            o_rsp_ready: ps_rsp_ready  ,
+            i_rsp      : ps_rsp        ,
+        );
+
+        // 初期化状態の観測用．LED 表示など遅い用途に限る
+        assign o_init_done = ps_init_done;
+        assign o_init_ok   = ps_init_ok;
+    }
+
+    // ch0 のみ駆動．ch1 は CS#/RESET# を非アクティブに固定する
+    assign O_psram_ck      = {1'b0, ps_pad_ck};
+    assign O_psram_ck_n    = {1'b1, ps_pad_ck_n};
+    assign O_psram_cs_n    = {1'b1, ps_pad_cs_n};
+    assign O_psram_reset_n = {1'b1, ps_pad_reset_n};
+
+    // ch1 のパッドは入力で終端する (未駆動ワイヤ警告を避け，かつ High-Z を保つ)
+    for i in 0..8 :g_dq1 {
+        inst u_dq1_pad: $sv::IOBUF (
+            O  : _ps_dq_in_1[i]    ,
+            IO : IO_psram_dq[i + 8],
+            I  : 1'b0              ,
+            OEN: 1'b1              ,
+        );
+    }
+    inst u_rwds1_pad: $sv::IOBUF (
+        O  : _ps_rwds_in_1   ,
+        IO : IO_psram_rwds[1],
+        I  : 1'b0            ,
+        OEN: 1'b1            ,
+    );
+}

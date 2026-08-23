@@ -6,10 +6,15 @@
 /// | --- | --- |
 /// | `0x0000_0000`–`0x0000_1FFF` | ブート ROM（8 KB 相当，リードのみ） |
 /// | `0x0000_2000`–`0x0000_2FFF` | データ RAM（RamWords x 4 byte） |
+/// | `0x1000_0000`–`0x103F_FFFF` | PSRAM ch0（AXI4-Lite マスタとして外へ出す） |
 /// | `0x2000_0000`– | MMIO（UART / LED / TOHOST） |
 ///
-/// デコードは `addr[29]` で MMIO，`addr[13]` で ROM / RAM を分ける．
+/// デコードは `addr[29]` で MMIO，`addr[28]` で PSRAM，
+/// 残りを `addr[13]` で ROM / RAM に分ける．
 /// コアは完了まで `o_mem_addr` を保持するため，組合せデコードで足りる．
+///
+/// PSRAM サブシステム本体（PLL / phy / ctrl / ブリッジ）はクロックドメインが
+/// 異なるため SoC の外に置き，ここでは AXI4-Lite マスタ端子だけを出す．
 pub module RvSoc #(
     /// データ RAM の語数
     param RamWords: u32 = 512,
@@ -18,6 +23,8 @@ pub module RvSoc #(
     i_rst: input reset, /// リセット
 
     tx: modport stream_if::source, /// UART TX へ
+
+    m_psram: modport $std::axi4_lite_if::<$std::axi4_lite_pkg::<22, 4, 1>>::master, /// PSRAM へ（AXI4-Lite）
 
     o_leds        : output logic<6> , /// LED（active-high）
     o_tohost_valid: output logic    , /// 終了通知
@@ -47,9 +54,11 @@ pub module RvSoc #(
         o_illegal  : o_illegal,
     );
 
-    let sel_mmio: logic = mem_addr[29];
-    let sel_ram : logic = !mem_addr[29] && mem_addr[13];
-    let sel_rom : logic = !mem_addr[29] && !mem_addr[13];
+    let sel_mmio : logic = mem_addr[29];
+    let sel_psram: logic = !mem_addr[29] && mem_addr[28];
+    let sel_local: logic = !mem_addr[29] && !mem_addr[28];
+    let sel_ram  : logic = sel_local && mem_addr[13];
+    let sel_rom  : logic = sel_local && !mem_addr[13];
 
     var rom_done : logic    ;
     var rom_rdata: logic<32>;
@@ -101,6 +110,22 @@ pub module RvSoc #(
         o_tohost      : o_tohost             ,
     );
 
-    assign mem_done  = rom_done || ram_done || mmio_done;
-    assign mem_rdata = if sel_rom ? rom_rdata : if sel_ram ? ram_rdata : mmio_rdata;
+    var psram_done : logic    ;
+    var psram_rdata: logic<32>;
+
+    inst psram_axi: RvAxiMaster (
+        i_clk                          ,
+        i_rst                          ,
+        i_valid: mem_valid && sel_psram,
+        i_addr : mem_addr              ,
+        i_write: mem_write             ,
+        i_wdata: mem_wdata             ,
+        i_wstrb: mem_wstrb             ,
+        o_done : psram_done            ,
+        o_rdata: psram_rdata           ,
+        m_axi  : m_psram               ,
+    );
+
+    assign mem_done  = rom_done || ram_done || mmio_done || psram_done;
+    assign mem_rdata = if sel_rom ? rom_rdata : if sel_ram ? ram_rdata : if sel_psram ? psram_rdata : mmio_rdata;
 }
