@@ -1,0 +1,155 @@
+// PsramAxiArb2 の L1 テスト: 2 マスタが同時に要求した場合の固定優先度と，
+// グラント保持 (トランザクション完了まで奪われない) を検証する
+// (docs/tfcard.md「画像表示デモ仕様」)．
+
+#[test(test_psram_axi_arb2)]
+module test_psram_axi_arb2 {
+    const MaxWait: u32 = 2_000;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    inst m0_if: $std::axi4_lite_if::<$std::axi4_lite_pkg::<22, 4, 1>>;
+    inst m1_if: $std::axi4_lite_if::<$std::axi4_lite_pkg::<22, 4, 1>>;
+    inst s_if : $std::axi4_lite_if::<$std::axi4_lite_pkg::<22, 4, 1>>;
+
+    assign m0_if.awid = 0;
+    assign m0_if.arid = 0;
+    assign m1_if.awid = 0;
+    assign m1_if.arid = 0;
+    assign s_if.awid  = 0;
+    assign s_if.arid  = 0;
+
+    assign m0_if.awprot.instruction_access = 0;
+    assign m0_if.awprot.non_secure         = 0;
+    assign m0_if.awprot.privileged         = 0;
+    assign m0_if.arprot.instruction_access = 0;
+    assign m0_if.arprot.non_secure         = 0;
+    assign m0_if.arprot.privileged         = 0;
+    assign m1_if.awprot.instruction_access = 0;
+    assign m1_if.awprot.non_secure         = 0;
+    assign m1_if.awprot.privileged         = 0;
+    assign m1_if.arprot.instruction_access = 0;
+    assign m1_if.arprot.non_secure         = 0;
+    assign m1_if.arprot.privileged         = 0;
+
+    assign m0_if.arvalid = 0;
+    assign m0_if.araddr  = 0;
+    assign m0_if.rready  = 0;
+    assign m1_if.arvalid = 0;
+    assign m1_if.araddr  = 0;
+    assign m1_if.rready  = 0;
+
+    var dbg_word : logic<20>;
+    var dbg_data : logic<32>;
+    var wr_count : logic<16>;
+    var _rd_count: logic<16>;
+
+    var m0_done: logic   ;
+    var m1_done: logic   ;
+    var seq    : logic<2>; // 完了順の記録 (1 なら m0 が先)
+
+    inst arb: PsramAxiArb2 (
+        i_clk: clk  ,
+        i_rst: rst  ,
+        m0   : m0_if,
+        m1   : m1_if,
+        s    : s_if ,
+    );
+
+    inst mem: AxiLiteMemModel #(
+        Words: 8,
+    ) (
+        i_clk      : clk      ,
+        i_rst      : rst      ,
+        s_axi      : s_if     ,
+        i_dbg_word : dbg_word ,
+        i_dbg_we   : 0        ,
+        i_dbg_wdata: 0        ,
+        o_dbg_data : dbg_data ,
+        o_wr_count : wr_count ,
+        o_rd_count : _rd_count,
+    );
+
+    initial {
+        m0_if.awvalid = 0;
+        m0_if.wvalid  = 0;
+        m0_if.bready  = 0;
+        m0_if.awaddr  = 0;
+        m0_if.wdata   = 0;
+        m0_if.wstrb   = 0;
+        m1_if.awvalid = 0;
+        m1_if.wvalid  = 0;
+        m1_if.bready  = 0;
+        m1_if.awaddr  = 0;
+        m1_if.wdata   = 0;
+        m1_if.wstrb   = 0;
+        m0_done       = 0;
+        m1_done       = 0;
+        seq           = 0;
+        dbg_word      = 0;
+
+        rst.assert();
+
+        // 両マスタが同時にライトを要求する
+        m0_if.awaddr  = 22'h4; // word 1
+        m0_if.wdata   = 32'hA5A5_0001;
+        m0_if.wstrb   = 4'hf;
+        m0_if.awvalid = 1;
+        m0_if.wvalid  = 1;
+        m0_if.bready  = 1;
+        m1_if.awaddr  = 22'h8; // word 2
+        m1_if.wdata   = 32'h5A5A_0002;
+        m1_if.wstrb   = 4'hf;
+        m1_if.awvalid = 1;
+        m1_if.wvalid  = 1;
+        m1_if.bready  = 1;
+
+        for _w in 0..MaxWait {
+            if m0_if.awvalid == 1'b1 && m0_if.awready == 1'b1 {
+                m0_if.awvalid = 0;
+            }
+            if m0_if.wvalid == 1'b1 && m0_if.wready == 1'b1 {
+                m0_if.wvalid = 0;
+            }
+            if m1_if.awvalid == 1'b1 && m1_if.awready == 1'b1 {
+                m1_if.awvalid = 0;
+            }
+            if m1_if.wvalid == 1'b1 && m1_if.wready == 1'b1 {
+                m1_if.wvalid = 0;
+            }
+            if m0_if.bvalid == 1'b1 && m0_done == 1'b0 {
+                m0_done = 1;
+                if m1_done == 1'b0 {
+                    seq = 1; // m0 が先に完了
+                }
+            }
+            if m1_if.bvalid == 1'b1 && m1_done == 1'b0 {
+                m1_done = 1;
+                if m0_done == 1'b0 {
+                    seq = 2; // m1 が先に完了 (優先度違反)
+                }
+            }
+            if m0_done == 1'b1 && m1_done == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+
+        $assert_continue(m0_done == 1'b1, "m0 completed");
+        $assert_continue(m1_done == 1'b1, "m1 completed");
+        $assert_continue(seq == 2'd1, "m0 has priority");
+        $assert_continue(wr_count == 16'd2, "two writes reached the slave");
+
+        // 両者のデータが正しい語へ書かれている
+        m0_if.bready     = 0;
+        m1_if.bready     = 0;
+        dbg_word         = 1;
+        clk.next        (1);
+        $assert_continue(dbg_data == 32'hA5A5_0001, "m0 data");
+        dbg_word         = 2;
+        clk.next        (1);
+        $assert_continue(dbg_data == 32'h5A5A_0002, "m1 data");
+        $finish         ();
+    }
+}
