@@ -5,7 +5,7 @@
 /// | 範囲 | 内容 |
 /// | --- | --- |
 /// | `0x0000_0000`–`0x0000_1FFF` | ブート ROM（8 KB 相当，リードのみ） |
-/// | `0x0000_2000`–`0x0000_2FFF` | データ RAM（RamWords x 4 byte） |
+/// | `0x0000_2000`–`0x0000_3FFF` | データ RAM（RamWords x 4 byte，最大 8 KB） |
 /// | `0x1000_0000`–`0x103F_FFFF` | PSRAM ch0（AXI4-Lite マスタとして外へ出す） |
 /// | `0x2000_0000`– | MMIO（UART / LED / TOHOST） |
 ///
@@ -16,7 +16,7 @@
 /// PSRAM サブシステム本体（PLL / phy / ctrl / ブリッジ）はクロックドメインが
 /// 異なるため SoC の外に置き，ここでは AXI4-Lite マスタ端子だけを出す．
 pub module RvSoc #(
-    /// データ RAM の語数
+    /// データ RAM の語数（`addr[13]` で選ぶので最大 2048 語 = 8 KB）
     param RamWords: u32 = 512,
 ) (
     i_clk: input clock, /// クロック

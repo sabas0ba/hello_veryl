@@ -69,7 +69,7 @@ pub module TopRv #(
     var illegal      : logic    ;
 
     inst soc: RvSoc #(
-        RamWords: 512,
+        RamWords: 2048,
     ) (
         i_clk                        ,
         i_rst                        ,
