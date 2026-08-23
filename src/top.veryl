@@ -8,13 +8,16 @@
 ///     PC["PC (COMポート)"] -- uart_rx --> RX["Uart RX"]
 ///     RX -- "echo" --> ARB["TX arbiter<br>(memtest &gt; TF &gt; echo)"]
 ///     MT["PsramMemtest"] -- "結果1行" --> ARB
-///     DEMO["TfTextDemo"] -- "報告行 + *.TXT 内容" --> ARB
+///     DEMO["TfImageDemo"] -- "報告行" --> ARB
 ///     FAT["Fat32Reader"] --> DEMO
 ///     TFC["TfCtrl"] --> FAT
 ///     ARB --> TX["Uart TX"] -- uart_tx --> PC
 ///     ARB -. "傍受" .-> CON["TextConsole"] --> LCD["5inch LCD"]
 ///     MT -- AXI4-Lite --> BR["PsramAxiBridge<br>(CDC)"] --> CTRL["PsramCtrl"]
 ///     CTRL --> PHY["PsramPhySdr<br>(CK 13.5MHz)"] <--> RAM["内蔵 PSRAM ch0"]
+///     DEMO -- "AXI4-Lite W" --> ARB2["PsramAxiArb2 x2"] --> BR
+///     SC["ImageScanout"] -- "AXI4-Lite R" --> ARB2
+///     SC -- RGB565 --> LCD
 ///     TFC <--> TF["TF カード (SPI)"]
 ///     PLL["PsramClkGen<br>(rPLL 54MHz)"] --> CTRL
 /// ```
@@ -136,10 +139,41 @@ pub module Top #(
     var _ps_rwds_in_1 :      logic              ; // ch1 RWDS 読み値 (未使用)
 
     inst psram_msg: stream_if;
-    inst psram_axi: $std::axi4_lite_if::<$std::axi4_lite_pkg::<22, 4, 1>>;
+    // AXI4-Lite は 3 マスタ (memtest / 画像ローダ / スキャンアウト) を
+    // PsramAxiArb2 の 2 段で優先度合成してブリッジへ渡す
+    // (docs/tfcard.md「画像表示デモ仕様」)
+    inst mt_axi   : $std::axi4_lite_if::<$std::axi4_lite_pkg::<22, 4, 1>>; // memtest
+    inst ld_axi   : $std::axi4_lite_if::<$std::axi4_lite_pkg::<22, 4, 1>>; // 画像ローダ
+    inst sc_axi   : $std::axi4_lite_if::<$std::axi4_lite_pkg::<22, 4, 1>>; // スキャンアウト
+    inst mid_axi  : $std::axi4_lite_if::<$std::axi4_lite_pkg::<22, 4, 1>>; // 前段アービタ出力
+    inst psram_axi: $std::axi4_lite_if::<$std::axi4_lite_pkg::<22, 4, 1>>; // ブリッジへ
 
+    assign mt_axi.awid    = 0;
+    assign mt_axi.arid    = 0;
+    assign ld_axi.awid    = 0;
+    assign ld_axi.arid    = 0;
+    assign sc_axi.awid    = 0;
+    assign sc_axi.arid    = 0;
+    assign mid_axi.awid   = 0;
+    assign mid_axi.arid   = 0;
     assign psram_axi.awid = 0;
     assign psram_axi.arid = 0;
+
+    inst psram_arb_a: PsramAxiArb2 (
+        i_clk         ,
+        i_rst         ,
+        m0   : mt_axi , // memtest 優先
+        m1   : ld_axi ,
+        s    : mid_axi,
+    );
+
+    inst psram_arb_b: PsramAxiArb2 (
+        i_clk           ,
+        i_rst           ,
+        m0   : mid_axi  ,
+        m1   : sc_axi   , // スキャンアウトは最下位
+        s    : psram_axi,
+    );
 
     // ctrl は ps_en のサイクルしか req/rsp を観測しないため，全速 (clk_mem) で
     // 動く CdcHandshake 側の ready/valid 授受を ps_en のサイクルへ限定する
@@ -223,7 +257,7 @@ pub module Top #(
         inst psram_memtest: PsramMemtest (
             i_clk                    ,
             i_rst                    ,
-            m_axi      : psram_axi   ,
+            m_axi      : mt_axi      ,
             i_init_done: ps_init_done,
             i_init_ok  : ps_init_ok  ,
             msg        : psram_msg   ,
@@ -333,7 +367,9 @@ pub module Top #(
         }
     }
 
-    inst tf_demo: TfTextDemo (
+    var tf_img_done: logic;
+
+    inst tf_demo: TfImageDemo (
         i_clk                                       ,
         i_rst                                       ,
         i_init_done : tf_init_done && psram_msg_done,
@@ -347,6 +383,8 @@ pub module Top #(
         i_err       : tf_f_err                      ,
         fdat        : tf_f_st                       ,
         msg         : tf_msg                        ,
+        m_axi       : ld_axi                        ,
+        o_img_done  : tf_img_done                   ,
     );
 
     // TX arbiter: memtest > TF デモ > エコーの優先順位．いずれも
@@ -360,23 +398,23 @@ pub module Top #(
     assign echo_stream.ready = tx_stream.ready && !psram_msg.valid && !tf_msg.valid;
 
     // LCD: UART TXへ流れるバイト列を傍受してテキスト表示 (白文字/黒背景)
-    var vt_de    : logic    ;
-    var vt_hsync : logic    ;
-    var vt_vsync : logic    ;
-    var vt_pos_x : logic<10>;
-    var vt_pos_y : logic<9> ;
-    var _vt_frame: logic    ;
-    var px       : logic    ;
+    var vt_de   : logic    ;
+    var vt_hsync: logic    ;
+    var vt_vsync: logic    ;
+    var vt_pos_x: logic<10>;
+    var vt_pos_y: logic<9> ;
+    var vt_frame: logic    ;
+    var px      : logic    ;
 
     inst video_timing: VideoTiming (
-        i_clk           ,
-        i_rst           ,
-        de   : vt_de    ,
-        hsync: vt_hsync ,
-        vsync: vt_vsync ,
-        frame: _vt_frame,
-        pos_x: vt_pos_x ,
-        pos_y: vt_pos_y ,
+        i_clk          ,
+        i_rst          ,
+        de   : vt_de   ,
+        hsync: vt_hsync,
+        vsync: vt_vsync,
+        frame: vt_frame,
+        pos_x: vt_pos_x,
+        pos_y: vt_pos_y,
     );
 
     // handshake成立サイクルを傍受 (TX へ流れる全バイト = spike報告 + エコー)
@@ -399,9 +437,24 @@ pub module Top #(
     );
 
     // 画素合成: 文字前景=白
-    assign lcd_r = if px ? 5'h1f : 0;
-    assign lcd_g = if px ? 6'h3f : 0;
-    assign lcd_b = if px ? 5'h1f : 0;
+    // 画像レイヤ: PSRAM のフレームバッファを 8x8 複製で背景に描く
+    // (docs/tfcard.md「画像表示デモ仕様」)．文字は最前面に白で重ねる
+    var img_rgb: logic<16>;
+
+    inst image_scanout: ImageScanout (
+        i_clk                    ,
+        i_rst                    ,
+        i_en   : tf_img_done     ,
+        i_frame: vt_frame        ,
+        i_de   : vt_de           ,
+        i_pos_x: {2'b0, vt_pos_x},
+        m_axi  : sc_axi          ,
+        o_rgb  : img_rgb         ,
+    );
+
+    assign lcd_r = if px ? 5'h1f : img_rgb[15:11];
+    assign lcd_g = if px ? 6'h3f : img_rgb[10:5];
+    assign lcd_b = if px ? 5'h1f : img_rgb[4:0];
 
     // パネルはDCLK立上りでデータをラッチするため，反転出力でデータ遷移と
     // サンプリングエッジを半周期ずらす
