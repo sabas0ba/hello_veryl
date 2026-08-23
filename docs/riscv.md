@@ -563,6 +563,75 @@ R00000000
 LBA 0 に直接ある（`bytes_per_sector` = 512，`sectors_per_cluster` = 16，
 `num_fats` = 2，`hidden_sectors` = 0）．
 
+### 実装済み: FAT32 の読み出し（ソフトウェア）
+
+`software/fat32.c`．MBR/BPB の判定規則はハードウェアの `Fat32Reader` と
+そろえてある（JMP + `BytsPerSec` = 512 + シグネチャならスーパーフロッピー，
+そうでなければ MBR のパーティション 1 をタイプ `0Bh`/`0Ch` のときだけ使う）．
+LFN は解釈せず 8.3 名だけを見る．ボリュームラベル・ディレクトリ・
+削除済みエントリは読み飛ばす．
+
+セクタの読み出しだけを `fat_dev_read()` として外へ出しているので，
+実機（`software/tfdev.c`，MMIO 経由）とホスト（`verif/riscv/fat32_host.c`，
+ファイル経由）で同じコードが動く．
+
+#### 検証
+
+`verif/riscv/fat32_check.sh` が，RTL の `Fat32Reader` が使うのと**同じ生成器**
+（`scripts/gen_tf_test_image.py --raw`）が書き出した生イメージに対して
+ホスト上で回す．MBR 形式とスーパーフロッピー形式の両方を見る．
+
+- `README.TXT` 2348 byte（クラスタチェーンが 3 → 5 → 4 と断片化している）
+- `HELLO.TXT` 23 byte，`DATA.BIN` 256 byte
+- 存在しない名前，サブディレクトリ，ボリュームラベル，削除済みエントリを
+  拾わないこと
+
+`verif/riscv/check.sh` から呼ばれ，CI の verif ジョブで実行される．
+
+### 実機での確認（2026-08-24）
+
+実カード（super-floppy FAT32，8 KB クラスタ）に対して:
+
+```
+TFCAT
+MOUNT OK
+FOUND clus=00000011 size=18054
+HEAD: 42 4d 86 46 00 00 00 00 00 00 36 00 00 00 28 00 00 00 64 00 00 00 3c 00 ...
+```
+
+`software/tfload.c` は同じ経路で PSRAM（0x1000_0000）へ読み込み，
+**PSRAM から読み返した値だけ**で BMP ヘッダの独立した複数フィールドが
+互いに整合することを確かめる:
+
+```
+TFLOAD
+LOAD 18054 byte -> psram
+bfSize=18054 off=54 w=100 h=60 bpp=24
+OK
+```
+
+18054 = 54（ヘッダ）+ 300（100 px x 3 byte，4 byte 境界）x 60．
+複数クラスタにまたがる読み出しと PSRAM へのバイト書き込みが通っている．
+
+### 第一段ローダ `software/tfboot.c`
+
+`BOOT.BIN` を PSRAM の 0x1000_0000 へ読み込んでそこへ分岐する．
+読み込み先が UART ブートモニタと同じなので，`software/build_demo.sh` が
+作るイメージ（`ram` 配置なら先頭の複写部が自分をオンチップ RAM へ移す）を
+そのままカードへ置ける．
+
+カードに `BOOT.BIN` が無い状態では次のように報告して戻る（実機で確認済み）:
+
+```
+TFBOOT
+NO BOOT    BIN
+R00000003
+```
+
+**残っているのは実カードへ `BOOT.BIN` を置いての通し確認だけ**である．
+`build/software/torus.bin` を `BOOT.BIN` としてカードのルートへ置けば，
+`tfboot` から LCD デモが起動する．
+
 ## パッチ計画
 
 | # | 内容 | 検証 | 状態 |
@@ -577,7 +646,7 @@ LBA 0 に直接ある（`bytes_per_sector` = 512，`sectors_per_cluster` = 16，
 | 8 | M 拡張（乗除算） | L1 / L2 / L4 | 済（実機で MULDIV OK） |
 | 9 | Zicsr・トラップ・タイマ（CLINT） | L1 / L2 / L4 | 済（L2 60 件 pass．実機でも同 60 件 pass） |
 | 9a | UART ブートモニタと実機 riscv-tests ランナー | L4 | 済（実機 60 / 60 pass） |
-| 10 | TF カードからのプログラムロード（第一段ローダ） | L1 / L4 | 途中（セクタリーダは実機で動作．FAT32 のソフトウェア実装が未） |
+| 10 | TF カードからのプログラムロード（第一段ローダ） | L1 / L4 | ほぼ済（実機で TF → FAT32 → PSRAM を確認．カードへ BOOT.BIN を置いた通し確認が残る） |
 | 11 | LCD デモ（ASCII アート） | L4 | 済（実機で 1.82 fps．「LCD デモ」節） |
 
 ## 残課題・リスク

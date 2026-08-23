@@ -12,6 +12,9 @@
 #           ループの多い処理はこちらが 1 桁速い
 #   psram : PSRAM 上でそのまま実行する．8 KB に収まらない場合に使う
 #
+# software/<name>.srcs があれば，そこに 1 行 1 個で書かれた追加ソースも
+# 一緒にコンパイルする（FAT32 リーダなど共有部分のため）．
+#
 # -mno-relax / -msmall-data-limit=0 は gp 相対アドレッシングを禁じるため．
 # 起動コードは gp を設定しないので，緩和されると静的変数の参照が壊れる．
 set -euo pipefail
@@ -29,6 +32,21 @@ case "$PLACE" in
     *)     echo "ERROR: 未知の配置 '$PLACE' (ram|psram)" >&2; exit 1 ;;
 esac
 
+EXTRA=""
+if [ -f "software/$PROG.srcs" ]; then
+    while read -r line; do
+        case "$line" in
+            "") continue ;;
+            "#"*) continue ;;
+        esac
+        if [ ! -f "$line" ]; then
+            echo "ERROR: software/$PROG.srcs が指す $line が無い" >&2
+            exit 1
+        fi
+        EXTRA="$EXTRA $line"
+    done < "software/$PROG.srcs"
+fi
+
 OUT=build/software
 mkdir -p "$OUT"
 
@@ -37,7 +55,7 @@ riscv64-unknown-elf-gcc -march=rv32im -mabi=ilp32 -O2 \
     -mno-relax -msmall-data-limit=0 \
     -Wall -Wextra \
     -T "$LD" -o "$OUT/$PROG.elf" \
-    "$CRT" "software/$PROG.c"
+    "$CRT" "software/$PROG.c" $EXTRA
 riscv64-unknown-elf-objcopy -O binary "$OUT/$PROG.elf" "$OUT/$PROG.bin"
 riscv64-unknown-elf-objdump -d "$OUT/$PROG.elf" > "$OUT/$PROG.dis"
 

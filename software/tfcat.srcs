@@ -1,0 +1,3 @@
+software/fat32.c
+software/tfdev.c
+software/uart.c

@@ -57,9 +57,12 @@ try {
         return
     }
 
-    # 転送直後は最初のフレームを描いている最中なので，少し待ってから数える
-    Start-Sleep -Milliseconds 500
-    $sp.DiscardInBuffer()
+    # fps を測るときは，描きかけの最初のフレームを避けるため少し待って捨てる．
+    # 短い出力の診断プログラムでは捨てると何も残らないので，そのまま数える．
+    if ($FrameBytes -gt 0) {
+        Start-Sleep -Milliseconds 500
+        $sp.DiscardInBuffer()
+    }
 
     $buf = New-Object byte[] 4096
     $total = 0

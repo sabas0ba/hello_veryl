@@ -26,6 +26,7 @@ src/tfcard/test_disk_image.veryl へ出力する．Python 標準ライブラリ�
 再生成: python scripts/gen_tf_test_image.py
 """
 
+import sys
 from pathlib import Path
 
 SECTOR = 512
@@ -267,8 +268,30 @@ def emit_function(name: str, sectors: dict[int, bytes]) -> list[str]:
     return lines
 
 
+def write_raw(path: Path, sectors: dict[int, bytes]) -> None:
+    """疎な辞書を TOTSEC32 セクタの生イメージとして書き出す (ホスト側テスト用)"""
+    img = bytearray(TOTSEC32 * SECTOR)
+    for lba, sec in sectors.items():
+        img[lba * SECTOR:(lba + 1) * SECTOR] = sec
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(bytes(img))
+    print(f"wrote {path} ({len(img)} byte)")
+
+
 def main() -> None:
-    out = Path(__file__).resolve().parent.parent / "src" / "tfcard" / "test_disk_image.veryl"
+    root = Path(__file__).resolve().parent.parent
+
+    # --raw <dir>: Veryl パッケージではなく生イメージを書き出す．
+    # software/fat32.c をホストで検証するために使う (verif/riscv/fat32_check.sh)．
+    if len(sys.argv) >= 3 and sys.argv[1] == "--raw":
+        d = Path(sys.argv[2])
+        if not d.is_absolute():
+            d = root / d
+        write_raw(d / "mbr.img", build_volume(8, True))
+        write_raw(d / "sf.img", build_volume(0, False))
+        return
+
+    out = root / "src" / "tfcard" / "test_disk_image.veryl"
     lines = [
         "// FAT32 テストディスクイメージ (生成物，編集しない)",
         "// 生成: python scripts/gen_tf_test_image.py (内容の説明もスクリプト参照)",
