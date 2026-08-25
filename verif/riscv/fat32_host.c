@@ -11,8 +11,12 @@
 #include "../../software/fat32.h"
 
 #define SECTOR 512
+#define IMAGE_BYTES (128u * SECTOR)
 
 static FILE *img;
+static int   fail_writes_after = -1;
+static unsigned char image_before[IMAGE_BYTES];
+static unsigned char image_after[IMAGE_BYTES];
 
 int fat_dev_read(unsigned int lba, unsigned char *buf)
 {
@@ -27,6 +31,13 @@ int fat_dev_read(unsigned int lba, unsigned char *buf)
 
 int fat_dev_write(unsigned int lba, const unsigned char *buf)
 {
+    if (fail_writes_after == 0) {
+        fail_writes_after = -1;
+        return 1;
+    }
+    if (fail_writes_after > 0) {
+        fail_writes_after--;
+    }
     if (fseek(img, (long) lba * SECTOR, SEEK_SET) != 0) {
         return 1;
     }
@@ -43,6 +54,24 @@ static void check(int cond, const char *what)
     if (!cond) {
         printf("ERROR: %s\n", what);
         fails++;
+    }
+}
+
+static int snapshot_image(unsigned char *buf)
+{
+    if (fflush(img) != 0 || fseek(img, 0, SEEK_SET) != 0) {
+        return 1;
+    }
+    return fread(buf, 1, IMAGE_BYTES, img) != IMAGE_BYTES;
+}
+
+static void check_image_unchanged(const char *label)
+{
+    int rc = snapshot_image(image_after);
+
+    check(rc == 0, "snapshot after failed write");
+    if (rc == 0) {
+        check(memcmp(image_before, image_after, IMAGE_BYTES) == 0, label);
     }
 }
 
@@ -106,10 +135,12 @@ static void run(const char *path)
     static unsigned char readme[2348];
     static unsigned char data[256];
     static unsigned char boot[2500];
+    static unsigned char oversized[1024u * 1024u];
     const char           hello[] = "Hello, Veryl TF card!\r\n";
     fat_file             f;
     unsigned int         i;
     int                  rc;
+    int                  snap_ok;
 
     img = fopen(path, "rb+");
     if (img == NULL) {
@@ -118,6 +149,7 @@ static void run(const char *path)
         return;
     }
     printf("---- %s ----\n", path);
+    fail_writes_after = -1;
 
     rc = fat_mount();
     check(rc == FAT_OK, "fat_mount");
@@ -184,6 +216,53 @@ static void run(const char *path)
     }
 
     /* 書き込み後も既存 file の chain と内容が保たれること． */
+    /* Capacity failures must not allocate or link any clusters. */
+    snap_ok = snapshot_image(image_before) == 0;
+    check(snap_ok, "snapshot before new-file FAT_ERR_FULL");
+    rc = fat_write_file("HUGE    BIN", oversized, sizeof oversized);
+    check(rc == FAT_ERR_FULL, "new file returns FAT_ERR_FULL");
+    if (snap_ok) {
+        check_image_unchanged("new-file FAT_ERR_FULL leaves image unchanged");
+    }
+    rc = fat_open("HUGE    BIN", &f);
+    check(rc == FAT_ERR_FOUND, "failed new file has no directory entry");
+
+    snap_ok = snapshot_image(image_before) == 0;
+    check(snap_ok, "snapshot before extension FAT_ERR_FULL");
+    rc = fat_write_file("BOOT    BIN", oversized, sizeof oversized);
+    check(rc == FAT_ERR_FULL, "extension returns FAT_ERR_FULL");
+    if (snap_ok) {
+        check_image_unchanged("extension FAT_ERR_FULL leaves image unchanged");
+    }
+    check_file("BOOT    BIN", 1700, boot, "BOOT after FAT_ERR_FULL");
+
+    /* Fail the second FAT copy while linking the second newly allocated
+     * cluster. The entry update and all earlier allocations must roll back. */
+    snap_ok = snapshot_image(image_before) == 0;
+    check(snap_ok, "snapshot before injected FAT write failure");
+    fail_writes_after = 5;
+    rc = fat_write_file("FAIL    BIN", boot, sizeof boot);
+    check(rc == FAT_ERR_IO, "mirrored FAT write failure returns FAT_ERR_IO");
+    check(fail_writes_after == -1, "mirrored FAT write failure was injected");
+    fail_writes_after = -1;
+    if (snap_ok) {
+        check_image_unchanged("FAT write failure rolls allocation back");
+    }
+    rc = fat_open("FAIL    BIN", &f);
+    check(rc == FAT_ERR_FOUND, "failed allocation has no directory entry");
+    check_file("BOOT    BIN", 1700, boot, "BOOT after FAT I/O error");
+
+    rc = fat_write_file("FAIL    BIN", boot, sizeof boot);
+    check(rc == FAT_OK, "retry succeeds after FAT I/O error");
+    if (rc == FAT_OK) {
+        check_file("FAIL    BIN", sizeof boot, boot, "FAIL.BIN retry");
+    }
+    rc = fat_write_file("FAIL    BIN", boot, 0);
+    check(rc == FAT_OK, "retry file clusters are released");
+    if (rc == FAT_OK) {
+        check_file("FAIL    BIN", 0, boot, "FAIL.BIN empty");
+    }
+
     check_file("README  TXT", sizeof readme, readme, "README after write");
     check_file("HELLO   TXT", sizeof hello - 1,
                (const unsigned char *) hello, "HELLO after write");

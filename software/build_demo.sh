@@ -50,7 +50,14 @@ fi
 OUT=build/software
 mkdir -p "$OUT"
 
-riscv64-unknown-elf-gcc -march=rv32im -mabi=ilp32 -O2 \
+OPT=-O2
+if [ "$PROG" = tfwrite ]; then
+    # FAT rollback paths make this image size-bound; TF/UART I/O dominates
+    # runtime, so optimize this receiver for the 8 KB on-chip RAM instead.
+    OPT=-Os
+fi
+
+riscv64-unknown-elf-gcc -march=rv32im -mabi=ilp32 "$OPT" \
     -nostdlib -nostartfiles -ffreestanding \
     -mno-relax -msmall-data-limit=0 \
     -Wall -Wextra \

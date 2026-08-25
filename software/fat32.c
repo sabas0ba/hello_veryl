@@ -83,6 +83,9 @@ static int take_bpb(unsigned int base)
         if (fs.max_clus > fatsz * (SECTOR / 4) - 1) {
             fs.max_clus = fatsz * (SECTOR / 4) - 1;
         }
+        if (fs.max_clus > 0x0fffffefu) {
+            fs.max_clus = 0x0fffffefu;
+        }
     }
     return FAT_OK;
 }
@@ -313,22 +316,45 @@ static int fat_get(unsigned int c, unsigned int *val)
 }
 
 /* FAT エントリを書く．全面 (num_fats) を更新する */
-static int fat_set(unsigned int c, unsigned int val)
+static int fat_write_entry(unsigned int copy, unsigned int c,
+                           unsigned int val)
 {
     unsigned int off = c * 4;
     unsigned int s   = off / SECTOR;
+    unsigned int lba = fs.fat_start + copy * fs.fat_size + s;
+    unsigned int cur;
+
+    if (fat_dev_read(lba, sec) != 0) {
+        return FAT_ERR_IO;
+    }
+    cur = rd32(sec + (off % SECTOR));
+    wr32(sec + (off % SECTOR), (cur & 0xf0000000u) | (val & 0x0fffffffu));
+    if (fat_dev_write(lba, sec) != 0) {
+        return FAT_ERR_IO;
+    }
+    return FAT_OK;
+}
+
+static int fat_set(unsigned int c, unsigned int val)
+{
+    unsigned int old;
     unsigned int i;
+    int          rc;
 
+    rc = fat_get(c, &old);
+    if (rc != FAT_OK) {
+        return rc;
+    }
     for (i = 0; i < fs.num_fats; i++) {
-        unsigned int lba = fs.fat_start + i * fs.fat_size + s;
-        unsigned int cur;
+        unsigned int j;
 
-        if (fat_dev_read(lba, sec) != 0) {
-            return FAT_ERR_IO;
-        }
-        cur = rd32(sec + (off % SECTOR));
-        wr32(sec + (off % SECTOR), (cur & 0xf0000000u) | (val & 0x0fffffffu));
-        if (fat_dev_write(lba, sec) != 0) {
+        rc = fat_write_entry(i, c, val);
+        if (rc != FAT_OK) {
+            /* The failed write may have reached the medium. Restore every
+             * copy touched so far, including the failing copy. */
+            for (j = 0; j <= i; j++) {
+                (void) fat_write_entry(j, c, old);
+            }
             return FAT_ERR_IO;
         }
     }
@@ -362,6 +388,7 @@ static int fat_alloc(unsigned int prev, unsigned int *out)
         if (prev >= 2) {
             rc = fat_set(prev, c);
             if (rc != FAT_OK) {
+                (void) fat_set(c, 0);
                 return rc;
             }
         }
@@ -390,6 +417,80 @@ static int fat_free_chain(unsigned int c)
     return FAT_OK;
 }
 
+static int fat_chain_info(unsigned int c, unsigned int *count,
+                          unsigned int *tail, unsigned int *terminal)
+{
+    unsigned int n = 0;
+
+    *count    = 0;
+    *tail     = 0;
+    *terminal = 0;
+    if (c == 0) {
+        return FAT_OK;
+    }
+    while (c >= 2 && c <= fs.max_clus) {
+        unsigned int nx;
+        int          rc;
+
+        if (n >= fs.max_clus - 1) {
+            return FAT_ERR_CHAIN;
+        }
+        n++;
+        *tail = c;
+        rc = fat_get(c, &nx);
+        if (rc != FAT_OK) {
+            return rc;
+        }
+        if (nx >= 0x0ffffff8u) {
+            *count    = n;
+            *terminal = nx;
+            return FAT_OK;
+        }
+        if (nx < 2 || nx > fs.max_clus) {
+            return FAT_ERR_CHAIN;
+        }
+        c = nx;
+    }
+    return FAT_ERR_CHAIN;
+}
+
+static int fat_have_free(unsigned int need)
+{
+    unsigned int c;
+
+    if (need == 0) {
+        return FAT_OK;
+    }
+    for (c = 2; c <= fs.max_clus; c++) {
+        unsigned int off = c * 4;
+        unsigned int v;
+
+        if (c == 2 || off % SECTOR == 0) {
+            if (fat_dev_read(fs.fat_start + off / SECTOR, sec) != 0) {
+                return FAT_ERR_IO;
+            }
+        }
+        v = rd32(sec + (off % SECTOR)) & 0x0fffffffu;
+        if (v == 0 && --need == 0) {
+            return FAT_OK;
+        }
+    }
+    return FAT_ERR_FULL;
+}
+
+static int fat_rollback_alloc(unsigned int old_tail,
+                              unsigned int old_terminal,
+                              unsigned int first_new)
+{
+    if (first_new < 2) {
+        return FAT_OK;
+    }
+    if (old_tail >= 2 && fat_set(old_tail, old_terminal) != FAT_OK) {
+        return FAT_ERR_IO;
+    }
+    return fat_free_chain(first_new);
+}
+
 int fat_write_file(const char *name11, const void *src, unsigned int len)
 {
     const unsigned char *p = (const unsigned char *) src;
@@ -399,16 +500,20 @@ int fat_write_file(const char *name11, const void *src, unsigned int len)
     unsigned int         need;
     unsigned int         first;
     unsigned int         c, prev;
+    unsigned int         old_count, old_tail, old_terminal;
+    unsigned int         first_new = 0;
+    unsigned int         drop = 0;
     unsigned int         done = 0;
     unsigned int         i;
     int                  rc;
+    int                  rollback_rc;
     int                  existed;
 
     if (fs.sec_per_clus == 0) {
         return FAT_ERR_NO_FS;
     }
     cpb  = fs.sec_per_clus * SECTOR;
-    need = (len + cpb - 1) / cpb;
+    need = len == 0 ? 0 : 1 + (len - 1) / cpb;
 
     rc      = dir_scan(name11, &ent, &slot);
     existed = (rc == FAT_OK);
@@ -424,6 +529,15 @@ int fat_write_file(const char *name11, const void *src, unsigned int len)
         ent.size = 0;
     }
 
+    rc = fat_chain_info(ent.clus, &old_count, &old_tail, &old_terminal);
+    if (rc != FAT_OK) {
+        return rc;
+    }
+    rc = fat_have_free(need > old_count ? need - old_count : 0);
+    if (rc != FAT_OK) {
+        return rc;
+    }
+
     /* クラスタチェーンを必要な長さに整える */
     first = ent.clus;
     prev  = 0;
@@ -434,7 +548,10 @@ int fat_write_file(const char *name11, const void *src, unsigned int len)
 
             rc = fat_alloc(prev, &nc);
             if (rc != FAT_OK) {
-                return rc;
+                goto rollback;
+            }
+            if (first_new == 0) {
+                first_new = nc;
             }
             if (i == 0) {
                 first = nc;
@@ -444,26 +561,15 @@ int fat_write_file(const char *name11, const void *src, unsigned int len)
         prev = c;
         rc   = fat_get(c, &c);
         if (rc != FAT_OK) {
-            return rc;
+            goto rollback;
         }
     }
     if (need > 0) {
-        /* 余ったクラスタを解放してチェーンを閉じる */
         if (c >= 2 && c < 0x0ffffff8u) {
-            rc = fat_free_chain(c);
-            if (rc != FAT_OK) {
-                return rc;
-            }
-            rc = fat_set(prev, 0x0ffffff8u);
-            if (rc != FAT_OK) {
-                return rc;
-            }
+            drop = c;
         }
     } else if (first >= 2) {
-        rc = fat_free_chain(first);
-        if (rc != FAT_OK) {
-            return rc;
-        }
+        drop  = first;
         first = 0;
     }
 
@@ -473,7 +579,8 @@ int fat_write_file(const char *name11, const void *src, unsigned int len)
         unsigned int s;
 
         if (c < 2 || c >= 0x0ffffff8u) {
-            return FAT_ERR_CHAIN;
+            rc = FAT_ERR_CHAIN;
+            goto rollback;
         }
         for (s = 0; s < fs.sec_per_clus && done < len; s++) {
             unsigned int n = len - done;
@@ -486,21 +593,23 @@ int fat_write_file(const char *name11, const void *src, unsigned int len)
                 sec[k] = k < n ? p[done + k] : 0;
             }
             if (fat_dev_write(clus_lba(c) + s, sec) != 0) {
-                return FAT_ERR_IO;
+                rc = FAT_ERR_IO;
+                goto rollback;
             }
             done += n;
         }
         if (done < len) {
             rc = fat_get(c, &c);
             if (rc != FAT_OK) {
-                return rc;
+                goto rollback;
             }
         }
     }
 
     /* ディレクトリエントリを更新する */
     if (fat_dev_read(ent.lba, sec) != 0) {
-        return FAT_ERR_IO;
+        rc = FAT_ERR_IO;
+        goto rollback;
     }
     {
         unsigned char *d = sec + ent.off;
@@ -519,7 +628,26 @@ int fat_write_file(const char *name11, const void *src, unsigned int len)
         wr32(d + 28, len);
     }
     if (fat_dev_write(ent.lba, sec) != 0) {
-        return FAT_ERR_IO;
+        rc = FAT_ERR_IO;
+        goto rollback;
+    }
+
+    /* Directory metadata is durable before an old tail is detached. */
+    if (drop >= 2) {
+        if (need > 0) {
+            rc = fat_set(prev, 0x0ffffff8u);
+            if (rc != FAT_OK) {
+                return rc;
+            }
+        }
+        rc = fat_free_chain(drop);
+        if (rc != FAT_OK) {
+            return rc;
+        }
     }
     return FAT_OK;
+
+rollback:
+    rollback_rc = fat_rollback_alloc(old_tail, old_terminal, first_new);
+    return rollback_rc != FAT_OK ? rollback_rc : rc;
 }
