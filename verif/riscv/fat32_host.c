@@ -25,6 +25,17 @@ int fat_dev_read(unsigned int lba, unsigned char *buf)
     return 0;
 }
 
+int fat_dev_write(unsigned int lba, const unsigned char *buf)
+{
+    if (fseek(img, (long) lba * SECTOR, SEEK_SET) != 0) {
+        return 1;
+    }
+    if (fwrite(buf, 1, SECTOR, img) != SECTOR) {
+        return 1;
+    }
+    return 0;
+}
+
 static int fails;
 
 static void check(int cond, const char *what)
@@ -80,16 +91,27 @@ static void check_file(const char *name11, unsigned int want_size,
     printf("  %-12s size=%-5u OK\n", label, want_size);
 }
 
+static void fill_payload(unsigned char *buf, unsigned int len,
+                         unsigned int seed)
+{
+    unsigned int i;
+
+    for (i = 0; i < len; i++) {
+        buf[i] = (unsigned char) (seed + i * 17u);
+    }
+}
+
 static void run(const char *path)
 {
     static unsigned char readme[2348];
     static unsigned char data[256];
+    static unsigned char boot[2500];
     const char           hello[] = "Hello, Veryl TF card!\r\n";
     fat_file             f;
     unsigned int         i;
     int                  rc;
 
-    img = fopen(path, "rb");
+    img = fopen(path, "rb+");
     if (img == NULL) {
         printf("ERROR: %s を開けない\n", path);
         fails++;
@@ -132,6 +154,41 @@ static void run(const char *path)
     rc = fat_open("XELETED TXT", &f);
     check(rc == FAT_ERR_FOUND, "削除済みエントリは拾わない");
 
+    /* 新規作成と cluster chain の伸縮を同じエントリで確認する．
+     * 1 cluster = 1024 byte のテスト画像なので，3 -> 1 -> 0 -> 2 cluster となる． */
+    fill_payload(boot, 2500, 3);
+    rc = fat_write_file("BOOT    BIN", boot, 2500);
+    check(rc == FAT_OK, "BOOT.BIN を新規作成");
+    if (rc == FAT_OK) {
+        check_file("BOOT    BIN", 2500, boot, "BOOT.BIN new");
+    }
+
+    fill_payload(boot, 600, 7);
+    rc = fat_write_file("BOOT    BIN", boot, 600);
+    check(rc == FAT_OK, "BOOT.BIN を 1 cluster へ縮小");
+    if (rc == FAT_OK) {
+        check_file("BOOT    BIN", 600, boot, "BOOT.BIN shrink");
+    }
+
+    rc = fat_write_file("BOOT    BIN", boot, 0);
+    check(rc == FAT_OK, "BOOT.BIN を 0 byte 化");
+    if (rc == FAT_OK) {
+        check_file("BOOT    BIN", 0, boot, "BOOT.BIN empty");
+    }
+
+    fill_payload(boot, 1700, 11);
+    rc = fat_write_file("BOOT    BIN", boot, 1700);
+    check(rc == FAT_OK, "BOOT.BIN を 2 cluster へ再拡張");
+    if (rc == FAT_OK) {
+        check_file("BOOT    BIN", 1700, boot, "BOOT.BIN final");
+    }
+
+    /* 書き込み後も既存 file の chain と内容が保たれること． */
+    check_file("README  TXT", sizeof readme, readme, "README after write");
+    check_file("HELLO   TXT", sizeof hello - 1,
+               (const unsigned char *) hello, "HELLO after write");
+    check_file("DATA    BIN", sizeof data, data, "DATA after write");
+
     fclose(img);
 }
 
@@ -150,6 +207,6 @@ int main(int argc, char **argv)
         printf("FAIL: %d 件\n", fails);
         return 1;
     }
-    printf("OK: FAT32 リーダはすべての確認を通過\n");
+    printf("OK: FAT32 読み書きはすべての確認を通過\n");
     return 0;
 }
