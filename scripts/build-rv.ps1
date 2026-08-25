@@ -23,7 +23,8 @@ try {
     podman run --rm --network none -v "${RepoRoot}:/work" $Image veryl build
     if ($LASTEXITCODE -ne 0) { throw "veryl build failed" }
 
-    ((Get-Content hello_veryl.f) -replace '^/work/', '') |
+    ((Get-Content hello_veryl.f) -replace '^/work/', '' `
+        -replace '^target/video/font_rom\.sv$', 'src/video/font_bram.sv') |
         Set-Content -Encoding Ascii build\sources.f
 
     podman run --rm --network none -v "${RepoRoot}:/work" $Image bash scripts/synth_pnr_rv.sh
