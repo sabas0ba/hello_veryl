@@ -12,11 +12,15 @@
 
 #define SECTOR 512
 #define IMAGE_BYTES (128u * SECTOR)
+#define BOUNDARY_CLUSTER 50u
+#define FAT_SCAN_POISON_CLUSTER 120u
 
 static FILE *img;
 static int   fail_writes_after = -1;
+static int   report_error_after_write = -1;
 static unsigned char image_before[IMAGE_BYTES];
 static unsigned char image_after[IMAGE_BYTES];
+static unsigned char sentinel_before[SECTOR];
 
 int fat_dev_read(unsigned int lba, unsigned char *buf)
 {
@@ -31,6 +35,8 @@ int fat_dev_read(unsigned int lba, unsigned char *buf)
 
 int fat_dev_write(unsigned int lba, const unsigned char *buf)
 {
+    int report_error = 0;
+
     if (fail_writes_after == 0) {
         fail_writes_after = -1;
         return 1;
@@ -38,13 +44,19 @@ int fat_dev_write(unsigned int lba, const unsigned char *buf)
     if (fail_writes_after > 0) {
         fail_writes_after--;
     }
+    if (report_error_after_write == 0) {
+        report_error_after_write = -1;
+        report_error = 1;
+    } else if (report_error_after_write > 0) {
+        report_error_after_write--;
+    }
     if (fseek(img, (long) lba * SECTOR, SEEK_SET) != 0) {
         return 1;
     }
     if (fwrite(buf, 1, SECTOR, img) != SECTOR) {
         return 1;
     }
-    return 0;
+    return report_error;
 }
 
 static int fails;
@@ -73,6 +85,220 @@ static void check_image_unchanged(const char *label)
     if (rc == 0) {
         check(memcmp(image_before, image_after, IMAGE_BYTES) == 0, label);
     }
+}
+
+static void make_dir_entry(unsigned char *d, const char *name11,
+                           unsigned int attr)
+{
+    memset(d, 0, 32);
+    memcpy(d, name11, 11);
+    d[11] = (unsigned char) attr;
+}
+
+typedef struct {
+    unsigned int fat_start;
+    unsigned int fat_size;
+    unsigned int num_fats;
+    unsigned int data_start;
+    unsigned int sec_per_clus;
+    unsigned int root_clus;
+} test_layout;
+
+static unsigned int host_rd16(const unsigned char *p)
+{
+    return (unsigned int) p[0] | ((unsigned int) p[1] << 8);
+}
+
+static unsigned int host_rd32(const unsigned char *p)
+{
+    return (unsigned int) p[0] | ((unsigned int) p[1] << 8)
+         | ((unsigned int) p[2] << 16) | ((unsigned int) p[3] << 24);
+}
+
+static void host_wr32(unsigned char *p, unsigned int v)
+{
+    p[0] = (unsigned char) v;
+    p[1] = (unsigned char) (v >> 8);
+    p[2] = (unsigned char) (v >> 16);
+    p[3] = (unsigned char) (v >> 24);
+}
+
+static int load_layout(test_layout *layout)
+{
+    static unsigned char buf[SECTOR];
+    unsigned int         base;
+    unsigned int         reserved;
+
+    if (fat_dev_read(0, buf) != 0) {
+        return 1;
+    }
+    if ((buf[0] == 0xeb || buf[0] == 0xe9)
+        && host_rd16(buf + 11) == SECTOR) {
+        base = 0;
+    } else {
+        base = host_rd32(buf + 446 + 8);
+        if (base == 0 || fat_dev_read(base, buf) != 0) {
+            return 1;
+        }
+    }
+    reserved            = host_rd16(buf + 14);
+    layout->sec_per_clus = buf[13];
+    layout->num_fats     = buf[16];
+    layout->fat_size     = host_rd32(buf + 36);
+    layout->root_clus    = host_rd32(buf + 44);
+    layout->fat_start    = base + reserved;
+    layout->data_start   = layout->fat_start
+                         + layout->num_fats * layout->fat_size;
+    return layout->sec_per_clus == 0 || layout->num_fats == 0
+        || layout->fat_size == 0 || layout->root_clus < 2;
+}
+
+static unsigned int test_clus_lba(const test_layout *layout,
+                                  unsigned int cluster)
+{
+    return layout->data_start
+         + (cluster - 2) * layout->sec_per_clus;
+}
+
+static int set_fat_entry(const test_layout *layout, unsigned int cluster,
+                         unsigned int value)
+{
+    static unsigned char buf[SECTOR];
+    unsigned int         off = cluster * 4;
+    unsigned int         copy;
+
+    for (copy = 0; copy < layout->num_fats; copy++) {
+        unsigned int lba = layout->fat_start
+                         + copy * layout->fat_size + off / SECTOR;
+        unsigned int old;
+
+        if (fat_dev_read(lba, buf) != 0) {
+            return 1;
+        }
+        old = host_rd32(buf + off % SECTOR);
+        host_wr32(buf + off % SECTOR,
+                  (old & 0xf0000000u) | (value & 0x0fffffffu));
+        if (fat_dev_write(lba, buf) != 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int seed_next_cluster_end(const test_layout *layout)
+{
+    static unsigned char buf[SECTOR];
+    unsigned int         root_lba = test_clus_lba(layout, layout->root_clus);
+    unsigned int         e;
+
+    if (layout->sec_per_clus < 2
+        || fat_dev_read(root_lba + layout->sec_per_clus - 1, buf) != 0) {
+        return 1;
+    }
+    for (e = 0; e + 32 < SECTOR; e += 32) {
+        make_dir_entry(buf + e, "FILLER     ", 0x08);
+    }
+    buf[SECTOR - 32] = 0;
+    if (fat_dev_write(root_lba + layout->sec_per_clus - 1, buf) != 0
+        || set_fat_entry(layout, layout->root_clus, BOUNDARY_CLUSTER) != 0
+        || set_fat_entry(layout, BOUNDARY_CLUSTER, 0x0ffffff8u) != 0
+        || fat_dev_read(test_clus_lba(layout, BOUNDARY_CLUSTER), buf) != 0) {
+        return 1;
+    }
+    make_dir_entry(buf, "STALE   BIN", 0x20);
+    return fat_dev_write(test_clus_lba(layout, BOUNDARY_CLUSTER), buf);
+}
+
+static int seed_chain_tail(const test_layout *layout)
+{
+    static unsigned char buf[SECTOR];
+    unsigned int         base = test_clus_lba(layout, BOUNDARY_CLUSTER);
+    unsigned int         s;
+
+    for (s = 0; s < layout->sec_per_clus; s++) {
+        unsigned int e;
+
+        if (fat_dev_read(base + s, buf) != 0) {
+            return 1;
+        }
+        for (e = 0; e < SECTOR; e += 32) {
+            if (s + 1 == layout->sec_per_clus && e + 32 == SECTOR) {
+                buf[e] = 0;
+            } else {
+                make_dir_entry(buf + e, "FILLER     ", 0x08);
+            }
+        }
+        if (fat_dev_write(base + s, buf) != 0) {
+            return 1;
+        }
+    }
+    for (s = 0; s < SECTOR; s++) {
+        buf[s] = (unsigned char) (5u + s * 13u);
+    }
+    memcpy(sentinel_before, buf, SECTOR);
+    return fat_dev_write(base + layout->sec_per_clus, buf);
+}
+
+static int check_sentinel(const test_layout *layout)
+{
+    static unsigned char buf[SECTOR];
+    unsigned int         lba = test_clus_lba(layout, BOUNDARY_CLUSTER)
+                             + layout->sec_per_clus;
+
+    return fat_dev_read(lba, buf) == 0
+        && memcmp(buf, sentinel_before, SECTOR) == 0;
+}
+
+/* Place a stale entry immediately after the logical end marker. When
+ * sector_end is set, move the marker to the last slot so its successor is
+ * in the next sector. */
+static int seed_stale_after_end(int sector_end)
+{
+    static unsigned char buf[SECTOR];
+    unsigned int         lba;
+
+    for (lba = 0; lba < IMAGE_BYTES / SECTOR; lba++) {
+        unsigned int e;
+        int          root = 0;
+
+        if (fat_dev_read(lba, buf) != 0) {
+            return 1;
+        }
+        for (e = 0; e < SECTOR; e += 32) {
+            if (memcmp(buf + e, "README  TXT", 11) == 0) {
+                root = 1;
+                break;
+            }
+        }
+        if (!root) {
+            continue;
+        }
+        for (e = 0; e < SECTOR; e += 32) {
+            if (buf[e] != 0) {
+                continue;
+            }
+            if (!sector_end) {
+                if (e + 64 > SECTOR) {
+                    return 1;
+                }
+                make_dir_entry(buf + e + 32, "STALE   BIN", 0x20);
+                return fat_dev_write(lba, buf);
+            }
+            while (e + 32 < SECTOR) {
+                make_dir_entry(buf + e, "FILLER     ", 0x08);
+                e += 32;
+            }
+            buf[e] = 0;
+            if (fat_dev_write(lba, buf) != 0
+                || fat_dev_read(lba + 1, buf) != 0) {
+                return 1;
+            }
+            make_dir_entry(buf, "STALE   BIN", 0x20);
+            return fat_dev_write(lba + 1, buf);
+        }
+        return 1;
+    }
+    return 1;
 }
 
 static void check_file(const char *name11, unsigned int want_size,
@@ -135,10 +361,13 @@ static void run(const char *path)
     static unsigned char readme[2348];
     static unsigned char data[256];
     static unsigned char boot[2500];
+    static unsigned char replacement[600];
     static unsigned char oversized[1024u * 1024u];
     const char           hello[] = "Hello, Veryl TF card!\r\n";
     fat_file             f;
+    test_layout          layout;
     unsigned int         i;
+    unsigned int         boot_start;
     int                  rc;
     int                  snap_ok;
 
@@ -149,7 +378,8 @@ static void run(const char *path)
         return;
     }
     printf("---- %s ----\n", path);
-    fail_writes_after = -1;
+    fail_writes_after         = -1;
+    report_error_after_write = -1;
 
     rc = fat_mount();
     check(rc == FAT_OK, "fat_mount");
@@ -236,6 +466,60 @@ static void run(const char *path)
     }
     check_file("BOOT    BIN", 1700, boot, "BOOT after FAT_ERR_FULL");
 
+    /* The old file must remain intact when a staged payload write fails
+     * after at least one sector has reached the card. */
+    fill_payload(replacement, sizeof replacement, 23);
+    rc = fat_open("BOOT    BIN", &f);
+    check(rc == FAT_OK, "open BOOT before staged payload failure");
+    boot_start = rc == FAT_OK ? f.start_cluster : 0;
+    fail_writes_after = 3;
+    rc = fat_write_file("BOOT    BIN", replacement, sizeof replacement);
+    check(rc == FAT_ERR_IO, "staged payload failure returns FAT_ERR_IO");
+    check(fail_writes_after == -1, "staged payload failure was injected");
+    fail_writes_after = -1;
+    check_file("BOOT    BIN", 1700, boot, "BOOT after payload I/O error");
+    rc = fat_open("BOOT    BIN", &f);
+    check(rc == FAT_OK && f.start_cluster == boot_start,
+          "payload failure preserves BOOT cluster chain");
+
+    /* A directory-sector error before any bytes reach the card must also
+     * leave the old entry and chain intact. */
+    fail_writes_after = 4;
+    rc = fat_write_file("BOOT    BIN", replacement, sizeof replacement);
+    check(rc == FAT_ERR_IO, "directory write failure returns FAT_ERR_IO");
+    check(fail_writes_after == -1, "directory write failure was injected");
+    fail_writes_after = -1;
+    check_file("BOOT    BIN", 1700, boot, "BOOT after directory I/O error");
+    rc = fat_open("BOOT    BIN", &f);
+    check(rc == FAT_OK && f.start_cluster == boot_start,
+          "directory failure preserves BOOT cluster chain");
+
+    /* A card may persist the directory sector and still report an error.
+     * Readback must recognize the committed entry before freeing old data. */
+    report_error_after_write = 4;
+    rc = fat_write_file("BOOT    BIN", replacement, sizeof replacement);
+    check(rc == FAT_OK, "committed directory write error is recovered");
+    check(report_error_after_write == -1,
+          "committed directory write error was injected");
+    check_file("BOOT    BIN", sizeof replacement, replacement,
+               "BOOT after committed directory error");
+    rc = fat_write_file("BOOT    BIN", boot, 1700);
+    check(rc == FAT_OK, "restore BOOT after directory error test");
+    check_file("BOOT    BIN", 1700, boot, "BOOT restored after error test");
+
+    /* Consuming an end marker must create a new one in the following slot. */
+    rc = seed_stale_after_end(0);
+    check(rc == 0, "seed stale same-sector directory entry");
+    rc = fat_write_file("MARK    BIN", boot, 0);
+    check(rc == FAT_OK, "create file at same-sector end marker");
+    rc = fat_open("STALE   BIN", &f);
+    check(rc == FAT_ERR_FOUND, "same-sector stale entry stays hidden");
+
+    /* Move the next end marker to the sector boundary. FAIL.BIN is created
+     * below after the injected allocation error, exercising that boundary. */
+    rc = seed_stale_after_end(1);
+    check(rc == 0, "seed stale next-sector directory entry");
+
     /* Fail the second FAT copy while linking the second newly allocated
      * cluster. The entry update and all earlier allocations must roll back. */
     snap_ok = snapshot_image(image_before) == 0;
@@ -257,10 +541,39 @@ static void run(const char *path)
     if (rc == FAT_OK) {
         check_file("FAIL    BIN", sizeof boot, boot, "FAIL.BIN retry");
     }
+    rc = fat_open("STALE   BIN", &f);
+    check(rc == FAT_ERR_FOUND, "next-sector stale entry stays hidden");
     rc = fat_write_file("FAIL    BIN", boot, 0);
     check(rc == FAT_OK, "retry file clusters are released");
     if (rc == FAT_OK) {
         check_file("FAIL    BIN", 0, boot, "FAIL.BIN empty");
+    }
+
+    rc = load_layout(&layout);
+    check(rc == 0, "load FAT layout for directory boundary tests");
+    if (rc == 0) {
+        rc = seed_next_cluster_end(&layout);
+        check(rc == 0, "seed stale next-cluster directory entry");
+        rc = set_fat_entry(&layout, FAT_SCAN_POISON_CLUSTER, 1);
+        check(rc == 0, "poison shared FAT scan buffer");
+        rc = fat_write_file("CLUSTER BIN", boot, 0);
+        check(rc == FAT_OK, "create file at next-cluster end marker");
+        rc = set_fat_entry(&layout, FAT_SCAN_POISON_CLUSTER, 0);
+        check(rc == 0, "clear shared FAT scan buffer poison");
+        rc = fat_open("CLUSTER BIN", &f);
+        check(rc == FAT_OK && f.size == 0,
+              "next-cluster marker file remains visible");
+        rc = fat_open("STALE   BIN", &f);
+        check(rc == FAT_ERR_FOUND, "next-cluster stale entry stays hidden");
+
+        rc = seed_chain_tail(&layout);
+        check(rc == 0, "seed directory chain-tail boundary");
+        rc = fat_write_file("TAIL    BIN", boot, 0);
+        check(rc == FAT_OK, "create file at directory chain tail");
+        check(check_sentinel(&layout),
+              "directory chain tail does not touch next physical sector");
+        rc = fat_open("NOPE2   BIN", &f);
+        check(rc == FAT_ERR_FOUND, "full directory scan stops at chain EOC");
     }
 
     check_file("README  TXT", sizeof readme, readme, "README after write");
