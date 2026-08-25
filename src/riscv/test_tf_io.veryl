@@ -1,0 +1,280 @@
+// RvMmio + RvTfIo の L1 テスト (docs/riscv.md「TF カードからのブート」)
+//
+// リード: TF_CTRL.rx_valid をポーリングし，TF_DATA から
+//           512 byte を順に pop して内容を確認する
+// ライト: TF_CTRL.tx_space をポーリングし，TF_DATA へ
+//           512 byte を push してカードモデルの受信内容を確認する
+#[test(test_rv_tf_io)]
+module test_rv_tf_io {
+    const MmioWait: u32 = 16;
+    const MaxPoll : u32 = 200_000;
+
+    const TfCtrl: logic<32> = 32'h2000_0050;
+    const TfLba : logic<32> = 32'h2000_0054;
+    const TfData: logic<32> = 32'h2000_0058;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    inst uart_tx: stream_if;
+    inst uart_rx: stream_if;
+
+    var mm_valid: logic    ;
+    var mm_addr : logic<32>;
+    var mm_write: logic    ;
+    var mm_wdata: logic<32>;
+    var mm_done : logic    ;
+    var mm_rdata: logic<32>;
+
+    var _leds        : logic<6> ;
+    var _tohost_valid: logic    ;
+    var _tohost      : logic<32>;
+    var _timer_irq   : logic    ;
+
+    var tf_start   : logic    ;
+    var tf_wr      : logic    ;
+    var tf_lba     : logic<32>;
+    var tf_status  : logic<32>;
+    var tf_rx_pop  : logic    ;
+    var tf_rx_data : logic<8> ;
+    var tf_rx_valid: logic    ;
+    var tf_tx_push : logic    ;
+    var tf_tx_data : logic<8> ;
+    var tf_tx_space: logic    ;
+
+    inst mmio: RvMmio (
+        i_clk         : clk          ,
+        i_rst         : rst          ,
+        i_valid       : mm_valid     ,
+        i_addr        : mm_addr      ,
+        i_write       : mm_write     ,
+        i_wdata       : mm_wdata     ,
+        o_done        : mm_done      ,
+        o_rdata       : mm_rdata     ,
+        tx            : uart_tx      ,
+        rx            : uart_rx      ,
+        o_leds        : _leds        ,
+        o_tohost_valid: _tohost_valid,
+        o_tohost      : _tohost      ,
+        o_timer_irq   : _timer_irq   ,
+        o_tf_start    : tf_start     ,
+        o_tf_wr       : tf_wr        ,
+        o_tf_lba      : tf_lba       ,
+        i_tf_status   : tf_status    ,
+        o_tf_rx_pop   : tf_rx_pop    ,
+        i_tf_rx_data  : tf_rx_data   ,
+        i_tf_rx_valid : tf_rx_valid  ,
+        o_tf_tx_push  : tf_tx_push   ,
+        o_tf_tx_data  : tf_tx_data   ,
+        i_tf_tx_space : tf_tx_space  ,
+    );
+
+    var sclk: logic;
+    var mosi: logic;
+    var miso: logic;
+    var cs_n: logic;
+
+    inst dut: RvTfIo #(
+        InitDivider: 8, // テスト短縮（実機は 80 = 337.5 kHz）
+    ) (
+        i_clk     : clk        ,
+        i_rst     : rst        ,
+        i_start   : tf_start   ,
+        i_wr      : tf_wr      ,
+        i_lba     : tf_lba     ,
+        o_status  : tf_status  ,
+        i_rx_pop  : tf_rx_pop  ,
+        o_rx_data : tf_rx_data ,
+        o_rx_valid: tf_rx_valid,
+        i_tx_push : tf_tx_push ,
+        i_tx_data : tf_tx_data ,
+        o_tx_space: tf_tx_space,
+        o_sclk    : sclk       ,
+        o_mosi    : mosi       ,
+        o_cs_n    : cs_n       ,
+        i_miso    : miso       ,
+    );
+
+    var img_lba : logic<32>;
+    var img_off : logic<9> ;
+    var img_data: logic<8> ;
+
+    var wr_en  : logic    ;
+    var wr_lba : logic<32>;
+    var wr_off : logic<9> ;
+    var wr_byte: logic<8> ;
+
+    inst card: TfCardModel #(
+        NcrBytes     : 1,
+        Acmd41Polls  : 2,
+        DataWaitBytes: 2,
+        BusyBytes    : 3,
+    ) (
+        i_clk            : clk     ,
+        i_rst            : rst     ,
+        i_sclk           : sclk    ,
+        i_cs_n           : cs_n    ,
+        i_mosi           : mosi    ,
+        o_miso           : miso    ,
+        i_cfg_legacy_cmd8: 1'b0    ,
+        i_cfg_ccs        : 1'b1    ,
+        i_cfg_never_ready: 1'b0    ,
+        i_cfg_no_token   : 1'b0    ,
+        i_cfg_corrupt_crc: 1'b0    ,
+        i_cfg_wr_err     : 1'b0    ,
+        o_img_lba        : img_lba ,
+        o_img_off        : img_off ,
+        i_img_data       : img_data,
+        o_wr_en          : wr_en   ,
+        o_wr_lba         : wr_lba  ,
+        o_wr_off         : wr_off  ,
+        o_wr_data        : wr_byte ,
+    );
+
+    // ディスクイメージ: byte = LBA 下位 + オフセット下位 (mod 256)
+    assign img_data = img_lba[7:0] + img_off[7:0];
+
+    var got  : logic<8>  [512];
+    var got_n: logic<10>      ;
+
+    always_ff (clk, rst) {
+        if_reset {
+            got_n = 0;
+        } else if wr_en {
+            got[wr_off] = wr_byte;
+            got_n       = got_n + 1;
+        }
+    }
+
+    function reg_read (
+        addr: input logic<32>,
+    ) {
+        mm_addr  = addr;
+        mm_write = 0;
+        mm_valid = 1;
+        for _w in 0..MmioWait {
+            clk.next(1);
+            if mm_done {
+                break;
+            }
+        }
+        $assert_continue(mm_done, "MMIO read 完了");
+        mm_valid         = 0;
+        clk.next        (1);
+    }
+
+    function reg_write (
+        addr: input logic<32>,
+        data: input logic<32>,
+    ) {
+        mm_addr  = addr;
+        mm_wdata = data;
+        mm_write = 1;
+        mm_valid = 1;
+        for _w in 0..MmioWait {
+            clk.next(1);
+            if mm_done {
+                break;
+            }
+        }
+        $assert_continue(mm_done, "MMIO write 完了");
+        mm_valid         = 0;
+        mm_write         = 0;
+        clk.next        (1);
+    }
+
+    var want: logic<8>;
+
+    initial {
+        mm_valid      = 0;
+        mm_addr       = 0;
+        mm_write      = 0;
+        mm_wdata      = 0;
+        uart_tx.ready = 1;
+        uart_rx.valid = 0;
+        uart_rx.data  = 0;
+        rst.assert   ();
+
+        for _w in 0..MaxPoll {
+            reg_read(TfCtrl);
+            if mm_rdata[1] {
+                break;
+            }
+        }
+        $assert(mm_rdata[1], "初期化完了 (init_done)");
+        $assert(mm_rdata[4:2] == 3'd0, "初期化エラーなし");
+        $assert(!mm_rdata[0], "初期状態は busy でない");
+        $assert(mm_rdata[9], "初期状態は tx_space あり");
+
+        // ---- リード: LBA=7 を 1 セクタ読む ----
+        reg_write(TfLba, 32'd7);
+        reg_write(TfCtrl, 32'd1);
+
+        reg_read        (TfCtrl);
+        $assert_continue(mm_rdata[0], "リード開始後は busy");
+
+        for n in 0..512 {
+            for _w in 0..MaxPoll {
+                reg_read(TfCtrl);
+                if mm_rdata[8] {
+                    break;
+                }
+            }
+            $assert(mm_rdata[8], "受信バイトあり");
+
+            reg_read        (TfData);
+            want             = 8'd7 + n;
+            $assert_continue(mm_rdata[8], "TF_DATA 読み出し時は valid");
+            $assert_continue(mm_rdata[7:0] == want, "TF_DATA の受信バイト");
+        }
+
+        for _w in 0..MaxPoll {
+            reg_read(TfCtrl);
+            if !mm_rdata[0] {
+                break;
+            }
+        }
+        $assert(!mm_rdata[0], "リード完了で busy が下りる");
+        $assert(mm_rdata[7:5] == 3'd0, "リードエラーなし");
+
+        // ---- ライト: LBA=9 へ 512 byte 書く ----
+        reg_write(TfLba, 32'd9);
+        reg_write(TfCtrl, 32'd3);
+
+        reg_read        (TfCtrl);
+        $assert_continue(mm_rdata[0], "ライト開始後は busy");
+
+        for n in 0..512 {
+            for _w in 0..MaxPoll {
+                reg_read(TfCtrl);
+                if mm_rdata[9] {
+                    break;
+                }
+            }
+            $assert  (mm_rdata[9], "送信 buffer に空きあり");
+            reg_write(TfData, 32'haa + n);
+        }
+
+        for _w in 0..MaxPoll {
+            reg_read(TfCtrl);
+            if !mm_rdata[0] {
+                break;
+            }
+        }
+        $assert(!mm_rdata[0], "ライト完了で busy が下りる");
+        $assert(mm_rdata[7:5] == 3'd0, "ライトエラーなし");
+
+        $assert(got_n == 10'd512, "カードが 512 byte 受け取った");
+        $assert(wr_lba == 32'd9, "ライト先 LBA");
+
+        for n in 0..512 {
+            want = 8'haa + n;
+            if got[n] != want && n <: 12 {
+                $display("wr byte %d: got %h want %h", n, got[n], want);
+            }
+            $assert_continue(got[n] == want, "カードが受け取ったバイト");
+        }
+
+        $finish();
+    }
+}

@@ -1,0 +1,138 @@
+/// TF カードの byte-stream 入出力（RvCore の周辺機器．
+/// docs/riscv.md「TF カードからのブート」）
+///
+/// `TfCtrl` と MMIO の間に送受信それぞれ 1 byte のバッファを置く．
+/// ソフトウェアは `TF_CTRL` の `rx_valid` / `tx_space` をポーリングし，
+/// `TF_DATA` で 512 byte を直接受け渡す．`TfCtrl` は stream の
+/// handshake 待ちで SCK を停止するため，CPU に実時間制約はない．
+///
+/// セクタ全体の RAM と word/byte 変換を持たないため，
+/// `RvTfSector` より LUT と BSRAM の使用量が少ない．
+pub module RvTfIo #(
+    /// 初期化クロック分周比（`TfCtrl` へそのまま渡す．テストで短縮する）
+    param InitDivider: u32 = 80,
+) (
+    i_clk: input clock, /// クロック
+    i_rst: input reset, /// リセット
+
+    // 制御（RvMmio のレジスタから）
+    i_start : input  logic    , /// 1 サイクルパルス．セクタ入出力を開始する
+    i_wr    : input  logic    , /// 0 = リード，1 = ライト（i_start と同時に見る）
+    i_lba   : input  logic<32>, /// 対象の論理ブロックアドレス
+    o_status: output logic<32>, /// bit0 busy / bit1 init_done / bit4:2 init_err / bit7:5 err / bit8 rx_valid / bit9 tx_space
+
+    // MMIO byte-stream
+    i_rx_pop  : input  logic   , /// 受信バイトを消費する（1 サイクルパルス）
+    o_rx_data : output logic<8>, /// 受信バイト
+    o_rx_valid: output logic   , /// 受信バイトあり
+    i_tx_push : input  logic   , /// 送信バイトを追加する（1 サイクルパルス）
+    i_tx_data : input  logic<8>, /// 送信バイト
+    o_tx_space: output logic   , /// 送信バッファに空きがある
+
+    o_sclk: output logic, /// TF SCK
+    o_mosi: output logic, /// TF MOSI
+    o_cs_n: output logic, /// TF CS#
+    i_miso: input  logic, /// TF MISO
+) {
+    inst data: stream_if;
+
+    var req_valid: logic             ;
+    var req_write: logic             ;
+    var lba      : logic         <32>;
+    var busy     : logic             ;
+    var err_l    : TfTypes::Error    ;
+
+    var req_ready: logic         ;
+    var init_done: logic         ;
+    var init_err : TfTypes::Error;
+    var blk_done : logic         ;
+    var blk_err  : TfTypes::Error;
+
+    var rx_valid: logic   ;
+    var rx_data : logic<8>;
+    var tx_valid: logic   ;
+    var tx_data : logic<8>;
+    var tx_ready: logic   ;
+
+    inst tf: TfCtrl #(
+        InitDivider: InitDivider,
+    ) (
+        i_clk                 ,
+        i_rst                 ,
+        i_req_valid: req_valid,
+        i_req_lba  : lba      ,
+        i_req_write: req_write,
+        o_req_ready: req_ready,
+        o_init_done: init_done,
+        o_init_err : init_err ,
+        o_done     : blk_done ,
+        o_err      : blk_err  ,
+        data       : data     ,
+        i_wr_valid : tx_valid ,
+        i_wr_data  : tx_data  ,
+        o_wr_ready : tx_ready ,
+        o_sclk                ,
+        o_mosi                ,
+        o_cs_n                ,
+        i_miso                ,
+    );
+
+    // 受信バイトを消費するサイクルは，同時に次のバイトを受け取れる．
+    assign data.ready = !rx_valid || i_rx_pop;
+
+    assign o_rx_data  = rx_data;
+    assign o_rx_valid = rx_valid;
+    assign o_tx_space = !tx_valid;
+    assign o_status   = {22'b0, !tx_valid, rx_valid, err_l, init_err, init_done, busy};
+
+    always_ff (i_clk, i_rst) {
+        if_reset {
+            req_valid = 0;
+            req_write = 0;
+            lba       = 0;
+            busy      = 0;
+            err_l     = TfTypes::Error::none;
+            rx_valid  = 0;
+            rx_data   = 0;
+            tx_valid  = 0;
+            tx_data   = 0;
+        } else {
+            if i_start && !busy {
+                req_valid = 1;
+                req_write = i_wr;
+                lba       = i_lba;
+                busy      = 1;
+                err_l     = TfTypes::Error::none;
+                rx_valid  = 0;
+                tx_valid  = 0;
+            }
+
+            if req_valid && req_ready {
+                req_valid = 0;
+            }
+
+            // 消費後に同サイクルの到着を取り込み，新しいバイトを優先して残す．
+            if i_rx_pop {
+                rx_valid = 0;
+            }
+            if data.valid && data.ready {
+                rx_data  = data.data;
+                rx_valid = 1;
+            }
+
+            if tx_valid && tx_ready {
+                tx_valid = 0;
+            }
+            if i_tx_push && !tx_valid {
+                tx_data  = i_tx_data;
+                tx_valid = 1;
+            }
+
+            if blk_done {
+                busy     = 0;
+                err_l    = blk_err;
+                tx_valid = 0;
+            }
+        }
+    }
+}

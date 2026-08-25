@@ -13,11 +13,11 @@
 /// | `0x34` MTIME_HI | R | 同上位 32 bit |
 /// | `0x38` MTIMECMP_LO | R/W | 比較値の下位 32 bit |
 /// | `0x3C` MTIMECMP_HI | R/W | 同上位 32 bit |
-/// | `0x50` TF_CTRL | W | 1 を書くとセクタ読み出しを開始する |
-/// | `0x50` TF_CTRL | R | 状態語（bit0 busy / bit1 init_done / bit4:2 init_err / bit7:5 err） |
-/// | `0x54` TF_LBA | R/W | 読み出す論理ブロックアドレス |
-///
-/// セクタバッファ本体は別窓（`0x2000_1000`〜）に置く．RvSoc のデコードを参照．
+/// | `0x50` TF_CTRL | W | bit0 = 開始，bit1 = 方向（0 = リード，1 = ライト） |
+/// | `0x50` TF_CTRL | R | 状態語（bit0 busy / bit1 init_done / bit4:2 init_err / bit7:5 err / bit8 rx_valid / bit9 tx_space） |
+/// | `0x54` TF_LBA | R/W | 入出力する論理ブロックアドレス |
+/// | `0x58` TF_DATA | R | bit8 = 受信あり，bit7:0 = 受信データ．読むと 1 バイト消費する |
+/// | `0x58` TF_DATA | W | 下位 8 bit をライトデータとして送出する |
 ///
 /// タイマ割り込みは `mtime >= mtimecmp` で `o_timer_irq` を上げる（CLINT 相当）．
 /// `mtimecmp` はリセット時に全 1 とし，設定するまで割り込まない．
@@ -43,9 +43,16 @@ pub module RvMmio (
     o_tohost      : output logic<32>, /// 終了コード
     o_timer_irq   : output logic    , /// タイマ割り込み（mtime >= mtimecmp）
 
-    o_tf_start : output logic    , /// TF セクタ読み出し開始（1 サイクルパルス）
-    o_tf_lba   : output logic<32>, /// TF の読み出し LBA
-    i_tf_status: input  logic<32>, /// TF の状態語
+    o_tf_start   : output logic    , /// TF セクタ入出力開始（1 サイクルパルス）
+    o_tf_wr      : output logic    , /// TF の方向（0 = リード，1 = ライト）
+    o_tf_lba     : output logic<32>, /// TF の読み出し LBA
+    i_tf_status  : input  logic<32>, /// TF の状態語
+    o_tf_rx_pop  : output logic    , /// TF 受信バイト消費（1 サイクルパルス）
+    i_tf_rx_data : input  logic<8> , /// TF 受信バイト
+    i_tf_rx_valid: input  logic    , /// TF 受信バイトあり
+    o_tf_tx_push : output logic    , /// TF 送信バイト追加（1 サイクルパルス）
+    o_tf_tx_data : output logic<8> , /// TF 送信バイト
+    i_tf_tx_space: input  logic    , /// TF 送信 buffer に空きがある
 ) {
     const RegTohost    : logic<8> = 8'h00;
     const RegUart      : logic<8> = 8'h10;
@@ -57,6 +64,7 @@ pub module RvMmio (
     const RegMtimecmpHi: logic<8> = 8'h3c;
     const RegTfCtrl    : logic<8> = 8'h50;
     const RegTfLba     : logic<8> = 8'h54;
+    const RegTfData    : logic<8> = 8'h58;
 
     let reg_sel: logic<8> = i_addr[7:0];
 
@@ -98,13 +106,19 @@ pub module RvMmio (
             rx_valid       = 0;
             rx_data        = 0;
             o_tf_start     = 0;
+            o_tf_wr        = 0;
             o_tf_lba       = 0;
+            o_tf_rx_pop    = 0;
+            o_tf_tx_push   = 0;
+            o_tf_tx_data   = 0;
         } else {
             mtime = mtime + 1;
 
             pending        = accept;
             o_tohost_valid = 0;
             o_tf_start     = 0;
+            o_tf_rx_pop    = 0;
+            o_tf_tx_push   = 0;
 
             if tx.valid && tx.ready {
                 tx.valid = 0;
@@ -127,11 +141,21 @@ pub module RvMmio (
                         RegMtimecmpHi: mtimecmp[63:32] = i_wdata;
                         RegLed       : o_leds          = i_wdata[5:0];
                         RegTfLba     : o_tf_lba        = i_wdata;
-                        RegTfCtrl    : o_tf_start      = i_wdata[0];
-                        default      : {}
+                        RegTfCtrl    : {
+                            o_tf_start = i_wdata[0];
+                            o_tf_wr    = i_wdata[1];
+                        }
+                        RegTfData: if i_tf_tx_space {
+                            o_tf_tx_data = i_wdata[7:0];
+                            o_tf_tx_push = 1;
+                        }
+                        default  : {}
                     }
                     o_rdata = 0;
                 } else {
+                    if reg_sel == RegTfData && i_tf_rx_valid {
+                        o_tf_rx_pop = 1;
+                    }
                     o_rdata = case reg_sel {
                         RegUart      : {1'b0 repeat 31, !tx_busy},
                         RegUartRx    : {1'b0 repeat 23, rx_valid, rx_data},
@@ -142,6 +166,7 @@ pub module RvMmio (
                         RegMtimecmpHi: mtimecmp[63:32],
                         RegTfCtrl    : i_tf_status,
                         RegTfLba     : o_tf_lba,
+                        RegTfData    : {1'b0 repeat 23, i_tf_rx_valid, i_tf_rx_data},
                         default      : 32'h0,
                     };
                 }
