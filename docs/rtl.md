@@ -56,7 +56,7 @@ LED 割当（すべて active-low）:
 | PsramSpikeBitbang | src/psram/spike_bitbang.veryl | PSRAM spike 段1（未接続で残置，[psram.md](psram.md)） |
 | SpiMaster | src/tfcard/spi_master.veryl | SPI mode 0 マスタ，分周切替（[tfcard.md](tfcard.md)） |
 | TfSpikeInit | src/tfcard/spike_init.veryl | TF カード初期化 + セクタ 0 リード spike（ブリングアップ用，Top 非接続） |
-| TfCtrl | src/tfcard/tf_ctrl.veryl | TF カードブロックリードコントローラ v1（[tfcard.md](tfcard.md)） |
+| TfCtrl | src/tfcard/tf_ctrl.veryl | TF カード単発ブロック入出力コントローラ v2（[tfcard.md](tfcard.md)） |
 | Fat32Reader | src/tfcard/fat32_reader.veryl | FAT32 リーダ v2（8.3 名照合・チェーン追跡，[tfcard.md](tfcard.md)） |
 | TfTextDemo | src/tfcard/text_demo.veryl | TF カード報告行 + ルート最初の *.TXT を UART/LCD 表示（Top 非接続で残置） |
 | TfImageDemo | src/tfcard/image_demo.veryl | ルート直下の IMAGE.BMP を解析し PSRAM フレームバッファへ展開（[tfcard.md](tfcard.md)） |

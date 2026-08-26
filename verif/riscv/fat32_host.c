@@ -77,6 +77,15 @@ static int snapshot_image(unsigned char *buf)
     return fread(buf, 1, IMAGE_BYTES, img) != IMAGE_BYTES;
 }
 
+static int restore_image(const unsigned char *buf)
+{
+    if (fseek(img, 0, SEEK_SET) != 0
+        || fwrite(buf, 1, IMAGE_BYTES, img) != IMAGE_BYTES) {
+        return 1;
+    }
+    return fflush(img) != 0;
+}
+
 static void check_image_unchanged(const char *label)
 {
     int rc = snapshot_image(image_after);
@@ -96,12 +105,14 @@ static void make_dir_entry(unsigned char *d, const char *name11,
 }
 
 typedef struct {
+    unsigned int base;
     unsigned int fat_start;
     unsigned int fat_size;
     unsigned int num_fats;
     unsigned int data_start;
     unsigned int sec_per_clus;
     unsigned int root_clus;
+    unsigned int fsinfo_lba;
 } test_layout;
 
 static unsigned int host_rd16(const unsigned char *p)
@@ -123,6 +134,12 @@ static void host_wr32(unsigned char *p, unsigned int v)
     p[3] = (unsigned char) (v >> 24);
 }
 
+static void host_wr16(unsigned char *p, unsigned int v)
+{
+    p[0] = (unsigned char) v;
+    p[1] = (unsigned char) (v >> 8);
+}
+
 static int load_layout(test_layout *layout)
 {
     static unsigned char buf[SECTOR];
@@ -141,11 +158,13 @@ static int load_layout(test_layout *layout)
             return 1;
         }
     }
-    reserved            = host_rd16(buf + 14);
+    reserved             = host_rd16(buf + 14);
+    layout->base         = base;
     layout->sec_per_clus = buf[13];
     layout->num_fats     = buf[16];
     layout->fat_size     = host_rd32(buf + 36);
     layout->root_clus    = host_rd32(buf + 44);
+    layout->fsinfo_lba   = base + host_rd16(buf + 48);
     layout->fat_start    = base + reserved;
     layout->data_start   = layout->fat_start
                          + layout->num_fats * layout->fat_size;
@@ -160,25 +179,46 @@ static unsigned int test_clus_lba(const test_layout *layout,
          + (cluster - 2) * layout->sec_per_clus;
 }
 
-static int set_fat_entry(const test_layout *layout, unsigned int cluster,
-                         unsigned int value)
+static int set_fat_entry_copy(const test_layout *layout, unsigned int copy,
+                              unsigned int cluster, unsigned int value)
 {
     static unsigned char buf[SECTOR];
     unsigned int         off = cluster * 4;
-    unsigned int         copy;
+    unsigned int         lba = layout->fat_start
+                             + copy * layout->fat_size + off / SECTOR;
+    unsigned int         old;
+
+    if (copy >= layout->num_fats || fat_dev_read(lba, buf) != 0) {
+        return 1;
+    }
+    old = host_rd32(buf + off % SECTOR);
+    host_wr32(buf + off % SECTOR,
+              (old & 0xf0000000u) | (value & 0x0fffffffu));
+    return fat_dev_write(lba, buf);
+}
+
+static int get_fat_entry_copy(const test_layout *layout, unsigned int copy,
+                              unsigned int cluster, unsigned int *value)
+{
+    static unsigned char buf[SECTOR];
+    unsigned int         off = cluster * 4;
+    unsigned int         lba = layout->fat_start
+                             + copy * layout->fat_size + off / SECTOR;
+
+    if (copy >= layout->num_fats || fat_dev_read(lba, buf) != 0) {
+        return 1;
+    }
+    *value = host_rd32(buf + off % SECTOR) & 0x0fffffffu;
+    return 0;
+}
+
+static int set_fat_entry(const test_layout *layout, unsigned int cluster,
+                         unsigned int value)
+{
+    unsigned int copy;
 
     for (copy = 0; copy < layout->num_fats; copy++) {
-        unsigned int lba = layout->fat_start
-                         + copy * layout->fat_size + off / SECTOR;
-        unsigned int old;
-
-        if (fat_dev_read(lba, buf) != 0) {
-            return 1;
-        }
-        old = host_rd32(buf + off % SECTOR);
-        host_wr32(buf + off % SECTOR,
-                  (old & 0xf0000000u) | (value & 0x0fffffffu));
-        if (fat_dev_write(lba, buf) != 0) {
+        if (set_fat_entry_copy(layout, copy, cluster, value) != 0) {
             return 1;
         }
     }
@@ -356,6 +396,100 @@ static void fill_payload(unsigned char *buf, unsigned int len,
     }
 }
 
+static void check_fsinfo(const test_layout *layout, int unknown,
+                         const char *label)
+{
+    static unsigned char buf[SECTOR];
+    unsigned int         free_count;
+    unsigned int         next_free;
+    int                  rc = fat_dev_read(layout->fsinfo_lba, buf);
+
+    check(rc == 0, label);
+    if (rc != 0) {
+        return;
+    }
+    check(host_rd32(buf) == 0x41615252u
+          && host_rd32(buf + 484) == 0x61417272u
+          && host_rd32(buf + 508) == 0xaa550000u,
+          "FSInfo signatures are valid");
+    free_count = host_rd32(buf + 488);
+    next_free  = host_rd32(buf + 492);
+    if (unknown) {
+        check(free_count == 0xffffffffu && next_free == 0xffffffffu,
+              "FSInfo count and hint are unknown after FAT update");
+    } else {
+        check(free_count != 0xffffffffu && next_free >= 2,
+              "generated FSInfo starts with known count and hint");
+    }
+}
+
+static void check_active_fat(const test_layout *layout,
+                             const unsigned char *readme,
+                             unsigned int readme_len)
+{
+    static unsigned char saved[IMAGE_BYTES];
+    static unsigned char bpb[SECTOR];
+    static unsigned char payload[64];
+    fat_file             f;
+    unsigned int         inactive;
+    unsigned int         active;
+    int                  rc;
+    int                  prepared;
+
+    rc = snapshot_image(saved);
+    check(rc == 0, "snapshot before active FAT test");
+    if (rc != 0) {
+        return;
+    }
+
+    prepared = fat_dev_read(layout->base, bpb) == 0;
+    if (prepared) {
+        host_wr16(bpb + 40, 0x0081u); /* mirroring off, FAT1 active */
+        prepared = fat_dev_write(layout->base, bpb) == 0
+                && set_fat_entry_copy(layout, 0, 3, 0x0ffffff8u) == 0
+                && set_fat_entry_copy(layout, 0, 9, 0) == 0
+                && set_fat_entry_copy(layout, 1, 9, 0x0ffffff8u) == 0;
+    }
+    check(prepared, "prepare non-mirrored active FAT1 image");
+    if (prepared) {
+        rc = fat_mount();
+        check(rc == FAT_OK, "mount non-mirrored active FAT1 image");
+        if (rc == FAT_OK) {
+            check_file("README  TXT", readme_len, readme,
+                       "README through active FAT1");
+            fill_payload(payload, sizeof payload, 41);
+            rc = fat_write_file("ACTIVE  BIN", payload, sizeof payload);
+            check(rc == FAT_OK, "write through active FAT1");
+            if (rc == FAT_OK) {
+                check_file("ACTIVE  BIN", sizeof payload, payload,
+                           "ACTIVE.BIN through FAT1");
+                rc = fat_open("ACTIVE  BIN", &f);
+                check(rc == FAT_OK && f.start_cluster != 9,
+                      "allocator ignores stale free entry in FAT0");
+                if (rc == FAT_OK) {
+                    check(get_fat_entry_copy(layout, 0, f.start_cluster,
+                                             &inactive) == 0
+                          && get_fat_entry_copy(layout, 1, f.start_cluster,
+                                               &active) == 0
+                          && inactive == 0 && active >= 0x0ffffff8u,
+                          "non-mirrored write updates only active FAT1");
+                }
+                check(get_fat_entry_copy(layout, 0, 9, &inactive) == 0
+                      && get_fat_entry_copy(layout, 1, 9, &active) == 0
+                      && inactive == 0 && active >= 0x0ffffff8u,
+                      "active FAT allocation preserves live cluster 9");
+            }
+        }
+    }
+
+    rc = restore_image(saved);
+    check(rc == 0, "restore image after active FAT test");
+    if (rc == 0) {
+        rc = fat_mount();
+        check(rc == FAT_OK, "remount restored mirrored image");
+    }
+}
+
 static void run(const char *path)
 {
     static unsigned char readme[2348];
@@ -396,6 +530,13 @@ static void run(const char *path)
         data[i] = (unsigned char) i;
     }
 
+    rc = load_layout(&layout);
+    check(rc == 0, "load FAT layout");
+    if (rc == 0) {
+        check_fsinfo(&layout, 0, "read generated FSInfo");
+        check_active_fat(&layout, readme, sizeof readme);
+    }
+
     /* 断片化チェーン 3 -> 5 -> 4 を追えること */
     check_file("README  TXT", sizeof readme, readme, "README.TXT");
     check_file("HELLO   TXT", sizeof hello - 1,
@@ -419,10 +560,24 @@ static void run(const char *path)
     /* 新規作成と cluster chain の伸縮を同じエントリで確認する．
      * 1 cluster = 1024 byte のテスト画像なので，3 -> 1 -> 0 -> 2 cluster となる． */
     fill_payload(boot, 2500, 3);
+    snap_ok = snapshot_image(image_before) == 0;
+    check(snap_ok, "snapshot before FSInfo write failure");
+    fail_writes_after = 0;
+    rc = fat_write_file("BOOT    BIN", boot, 2500);
+    check(rc == FAT_ERR_IO, "FSInfo write failure returns FAT_ERR_IO");
+    check(fail_writes_after == -1, "FSInfo write failure was injected");
+    fail_writes_after = -1;
+    if (snap_ok) {
+        check_image_unchanged("FSInfo failure leaves image unchanged");
+    }
+
     rc = fat_write_file("BOOT    BIN", boot, 2500);
     check(rc == FAT_OK, "BOOT.BIN を新規作成");
     if (rc == FAT_OK) {
         check_file("BOOT    BIN", 2500, boot, "BOOT.BIN new");
+        if (load_layout(&layout) == 0) {
+            check_fsinfo(&layout, 1, "read invalidated FSInfo");
+        }
     }
 
     fill_payload(boot, 600, 7);

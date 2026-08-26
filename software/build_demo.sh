@@ -51,13 +51,15 @@ OUT=build/software
 mkdir -p "$OUT"
 
 OPT=-O2
+SIZE_FLAGS=
 if [ "$PROG" = tfwrite ]; then
     # FAT rollback paths make this image size-bound; TF/UART I/O dominates
     # runtime, so optimize this receiver for the 8 KB on-chip RAM instead.
     OPT=-Os
+    SIZE_FLAGS="-ffunction-sections -fdata-sections -Wl,--gc-sections"
 fi
 
-riscv64-unknown-elf-gcc -march=rv32im -mabi=ilp32 "$OPT" \
+riscv64-unknown-elf-gcc -march=rv32im -mabi=ilp32 "$OPT" $SIZE_FLAGS \
     -nostdlib -nostartfiles -ffreestanding \
     -mno-relax -msmall-data-limit=0 \
     -Wall -Wextra \

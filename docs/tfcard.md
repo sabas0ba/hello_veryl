@@ -51,7 +51,7 @@ Tang Nano 9K の TF カードスロットを SPI モードで制御し，カー�
 flowchart TB
     subgraph d27["27 MHz ドメイン（単一，rPLL 不使用）"]
         FAT["Fat32Reader (v2)<br>MBR/BPB 解釈・ルート dir 照合・<br>クラスタチェーン追跡"]
-        TFC["TfCtrl (v1)<br>初期化 FSM + CMD17 単発リード<br>CRC16 検査（エラー報告）"]
+        TFC["TfCtrl (v2)<br>初期化 FSM + CMD17/24 単発入出力<br>CRC16 検査・付与"]
         SPI["SpiMaster<br>mode 0，分周切替<br>init 337.5 kHz / data 13.5 MHz"]
     end
     APP["利用側<br>(デモ: LCD 表示 / 将来: RISC-V)"] -- "要求 IF + stream_if (8bit)" --> FAT
@@ -62,12 +62,12 @@ flowchart TB
 
 - **27 MHz 単一ドメインで実装する**（既存方針の例外を増やさない）．SCK は
   27 MHz からの分周で生成し，rPLL・CDC は不要
-- v1 (TfCtrl) と v2 (Fat32Reader) は層として分離し，v1 単体でも
+- ブロック層 (TfCtrl) と FAT32 層 (Fat32Reader) は分離し，TfCtrl 単体でも
   raw 論理ブロックアクセスとして利用可能とする
 
 ### インタフェース
 
-- **要求 IF**（v1）: valid/ready + `lba[31:0]`．応答は done パルス + エラー種別
+- **ブロック要求 IF**: valid/ready + `lba[31:0]` + read/write．応答は done パルス + エラー種別
   （なし / init 未完 / タイムアウト / CRC / 非対応カード / 応答異常）
 - **データ IF**: 既存 `stream_if` の流儀による 8 bit ストリーム
   （512 バイト/ブロック）．AXI4-Lite はレジスタ型 IF でありブロック転送に
@@ -114,7 +114,7 @@ PDF 原本で行う（残課題）．
   （カード未挿入時に MISO が 0xFF に読め，タイムアウト検出が安定する）
 - Sipeed 公式サンプルのピン割当（36-39）とも一致
 
-## プロトコル仕様（v1 スコープ）
+## ブロック入出力プロトコル仕様
 
 実装採用値（Simplified Specification 取得後に照合，「一次資料」節）:
 
@@ -123,6 +123,7 @@ PDF 原本で行う（残課題）．
 | NCR（コマンド→R1 応答） | 最大 8 バイト（0xFF を 8 バイト読んで MSB=0 が来なければ応答タイムアウト） |
 | ACMD41 ポーリング上限 | 3000 回（337.5 kHz で約 1.2 s > 仕様の初期化タイムアウト 1 s） |
 | データトークン待ち上限 | 262144 バイト（13.5 MHz で約 155 ms > 仕様のリードタイムアウト 100 ms） |
+| CMD24 busy 待ち上限 | 450000 バイト（13.5 MHz で約 267 ms > 仕様の書込みタイムアウト 250 ms） |
 | コマンド間ギャップ | CS# High で 0xFF を 1 バイト送出 |
 | R1 ビット | bit6-0 = param err / addr err / erase seq err / CRC err / illegal cmd / erase reset / idle |
 
@@ -146,13 +147,17 @@ CRC7 は全コマンドで正しい値を計算して送出する（初期化後
 512 バイト + CRC16 受信．CRC16 は検査しエラーフラグとして報告する
 （データは検査完了前にストリーム済みのため，リトライは利用側判断）．
 
+**ブロックライト**: CMD24（引数 = LBA）→ R1 → データトークン (FEh) →
+512 バイト + CRC16 送信 → データ応答 → busy解除待ち．busy待ちはリードの
+データトークン待ちとは別の上限を使う．
+
 **CMD59（CRC 有効化）は発行しない**（当初 TBD の確定）．SPI モードの既定では
 コマンド CRC7 は CMD0/CMD8 以外検査されず，リードデータの CRC16 はカードが常に
-送出するため，受信側検査だけで v1 の目的（エラー検出と報告）は満たせる．
+送出するため，受信側検査だけでブロック層の目的（エラー検出と報告）は満たせる．
 spike の実測で CRC 不一致が観測された場合に再検討する．
 
-**発行コマンドのホワイトリスト**: CMD0 / CMD8 / CMD55 / ACMD41 / CMD58 / CMD17．
-**これ以外（特に write 系 CMD24/25，erase 系）は FSM 上存在しない**．
+**発行コマンドのホワイトリスト**: CMD0 / CMD8 / CMD55 / ACMD41 / CMD58 / CMD17 / CMD24．
+**これ以外（特にマルチブロック CMD18/25，erase 系）は FSM 上存在しない**．
 
 ## FAT32 リーダ仕様（v2 スコープ）
 
