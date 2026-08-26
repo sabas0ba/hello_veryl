@@ -13,7 +13,9 @@ mkdir -p "$OUT" build/tf_test
 
 /opt/oss-cad-suite/py3bin/python3 scripts/gen_tf_test_image.py --raw build/tf_test
 
-gcc -std=c99 -O2 -Wall -Wextra \
+gcc -std=c99 -O2 -Wall -Wextra -Werror \
     -o "$OUT/fat32_host" verif/riscv/fat32_host.c software/fat32.c
 
 "$OUT/fat32_host" build/tf_test/sf.img build/tf_test/mbr.img
+/opt/oss-cad-suite/py3bin/python3 verif/riscv/fat32_verify.py \
+    build/tf_test/sf.img build/tf_test/mbr.img

@@ -31,6 +31,10 @@ case "$PLACE" in
     psram) CRT=software/crt0.S     ; LD=software/link_psram.ld ;;
     *)     echo "ERROR: 未知の配置 '$PLACE' (ram|psram)" >&2; exit 1 ;;
 esac
+if [ "$PROG" = tfwrite ] && [ "$PLACE" != ram ]; then
+    echo "ERROR: tfwrite must use ram; psram overlaps its receive buffer" >&2
+    exit 1
+fi
 
 EXTRA=""
 if [ -f "software/$PROG.srcs" ]; then
@@ -50,7 +54,16 @@ fi
 OUT=build/software
 mkdir -p "$OUT"
 
-riscv64-unknown-elf-gcc -march=rv32im -mabi=ilp32 -O2 \
+OPT=-O2
+SIZE_FLAGS=
+if [ "$PROG" = tfwrite ]; then
+    # FAT rollback paths make this image size-bound; TF/UART I/O dominates
+    # runtime, so optimize this receiver for the 8 KB on-chip RAM instead.
+    OPT=-Os
+    SIZE_FLAGS="-ffunction-sections -fdata-sections -Wl,--gc-sections"
+fi
+
+riscv64-unknown-elf-gcc -march=rv32im -mabi=ilp32 "$OPT" $SIZE_FLAGS \
     -nostdlib -nostartfiles -ffreestanding \
     -mno-relax -msmall-data-limit=0 \
     -Wall -Wextra \

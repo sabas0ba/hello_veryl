@@ -26,18 +26,46 @@ int fat_dev_read(unsigned int lba, unsigned char *buf)
 
     mmio_write(MMIO_TF_LBA, lba);
     mmio_write(MMIO_TF_CTRL, 1);
+    for (i = 0; i < 512u; i++) {
+        unsigned int st;
+        unsigned int v;
+
+        do {
+            st = mmio_read(MMIO_TF_CTRL);
+            if ((st & TF_BUSY) == 0u && (st & TF_RX_VALID) == 0u) {
+                return 1;
+            }
+        } while ((st & TF_RX_VALID) == 0u);
+
+        v = mmio_read(MMIO_TF_DATA);
+        if ((v & TF_RX_VALID) == 0u) {
+            return 1;
+        }
+        buf[i] = (unsigned char) v;
+    }
     while ((mmio_read(MMIO_TF_CTRL) & TF_BUSY) != 0u) {
     }
-    if ((mmio_read(MMIO_TF_CTRL) & TF_ERR) != 0u) {
-        return 1;
-    }
-    for (i = 0; i < 128u; i++) {
-        unsigned int w = mmio_read(TF_BUF + i * 4u);
+    return (mmio_read(MMIO_TF_CTRL) & TF_ERR) != 0u;
+}
 
-        buf[i * 4u + 0u] = (unsigned char) w;
-        buf[i * 4u + 1u] = (unsigned char) (w >> 8);
-        buf[i * 4u + 2u] = (unsigned char) (w >> 16);
-        buf[i * 4u + 3u] = (unsigned char) (w >> 24);
+int fat_dev_write(unsigned int lba, const unsigned char *buf)
+{
+    unsigned int i;
+
+    mmio_write(MMIO_TF_LBA, lba);
+    mmio_write(MMIO_TF_CTRL, 3); /* bit0 = 開始，bit1 = ライト */
+    for (i = 0; i < 512u; i++) {
+        unsigned int st;
+
+        do {
+            st = mmio_read(MMIO_TF_CTRL);
+            if ((st & TF_BUSY) == 0u) {
+                return 1;
+            }
+        } while ((st & TF_TX_SPACE) == 0u);
+        mmio_write(MMIO_TF_DATA, buf[i]);
     }
-    return 0;
+    while ((mmio_read(MMIO_TF_CTRL) & TF_BUSY) != 0u) {
+    }
+    return (mmio_read(MMIO_TF_CTRL) & TF_ERR) != 0u;
 }

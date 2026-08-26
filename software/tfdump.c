@@ -1,4 +1,4 @@
-/* TF カードのセクタリーダ (RvTfSector) を実機で確認する
+/* TF カードの byte-stream 入出力 (RvTfIo) を実機で確認する
  * (docs/riscv.md「TF カードからのブート」)
  *
  * FAT32 を介さない最下層の確認．初期化完了を待ち，LBA 0 を 1 セクタ読んで
@@ -10,8 +10,11 @@
  *   2 = セクタ読み出しでエラー
  *   3 = ブートシグネチャが違う
  */
+#include "fat32.h"
 #include "tfdev.h"
 #include "uart.h"
+
+static unsigned char sec[512];
 
 int main(void)
 {
@@ -30,9 +33,12 @@ int main(void)
     put_hex(mmio_read(MMIO_TF_CTRL), 8);
     put_str("\r\n");
 
-    mmio_write(MMIO_TF_LBA, 0);
-    mmio_write(MMIO_TF_CTRL, 1);
-    while ((mmio_read(MMIO_TF_CTRL) & TF_BUSY) != 0u) {
+    if (fat_dev_read(0, sec) != 0) {
+        st = mmio_read(MMIO_TF_CTRL);
+        put_str("READ ERR st=");
+        put_hex(st, 8);
+        put_str("\r\n");
+        return 2;
     }
     st = mmio_read(MMIO_TF_CTRL);
     if ((st & TF_ERR) != 0u) {
@@ -44,13 +50,18 @@ int main(void)
 
     put_str("LBA0:");
     for (i = 0; i < 8; i++) {
+        unsigned int off = (unsigned int) i * 4u;
+        unsigned int w   = (unsigned int) sec[off]
+                         | ((unsigned int) sec[off + 1u] << 8)
+                         | ((unsigned int) sec[off + 2u] << 16)
+                         | ((unsigned int) sec[off + 3u] << 24);
+
         put_char(' ');
-        put_hex(mmio_read(TF_BUF + (unsigned int) i * 4), 8);
+        put_hex(w, 8);
     }
     put_str("\r\n");
 
-    /* オフセット 508..511 = ワード 127．シグネチャは 510..511 = 上位 16 bit */
-    sig = mmio_read(TF_BUF + 127 * 4) >> 16;
+    sig = (unsigned int) sec[510] | ((unsigned int) sec[511] << 8);
     put_str("SIG=");
     put_hex(sig, 4);
     put_str("\r\n");

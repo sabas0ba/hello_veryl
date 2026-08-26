@@ -20,6 +20,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FONT_SRC = REPO_ROOT / "font" / "font8x16.txt"
 OUT_PATH = REPO_ROOT / "src" / "video" / "font_rom.veryl"
+HEX_PATH = REPO_ROOT / "font" / "font8x16.hex"
 
 GLYPH_ROWS = 16
 GLYPH_COLS = 8
@@ -113,12 +114,23 @@ def render_veryl(glyphs: dict[int, list[int]]) -> str:
     return "\n".join(out)
 
 
+def render_hex(glyphs: dict[int, list[int]]) -> str:
+    """Return 2048 bytes addressed as {ASCII code, glyph row}."""
+    data = [0] * ((CODE_MAX + 1) * GLYPH_ROWS)
+    for code, rows in glyphs.items():
+        for row, value in enumerate(rows):
+            data[code * GLYPH_ROWS + row] = value
+    return "\n".join(f"{value:02x}" for value in data) + "\n"
+
+
 def main() -> int:
     glyphs = parse_font(FONT_SRC.read_text(encoding="utf-8"))
     OUT_PATH.write_text(render_veryl(glyphs), encoding="utf-8", newline="\n")
+    HEX_PATH.write_text(render_hex(glyphs), encoding="ascii", newline="\n")
     covered = ", ".join(f"0x{c:02x}" for c in sorted(glyphs)[:3])
     print(f"generated {OUT_PATH.relative_to(REPO_ROOT)}: "
           f"{len(glyphs)} glyphs (first: {covered} ...)")
+    print(f"generated {HEX_PATH.relative_to(REPO_ROOT)}: 2048 bytes")
     return 0
 
 

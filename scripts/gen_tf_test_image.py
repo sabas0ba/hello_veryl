@@ -166,6 +166,24 @@ def build_fat() -> bytes:
     return bytes(fat)
 
 
+def build_fsinfo() -> bytes:
+    fat = build_fat()
+    data_clusters = (TOTSEC32 - RSVD - NFATS * FATSZ32) // SPC
+    free_clusters = []
+    for cluster in range(2, data_clusters + 2):
+        value = int.from_bytes(fat[cluster * 4:cluster * 4 + 4], "little")
+        if value & 0x0FFFFFFF == 0:
+            free_clusters.append(cluster)
+
+    s = bytearray(SECTOR)
+    s[0:4] = le(0x41615252, 4)       # FSI_LeadSig
+    s[484:488] = le(0x61417272, 4)   # FSI_StrucSig
+    s[488:492] = le(len(free_clusters), 4)
+    s[492:496] = le(free_clusters[0], 4)
+    s[508:512] = le(0xAA550000, 4)   # FSI_TrailSig
+    return bytes(s)
+
+
 def build_root_dir() -> bytes:
     d = bytearray(SPC * SECTOR)
     entries = [
@@ -209,6 +227,7 @@ def build_volume(part_start: int, with_mbr: bool) -> dict[int, bytes]:
         place(0, bytes(mbr))
 
     place(part_start, build_bpb())
+    place(part_start + 1, build_fsinfo())
     fat = build_fat()
     for k in range(NFATS):
         place(fat_start + k * FATSZ32, fat)

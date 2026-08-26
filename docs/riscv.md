@@ -496,7 +496,7 @@ PC 相対アドレッシングを使わず絶対アドレスの `lui`/`addi` と
 z バッファ（5.8 KB）だけは 8 KB に入らないので PSRAM（0x1001_0000）へ置く．
 1 点あたりの参照は 1〜2 回で，命令フェッチに比べれば少ない．
 
-## TF カードからのブート（段階 10 の設計．2026-08-24 時点で未実装）
+## TF カードからのブート（段階 10．2026-08-26 実機確認済み）
 
 TF カードからプログラムを読んで実行する．当初は既存の `Fat32Reader` を
 そのまま TopRv へ載せてハードウェアでロードする想定だったが，
@@ -515,44 +515,53 @@ TF カードからプログラムを読んで実行する．当初は既存の `
 TopRv は現状 6185 / 8640（71%）で空きは 2455．`Fat32Reader` だけで
 空きを食い潰し，`TfCtrl`・AXI の DMA・アービタ 1 段を足すと 9500 前後になる．
 
-### 採る方針: TF カードを MMIO 周辺機器にして FAT32 はソフトウェアで解く
+### 採った方針: TF カードを MMIO 周辺機器にして FAT32 はソフトウェアで解く
 
-ハードウェアには `TfCtrl` と 512 バイトのセクタバッファ（BSRAM 1 個）だけを置き，
-MMIO でセクタ番号を指定して読み，バッファを CPU から読む．
-FAT32 の解釈はオンチップ RAM（8 KB）上の C で書く．
+ハードウェアには `TfCtrl` と送受信各 1 byte の `RvTfIo` を置き，MMIO で
+セクタ番号と方向を指定する．512 byte のデータは `TF_DATA` を介して CPU が
+1 byte ずつ受け渡し，FAT32 の解釈と更新は C で行う．
 
-- 追加は 700 LUT 前後で収まり，TopRv は 81% 程度になる見込み
-- BSRAM は 20 個空いているのでセクタバッファは問題にならない
+- `TfCtrl` は stream の handshake 待ちで SCK を停止するため，CPU 側に実時間制約はない
+- セクタバッファと word/byte 変換を持たず，BSRAM と周辺ロジックを削減できる
 - `Fat32Reader` はハードウェアの画像デモ（既存 `Top`）で引き続き使う。
   こちらは CPU を積まないので資源に余裕がある
 
-CPU が解く側は，ブート ROM ではなくオンチップ RAM 常駐の C で書く．
-ROM は 8 KB しかなく，FAT32 の解釈を収めるには足りないため，
-段階的に「ROM の最小ローダが先頭セクタ群を読む」形にするか，
-UART モニタと同居させるかは実装時に決める．
+CPU が解く側はオンチップ RAM 常駐の C で書き，UART ブートモニタからロードする．
+`tfboot` はカード上の `BOOT.BIN` を PSRAM へロードして次段へ分岐する．
 
-### 実装済み: セクタリーダ `RvTfSector`（2026-08-24，実機で動作）
+### byte-stream 周辺機器 `RvTfIo`
 
-`TfCtrl` に 512 バイトのセクタバッファ（`$std::ram` 128 語 x 32 bit）を付けた
-周辺機器．受信バイトを 4 バイトずつリトルエンディアンでワードに組んで書く．
+`TfCtrl` のセクタリード（CMD17）とセクタライト（CMD24）を MMIO に接続する．
+`RvTfIo` は送受信各 1 byte のバッファを持ち，`rx_valid` / `tx_space` で
+CPU と handshake する．
 
 | アドレス | 幅 | 動作 |
 | --- | --- | --- |
-| `0x2000_0050` TF_CTRL | W | 1 を書くとセクタ読み出しを開始する |
-| `0x2000_0050` TF_CTRL | R | 状態語（bit0 busy / bit1 init_done / bit4:2 init_err / bit7:5 err） |
-| `0x2000_0054` TF_LBA | R/W | 読み出す論理ブロックアドレス |
-| `0x2000_1000`–`0x2000_11FF` | R | セクタバッファ（512 バイト） |
+| `0x2000_0050` TF_CTRL | W | bit0 = 開始，bit1 = 方向（0 = リード，1 = ライト） |
+| `0x2000_0050` TF_CTRL | R | bit0 busy / bit1 init_done / bit4:2 init_err / bit7:5 err / bit8 rx_valid / bit9 tx_space |
+| `0x2000_0054` TF_LBA | R/W | 入出力する論理ブロックアドレス |
+| `0x2000_0058` TF_DATA | R | bit8 = rx_valid，bit7:0 = データ．読むと 1 byte 消費する |
+| `0x2000_0058` TF_DATA | W | 下位 8 bit をライトデータとして送出する |
 
-MMIO 内の分割は `addr[12]`（0 = レジスタ，1 = セクタバッファ）．
+CMD17/CMD24 の CRC16 回路は共有する．CMD24 の busy 待ちはデータトークン待ちと
+別カウンタにし，13.5 MHz 時に約267 msとなる450,000 byteを上限とする．
+フォント ROM はシミュレーションでは既存の Veryl モデルを使い，合成時だけ
+`font/font8x16.hex` を初期値とする1個の BSRAM へ
+置き換えた．機能と1クロックの読出し遅延は同じである．
 
-資源は **LUT4 6185 → 6916（71% → 80%）**，BSRAM 6 → 7．見積り（+700 前後）どおり．
-タイミングは clk_mem 124.97 MHz / i_clk 36.88 MHz でいずれも制約を満たす．
+フルビルド結果は次のとおり．ROM内容によって組合せROMの最適化結果が変わるため，
+通常用と実機試験用を分けて記録する．いずれもBSRAMは7 / 26である．
+
+| ブートROM | LUT4 | `psram.clk_mem`（制約54 MHz） | `console.i_clk`（制約27 MHz） |
+| --- | --- | --- | --- |
+| `hello`（通常状態） | 6487 / 8640（75%） | 98.51 MHz | 36.44 MHz |
+| `monitor`（XMODEM実機試験） | 7239 / 8640（83%） | 83.53 MHz | 38.86 MHz |
 
 `software/tfdump.c` を流し込んで実機で確認した結果:
 
 ```
 TF
-INIT OK st=00000002
+INIT OK st=00000202
 LBA0: 4d9058eb 534f4453 00302e35 0afe1002 00000002 0000f800 00ff003f 00000000
 SIG=aa55
 R00000000
@@ -563,7 +572,7 @@ R00000000
 LBA 0 に直接ある（`bytes_per_sector` = 512，`sectors_per_cluster` = 16，
 `num_fats` = 2，`hidden_sectors` = 0）．
 
-### 実装済み: FAT32 の読み出し（ソフトウェア）
+### FAT32 の読み書き（ソフトウェア）
 
 `software/fat32.c`．MBR/BPB の判定規則はハードウェアの `Fat32Reader` と
 そろえてある（JMP + `BytsPerSec` = 512 + シグネチャならスーパーフロッピー，
@@ -571,9 +580,13 @@ LBA 0 に直接ある（`bytes_per_sector` = 512，`sectors_per_cluster` = 16，
 LFN は解釈せず 8.3 名だけを見る．ボリュームラベル・ディレクトリ・
 削除済みエントリは読み飛ばす．
 
-セクタの読み出しだけを `fat_dev_read()` として外へ出しているので，
+セクタI/Oを `fat_dev_read()` / `fat_dev_write()` として外へ出しているので，
 実機（`software/tfdev.c`，MMIO 経由）とホスト（`verif/riscv/fat32_host.c`，
-ファイル経由）で同じコードが動く．
+ファイル経由）で同じコードが動く．`fat_write_file()` は8.3名の既存ファイルの
+上書きと新規作成に対応し，クラスタチェーンの伸縮，解放，ディレクトリエントリの
+サイズ・開始クラスタ更新を行う．`BPB_ExtFlags` でmirroringが有効ならFAT全コピーを
+同期更新し，無効なら指定されたactive FATだけを参照・更新する．有効なFSInfoが持つ
+空きクラスタ数と次候補は，FAT変更前にunknown (`0xFFFFFFFF`) へ変更する．
 
 #### 検証
 
@@ -583,12 +596,23 @@ LFN は解釈せず 8.3 名だけを見る．ボリュームラベル・ディ�
 
 - `README.TXT` 2348 byte（クラスタチェーンが 3 → 5 → 4 と断片化している）
 - `HELLO.TXT` 23 byte，`DATA.BIN` 256 byte
+- 予約領域とFAT領域が総セクタ数を超える，またはroot clusterがデータ範囲外の
+  破損BPBをマウントしないこと
 - 存在しない名前，サブディレクトリ，ボリュームラベル，削除済みエントリを
   拾わないこと
+- 既存ファイルの拡張・縮小と新規作成後に内容を再読出しできること
+- 複数FATコピーが一致し，クラスタの二重所有と解放漏れがないこと
+- mirroring 無効・active FAT1 のとき，stale FAT0 を読まずFAT1だけを更新すること
+- 有効なFSInfoをFAT変更前にunknown化し，その書込み失敗時はイメージを変更しないこと
+- 複数クラスタのルートディレクトリ走査中にFAT読出しが失敗した場合，
+  ファイル未検出と誤認せずI/Oエラーを返し，重複エントリを作らないこと
+- ペイロード・ディレクトリ・FAT各コピーへの書き込み障害を注入しても，
+  更新確定前は旧ファイルを保持し，更新確定後は旧チェーンの解放を再試行して
+  FATコピー間の整合を保つこと
 
 `verif/riscv/check.sh` から呼ばれ，CI の verif ジョブで実行される．
 
-### 実機での確認（2026-08-24）
+### 実機での確認（2026-08-26）
 
 実カード（super-floppy FAT32，8 KB クラスタ）に対して:
 
@@ -613,6 +637,44 @@ OK
 18054 = 54（ヘッダ）+ 300（100 px x 3 byte，4 byte 境界）x 60．
 複数クラスタにまたがる読み出しと PSRAM へのバイト書き込みが通っている．
 
+### XMODEM-CRC による `BOOT.BIN` 書き込み
+
+`software/tfwrite.c` は XMODEM-CRC 受信器から PSRAM へペイロードを受け取り，
+`fat_write_file()` でルートディレクトリの `BOOT.BIN` を作成または上書きする．
+先頭4 byteに実ファイル長をリトルエンディアンで付け，XMODEM の128-byte境界の
+パディングと区別する．ホスト側は `scripts/rv-xmodem.ps1` を使う．
+受信先のPSRAMと実行領域が重ならないよう，`tfwrite` は `ram` 配置だけを許可し，
+`software/build_demo.sh tfwrite psram` はエラーにする．このガードもCIで検証する．
+
+`verif/riscv/xmodem_check.sh` は `software/xmodem.c` を表駆動のホスト側 UART
+モデルと組み合わせ，通常転送，重複ブロック，CRCエラー，部分ブロックの
+タイムアウト，`SOH` 欠落，順序違反，開始前ノイズ，送信側キャンセル，受信領域
+オーバーフロー，mtime wrap，`out_len == NULL`，再試行上限の12ケースを検証する．
+`verif/riscv/check.sh` から呼ばれ，CI の verif ジョブで実行される．
+
+```powershell
+.\scripts\rv-xmodem.ps1 `
+    -Receiver build\software\tfwrite.bin `
+    -Bin build\software\tfdump.bin -Port COM4 `
+    -DropSohOnceAtBlock 2
+```
+
+`DropSohOnceAtBlock` は指定ブロックの初回送信から `SOH` だけを除き，受信側の
+`NAK` を必須とした後に完全なブロックを再送する障害注入である（0で無効）．
+2026-08-26 の実機試験ではブロック2へ注入して `NAK` と再送を確認し，13ブロック，
+1,648-byteのファイルをカードへ書いて対象側の再オープンとサイズ照合まで成功した．
+
+```
+TFWRITE
+XMODEM
+sending 1648 byte as 13 XMODEM blocks
+injecting lost SOH at block 2
+  block 2: NAK received, retransmitting
+WRITE 1648 byte
+WROTE BOOT.BIN
+R00000000
+```
+
 ### 第一段ローダ `software/tfboot.c`
 
 `BOOT.BIN` を PSRAM の 0x1000_0000 へ読み込んでそこへ分岐する．
@@ -628,9 +690,19 @@ NO BOOT    BIN
 R00000003
 ```
 
-**残っているのは実カードへ `BOOT.BIN` を置いての通し確認だけ**である．
-`build/software/torus.bin` を `BOOT.BIN` としてカードのルートへ置けば，
-`tfboot` から LCD デモが起動する．
+XMODEM で書いた `tfdump.bin` を `BOOT.BIN` として `tfboot` から再ロードし，
+FAT32 読出し，PSRAM への配置，PSRAM 上からの実行を通して確認した．
+
+```
+TFBOOT
+LOAD 1648 byte
+GO
+TF
+INIT OK st=00000202
+LBA0: 4d9058eb 534f4453 00302e35 0afe1002 00000002 0000f800 00ff003f 00000000
+SIG=aa55
+R00000000
+```
 
 ## パッチ計画
 
@@ -646,14 +718,14 @@ R00000003
 | 8 | M 拡張（乗除算） | L1 / L2 / L4 | 済（実機で MULDIV OK） |
 | 9 | Zicsr・トラップ・タイマ（CLINT） | L1 / L2 / L4 | 済（L2 60 件 pass．実機でも同 60 件 pass） |
 | 9a | UART ブートモニタと実機 riscv-tests ランナー | L4 | 済（実機 60 / 60 pass） |
-| 10 | TF カードからのプログラムロード（第一段ローダ） | L1 / L4 | ほぼ済（実機で TF → FAT32 → PSRAM を確認．カードへ BOOT.BIN を置いた通し確認が残る） |
+| 10 | TF カードへの XMODEM 書き込みとプログラムロード（第一段ローダ） | L1 / L4 | 済（実機で XMODEM → FAT32 書込み → TF 再読出し → PSRAM 実行を確認） |
 | 11 | LCD デモ（ASCII アート） | L4 | 済（実機で 1.82 fps．「LCD デモ」節） |
 
 ## 残課題・リスク
 
 | 項目 | 内容 | 対応 |
 | --- | --- | --- |
-| LUT 予算 | 既存 Top が 77%，TopRv が 71%．単純合算では同居できない（実測値は「TF カードからのブート」節） | FAT32 の解釈をソフトウェアへ移す |
+| LUT 予算 | 既存 Top が77%，TopRv が通常75%・モニタ83%．単純合算では同居できない（実測値は「TF カードからのブート」節） | FAT32 はソフトウェアで処理し，フォント ROM を合成時に BSRAM 化する |
 | PSRAM サブシステムの重複 | `PsramSubsystem` へ切り出したが，既存 `Top` はまだインライン実装のまま | `Top` 側も `PsramSubsystem` へ寄せる（挙動不変のリファクタ．実機再確認が要る） |
 | PSRAM 帯域 | 2.25 MB/s．PSRAM 上のコード実行は 0.5 MIPS 相当 | ホットパスは BSRAM 常駐とする．線形バースト実装と BSRAM 命令キャッシュは段階 7 以降で評価 |
 | Zifencei（`fence.i`） | 対象外のため rv32ui の `fence_i` を除外している | 自己書き換えコードを扱う段階になったら再検討 |

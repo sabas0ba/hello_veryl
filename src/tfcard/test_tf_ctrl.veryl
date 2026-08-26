@@ -41,6 +41,10 @@ module test_tf_ctrl_read {
         o_done     : done     ,
         o_err      : err      ,
         data       : dst      ,
+        i_req_write: 1'b0     ,
+        i_wr_valid : 1'b0     ,
+        i_wr_data  : 8'b0     ,
+        o_wr_ready : _        ,
         o_sclk     : sclk     ,
         o_mosi     : mosi     ,
         o_cs_n     : cs_n     ,
@@ -63,9 +67,14 @@ module test_tf_ctrl_read {
         i_cfg_never_ready: 1'b0    ,
         i_cfg_no_token   : 1'b0    ,
         i_cfg_corrupt_crc: 1'b0    ,
+        i_cfg_wr_err     : 1'b0    ,
         o_img_lba        : img_lba ,
         o_img_off        : img_off ,
         i_img_data       : img_data,
+        o_wr_en          : _       ,
+        o_wr_lba         : _       ,
+        o_wr_off         : _       ,
+        o_wr_data        : _       ,
     );
 
     // ディスクイメージ: byte = LBA 下位 + オフセット下位 (mod 256)
@@ -202,6 +211,10 @@ module test_tf_ctrl_legacy_cmd8 {
         o_done     : done     ,
         o_err      : err      ,
         data       : dst      ,
+        i_req_write: 1'b0     ,
+        i_wr_valid : 1'b0     ,
+        i_wr_data  : 8'b0     ,
+        o_wr_ready : _        ,
         o_sclk     : sclk     ,
         o_mosi     : mosi     ,
         o_cs_n     : cs_n     ,
@@ -220,9 +233,14 @@ module test_tf_ctrl_legacy_cmd8 {
         i_cfg_never_ready: 1'b0    ,
         i_cfg_no_token   : 1'b0    ,
         i_cfg_corrupt_crc: 1'b0    ,
+        i_cfg_wr_err     : 1'b0    ,
         o_img_lba        : img_lba ,
         o_img_off        : img_off ,
         i_img_data       : img_data,
+        o_wr_en          : _       ,
+        o_wr_lba         : _       ,
+        o_wr_off         : _       ,
+        o_wr_data        : _       ,
     );
 
     assign img_data = img_lba[7:0] + img_off[7:0];
@@ -281,6 +299,10 @@ module test_tf_ctrl_ccs0 {
         o_done     : done     ,
         o_err      : err      ,
         data       : dst      ,
+        i_req_write: 1'b0     ,
+        i_wr_valid : 1'b0     ,
+        i_wr_data  : 8'b0     ,
+        o_wr_ready : _        ,
         o_sclk     : sclk     ,
         o_mosi     : mosi     ,
         o_cs_n     : cs_n     ,
@@ -299,9 +321,14 @@ module test_tf_ctrl_ccs0 {
         i_cfg_never_ready: 1'b0    ,
         i_cfg_no_token   : 1'b0    ,
         i_cfg_corrupt_crc: 1'b0    ,
+        i_cfg_wr_err     : 1'b0    ,
         o_img_lba        : img_lba ,
         o_img_off        : img_off ,
         i_img_data       : img_data,
+        o_wr_en          : _       ,
+        o_wr_lba         : _       ,
+        o_wr_off         : _       ,
+        o_wr_data        : _       ,
     );
 
     assign img_data = img_lba[7:0] + img_off[7:0];
@@ -360,6 +387,10 @@ module test_tf_ctrl_acmd41_timeout {
         o_done     : done     ,
         o_err      : err      ,
         data       : dst      ,
+        i_req_write: 1'b0     ,
+        i_wr_valid : 1'b0     ,
+        i_wr_data  : 8'b0     ,
+        o_wr_ready : _        ,
         o_sclk     : sclk     ,
         o_mosi     : mosi     ,
         o_cs_n     : cs_n     ,
@@ -378,9 +409,14 @@ module test_tf_ctrl_acmd41_timeout {
         i_cfg_never_ready: 1'b1    , // ACMD41 が idle のまま
         i_cfg_no_token   : 1'b0    ,
         i_cfg_corrupt_crc: 1'b0    ,
+        i_cfg_wr_err     : 1'b0    ,
         o_img_lba        : img_lba ,
         o_img_off        : img_off ,
         i_img_data       : img_data,
+        o_wr_en          : _       ,
+        o_wr_lba         : _       ,
+        o_wr_off         : _       ,
+        o_wr_data        : _       ,
     );
 
     assign img_data = img_lba[7:0] + img_off[7:0];
@@ -440,6 +476,10 @@ module test_tf_ctrl_token_timeout {
         o_done     : done     ,
         o_err      : err      ,
         data       : dst      ,
+        i_req_write: 1'b0     ,
+        i_wr_valid : 1'b0     ,
+        i_wr_data  : 8'b0     ,
+        o_wr_ready : _        ,
         o_sclk     : sclk     ,
         o_mosi     : mosi     ,
         o_cs_n     : cs_n     ,
@@ -458,9 +498,14 @@ module test_tf_ctrl_token_timeout {
         i_cfg_never_ready: 1'b0    ,
         i_cfg_no_token   : 1'b1    , // データトークンを送らない
         i_cfg_corrupt_crc: 1'b0    ,
+        i_cfg_wr_err     : 1'b0    ,
         o_img_lba        : img_lba ,
         o_img_off        : img_off ,
         i_img_data       : img_data,
+        o_wr_en          : _       ,
+        o_wr_lba         : _       ,
+        o_wr_off         : _       ,
+        o_wr_data        : _       ,
     );
 
     assign img_data = img_lba[7:0] + img_off[7:0];
@@ -541,6 +586,10 @@ module test_tf_ctrl_crc_error {
         o_done     : done     ,
         o_err      : err      ,
         data       : dst      ,
+        i_req_write: 1'b0     ,
+        i_wr_valid : 1'b0     ,
+        i_wr_data  : 8'b0     ,
+        o_wr_ready : _        ,
         o_sclk     : sclk     ,
         o_mosi     : mosi     ,
         o_cs_n     : cs_n     ,
@@ -559,9 +608,14 @@ module test_tf_ctrl_crc_error {
         i_cfg_never_ready: 1'b0    ,
         i_cfg_no_token   : 1'b0    ,
         i_cfg_corrupt_crc: 1'b1    , // CRC16 上位バイトを破壊
+        i_cfg_wr_err     : 1'b0    ,
         o_img_lba        : img_lba ,
         o_img_off        : img_off ,
         i_img_data       : img_data,
+        o_wr_en          : _       ,
+        o_wr_lba         : _       ,
+        o_wr_off         : _       ,
+        o_wr_data        : _       ,
     );
 
     assign img_data = img_lba[7:0] + img_off[7:0];
@@ -606,6 +660,156 @@ module test_tf_ctrl_crc_error {
         }
         $assert(done == 1'b1, "crc: done");
         $assert(err == TfTypes::Error::crc, "crc: crc error");
+        $finish();
+    }
+}
+
+#[test(test_tf_ctrl_write_busy)]
+module test_tf_ctrl_write_busy {
+    const MaxWait: u32 = 100_000;
+
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen ( clk );
+
+    inst dst: stream_if;
+
+    var sclk: logic;
+    var mosi: logic;
+    var miso: logic;
+    var cs_n: logic;
+
+    var req_valid: logic            ;
+    var req_ready: logic            ;
+    var init_done: logic            ;
+    var init_err : TfTypes::Error   ;
+    var done     : logic            ;
+    var err      : TfTypes::Error   ;
+    var wr_valid : logic            ;
+    var wr_data  : logic         <8>;
+    var wr_ready : logic            ;
+
+    var img_lba : logic<32>;
+    var img_off : logic<9> ;
+    var img_data: logic<8> ;
+
+    var card_wr_en  : logic    ;
+    var card_wr_lba : logic<32>;
+    var card_wr_off : logic<9> ;
+    var card_wr_data: logic<8> ;
+    var wr_seen     : logic<10>;
+    var expb        : logic<8> ;
+
+    inst dut: TfCtrl #(
+        InitDivider      : 8 ,
+        TokenMaxBytes    : 4 ,
+        WriteBusyMaxBytes: 16,
+    ) (
+        i_clk      : clk      ,
+        i_rst      : rst      ,
+        i_req_valid: req_valid,
+        i_req_lba  : 32'd7    ,
+        i_req_write: 1'b1     ,
+        o_req_ready: req_ready,
+        o_init_done: init_done,
+        o_init_err : init_err ,
+        o_done     : done     ,
+        o_err      : err      ,
+        data       : dst      ,
+        i_wr_valid : wr_valid ,
+        i_wr_data  : wr_data  ,
+        o_wr_ready : wr_ready ,
+        o_sclk     : sclk     ,
+        o_mosi     : mosi     ,
+        o_cs_n     : cs_n     ,
+        i_miso     : miso     ,
+    );
+
+    inst card: TfCardModel #(
+        NcrBytes     : 1,
+        Acmd41Polls  : 2,
+        DataWaitBytes: 2,
+        BusyBytes    : 8,
+    ) (
+        i_clk            : clk         ,
+        i_rst            : rst         ,
+        i_sclk           : sclk        ,
+        i_cs_n           : cs_n        ,
+        i_mosi           : mosi        ,
+        o_miso           : miso        ,
+        i_cfg_legacy_cmd8: 1'b0        ,
+        i_cfg_ccs        : 1'b1        ,
+        i_cfg_never_ready: 1'b0        ,
+        i_cfg_no_token   : 1'b0        ,
+        i_cfg_corrupt_crc: 1'b0        ,
+        i_cfg_wr_err     : 1'b0        ,
+        o_img_lba        : img_lba     ,
+        o_img_off        : img_off     ,
+        i_img_data       : img_data    ,
+        o_wr_en          : card_wr_en  ,
+        o_wr_lba         : card_wr_lba ,
+        o_wr_off         : card_wr_off ,
+        o_wr_data        : card_wr_data,
+    );
+
+    assign img_data = img_lba[7:0] + img_off[7:0];
+
+    always_ff (clk, rst) {
+        if_reset {
+            wr_seen = 0;
+        } else if card_wr_en {
+            $assert_continue(card_wr_lba == 32'd7, "write: LBA");
+            $assert_continue(card_wr_off == wr_seen[8:0], "write: offset");
+            $assert_continue(card_wr_data == wr_seen[7:0], "write: data");
+            wr_seen          = wr_seen + 1;
+        }
+    }
+
+    initial {
+        req_valid  = 0;
+        wr_valid   = 0;
+        wr_data    = 0;
+        dst.ready  = 0;
+        rst.assert();
+
+        for _w in 0..MaxWait {
+            if init_done == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        $assert(init_done == 1'b1, "write: init done");
+        $assert(init_err == TfTypes::Error::none, "write: init no error");
+        $assert(req_ready == 1'b1, "write: request ready");
+
+        req_valid = 1;
+        clk.next (1);
+        req_valid = 0;
+
+        expb = 0;
+        for _n in 0..512 {
+            wr_data  = expb;
+            wr_valid = 1;
+            for _w in 0..MaxWait {
+                if wr_ready == 1'b1 {
+                    break;
+                }
+                clk.next(1);
+            }
+            $assert_continue(wr_ready == 1'b1, "write: source handshake");
+            wr_valid         = 0;
+            clk.next        (1);
+            expb             = expb + 1;
+        }
+
+        for _w in 0..MaxWait {
+            if done == 1'b1 {
+                break;
+            }
+            clk.next(1);
+        }
+        $assert(done == 1'b1, "write: done after extended busy");
+        $assert(err == TfTypes::Error::none, "write: no busy timeout");
+        $assert(wr_seen == 10'd512, "write: all bytes reached card");
         $finish();
     }
 }

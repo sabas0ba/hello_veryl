@@ -52,6 +52,10 @@ module test_fat32_reader_main {
         o_done     : blk_done     ,
         o_err      : blk_err      ,
         data       : blk_st       ,
+        i_req_write: 1'b0         ,
+        i_wr_valid : 1'b0         ,
+        i_wr_data  : 8'b0         ,
+        o_wr_ready : _            ,
         o_sclk     : sclk         ,
         o_mosi     : mosi         ,
         o_cs_n     : cs_n         ,
@@ -70,9 +74,14 @@ module test_fat32_reader_main {
         i_cfg_never_ready: 1'b0    ,
         i_cfg_no_token   : 1'b0    ,
         i_cfg_corrupt_crc: 1'b0    ,
+        i_cfg_wr_err     : 1'b0    ,
         o_img_lba        : img_lba ,
         o_img_off        : img_off ,
         i_img_data       : img_data,
+        o_wr_en          : _       ,
+        o_wr_lba         : _       ,
+        o_wr_off         : _       ,
+        o_wr_data        : _       ,
     );
 
     assign img_data = TfTestImg::Byte(img_lba, img_off);
@@ -375,6 +384,10 @@ module test_fat32_reader_superfloppy {
         o_done     : blk_done     ,
         o_err      : blk_err      ,
         data       : blk_st       ,
+        i_req_write: 1'b0         ,
+        i_wr_valid : 1'b0         ,
+        i_wr_data  : 8'b0         ,
+        o_wr_ready : _            ,
         o_sclk     : sclk         ,
         o_mosi     : mosi         ,
         o_cs_n     : cs_n         ,
@@ -393,9 +406,14 @@ module test_fat32_reader_superfloppy {
         i_cfg_never_ready: 1'b0    ,
         i_cfg_no_token   : 1'b0    ,
         i_cfg_corrupt_crc: 1'b0    ,
+        i_cfg_wr_err     : 1'b0    ,
         o_img_lba        : img_lba ,
         o_img_off        : img_off ,
         i_img_data       : img_data,
+        o_wr_en          : _       ,
+        o_wr_lba         : _       ,
+        o_wr_off         : _       ,
+        o_wr_data        : _       ,
     );
 
     // スーパーフロッピー形式 (MBR なし，セクタ 0 が BPB)
@@ -541,6 +559,10 @@ module test_fat32_reader_no_fs {
         o_done     : blk_done     ,
         o_err      : blk_err      ,
         data       : blk_st       ,
+        i_req_write: 1'b0         ,
+        i_wr_valid : 1'b0         ,
+        i_wr_data  : 8'b0         ,
+        o_wr_ready : _            ,
         o_sclk     : sclk         ,
         o_mosi     : mosi         ,
         o_cs_n     : cs_n         ,
@@ -559,9 +581,14 @@ module test_fat32_reader_no_fs {
         i_cfg_never_ready: 1'b0    ,
         i_cfg_no_token   : 1'b0    ,
         i_cfg_corrupt_crc: 1'b0    ,
+        i_cfg_wr_err     : 1'b0    ,
         o_img_lba        : img_lba ,
         o_img_off        : img_off ,
         i_img_data       : img_data,
+        o_wr_en          : _       ,
+        o_wr_lba         : _       ,
+        o_wr_off         : _       ,
+        o_wr_data        : _       ,
     );
 
     // 全ゼロのカード: MBR 署名なし → no_fs

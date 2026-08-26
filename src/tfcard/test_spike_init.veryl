@@ -50,9 +50,14 @@ module test_tf_spike_init {
         i_cfg_never_ready: 1'b0    ,
         i_cfg_no_token   : 1'b0    ,
         i_cfg_corrupt_crc: 1'b0    ,
+        i_cfg_wr_err     : 1'b0    ,
         o_img_lba        : img_lba ,
         o_img_off        : img_off ,
         i_img_data       : img_data,
+        o_wr_en          : _       ,
+        o_wr_lba         : _       ,
+        o_wr_off         : _       ,
+        o_wr_data        : _       ,
     );
 
     // セクタ 0 のみ非ゼロの疎なディスクイメージ:

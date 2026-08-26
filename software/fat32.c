@@ -1,6 +1,7 @@
 #include "fat32.h"
 
 #define SECTOR 512
+#define DIR_COMMIT_UNKNOWN 7
 
 static unsigned char sec[SECTOR];
 
@@ -9,6 +10,12 @@ static struct {
     unsigned int data_start;   /* データ領域の先頭 LBA (クラスタ 2 の位置) */
     unsigned int sec_per_clus; /* クラスタあたりのセクタ数 */
     unsigned int root_clus;    /* ルートディレクトリの先頭クラスタ */
+    unsigned int num_fats;     /* FAT の面数 */
+    unsigned int fat_size;     /* FAT 1 面のセクタ数 */
+    unsigned int active_fat;   /* 読み出しに使う FAT 面 */
+    unsigned int mirror_fats;  /* 非 0 なら全 FAT 面を同期更新する */
+    unsigned int fsinfo_lba;   /* primary FSInfo LBA (無効なら 0xffffffff) */
+    unsigned int max_clus;     /* 使用できる最大クラスタ番号 */
 } fs;
 
 static unsigned int rd16(const unsigned char *p)
@@ -22,6 +29,20 @@ static unsigned int rd32(const unsigned char *p)
          | ((unsigned int) p[2] << 16) | ((unsigned int) p[3] << 24);
 }
 
+static void wr32(unsigned char *p, unsigned int v)
+{
+    p[0] = (unsigned char) v;
+    p[1] = (unsigned char) (v >> 8);
+    p[2] = (unsigned char) (v >> 16);
+    p[3] = (unsigned char) (v >> 24);
+}
+
+static void wr16(unsigned char *p, unsigned int v)
+{
+    p[0] = (unsigned char) v;
+    p[1] = (unsigned char) (v >> 8);
+}
+
 static unsigned int clus_lba(unsigned int c)
 {
     return fs.data_start + (c - 2) * fs.sec_per_clus;
@@ -30,7 +51,8 @@ static unsigned int clus_lba(unsigned int c)
 /* BPB を検証してレイアウトを決める．sec に BPB が入っている前提 */
 static int take_bpb(unsigned int base)
 {
-    unsigned int rsvd, nfat, fatsz;
+    unsigned int rsvd, nfat, fatsz, ext_flags, fsinfo, tot;
+    unsigned int fat_sectors, metadata_sectors;
 
     if (rd16(sec + 11) != SECTOR) {
         return FAT_ERR_NO_FS;
@@ -42,13 +64,52 @@ static int take_bpb(unsigned int base)
     rsvd            = rd16(sec + 14);
     nfat            = sec[16];
     fatsz           = rd32(sec + 36);
+    ext_flags       = rd16(sec + 40);
     fs.root_clus    = rd32(sec + 44);
+    fsinfo          = rd16(sec + 48);
+    tot             = rd32(sec + 32);
     if (fs.sec_per_clus == 0 || rsvd == 0 || nfat == 0 || fatsz == 0
-        || fs.root_clus < 2) {
+        || fs.root_clus < 2 || tot == 0) {
         return FAT_ERR_NO_FS;
     }
+    if (rsvd >= tot || nfat > (tot - rsvd) / fatsz) {
+        return FAT_ERR_NO_FS;
+    }
+    fat_sectors      = nfat * fatsz;
+    metadata_sectors = rsvd + fat_sectors;
+    if (metadata_sectors >= tot
+        || base > 0xffffffffu - (tot - 1)) {
+        return FAT_ERR_NO_FS;
+    }
+    fs.num_fats   = nfat;
+    fs.fat_size   = fatsz;
     fs.fat_start  = base + rsvd;
-    fs.data_start = fs.fat_start + nfat * fatsz;
+    fs.data_start = base + metadata_sectors;
+    fs.mirror_fats = (ext_flags & 0x0080u) == 0;
+    fs.active_fat  = fs.mirror_fats ? 0 : ext_flags & 0x000fu;
+    if (fs.active_fat >= nfat) {
+        return FAT_ERR_NO_FS;
+    }
+    fs.fsinfo_lba = fsinfo != 0 && fsinfo < rsvd
+                  ? base + fsinfo : 0xffffffffu;
+
+    /* 使用できる最大クラスタ番号．総セクタ数とデータ領域の起点から求める */
+    {
+        unsigned int data_sec;
+
+        data_sec     = tot - metadata_sectors;
+        fs.max_clus  = data_sec / fs.sec_per_clus + 1;
+        /* FAT に収まる範囲も超えないようにする */
+        if (fs.max_clus > fatsz * (SECTOR / 4) - 1) {
+            fs.max_clus = fatsz * (SECTOR / 4) - 1;
+        }
+        if (fs.max_clus > 0x0fffffefu) {
+            fs.max_clus = 0x0fffffefu;
+        }
+        if (fs.root_clus > fs.max_clus) {
+            return FAT_ERR_NO_FS;
+        }
+    }
     return FAT_OK;
 }
 
@@ -88,20 +149,37 @@ int fat_mount(void)
     return take_bpb(part);
 }
 
-/* クラスタチェーンの次を引く．終端・不正なら 0 を返す */
-static unsigned int next_clus(unsigned int c)
+/* FAT エントリを読む */
+static int fat_get(unsigned int c, unsigned int *val)
 {
     unsigned int off = c * 4;
-    unsigned int v;
 
-    if (fat_dev_read(fs.fat_start + off / SECTOR, sec) != 0) {
-        return 0;
+    if (fat_dev_read(fs.fat_start + fs.active_fat * fs.fat_size
+                     + off / SECTOR, sec) != 0) {
+        return FAT_ERR_IO;
     }
-    v = rd32(sec + (off % SECTOR)) & 0x0fffffffu;
-    if (v < 2 || v >= 0x0ffffff8u) {
-        return 0;
+    *val = rd32(sec + (off % SECTOR)) & 0x0fffffffu;
+    return FAT_OK;
+}
+
+/* クラスタチェーンの次を引き，終端なら 0 を返す． */
+static int fat_next(unsigned int c, unsigned int *next)
+{
+    unsigned int v;
+    int          rc = fat_get(c, &v);
+
+    if (rc != FAT_OK) {
+        return rc;
     }
-    return v;
+    if (v >= 0x0ffffff8u) {
+        *next = 0;
+        return FAT_OK;
+    }
+    if (v < 2 || v > fs.max_clus || v == c) {
+        return FAT_ERR_CHAIN;
+    }
+    *next = v;
+    return FAT_OK;
 }
 
 int fat_open(const char *name11, fat_file *f)
@@ -145,7 +223,13 @@ int fat_open(const char *name11, fat_file *f)
                 }
             }
         }
-        c = next_clus(c);
+        {
+            int rc = fat_next(c, &c);
+
+            if (rc != FAT_OK) {
+                return rc;
+            }
+        }
     }
     return FAT_ERR_FOUND;
 }
@@ -161,13 +245,13 @@ int fat_read(const fat_file *f, void *dst, unsigned int max_len,
     if (left > max_len) {
         left = max_len;
     }
-    if (left != 0 && c < 2) {
+    if (left != 0 && (c < 2 || c > fs.max_clus)) {
         return FAT_ERR_CHAIN;
     }
     while (left != 0) {
         unsigned int s;
 
-        if (c < 2) {
+        if (c < 2 || c > fs.max_clus) {
             return FAT_ERR_CHAIN;
         }
         for (s = 0; s < fs.sec_per_clus && left != 0; s++) {
@@ -184,11 +268,526 @@ int fat_read(const fat_file *f, void *dst, unsigned int max_len,
             left -= n;
         }
         if (left != 0) {
-            c = next_clus(c);
+            int rc = fat_next(c, &c);
+
+            if (rc != FAT_OK) {
+                return rc;
+            }
+            if (c == 0) {
+                return FAT_ERR_CHAIN;
+            }
         }
     }
     if (out_len != 0) {
         *out_len = done;
     }
     return FAT_OK;
+}
+/* ---- ここから書き込み系 (docs/riscv.md「TF カードからのブート」) ---- */
+
+/* ディレクトリエントリの所在と内容 */
+typedef struct {
+    unsigned int lba;      /* エントリを含むセクタ */
+    unsigned int off;      /* セクタ内オフセット (32 の倍数) */
+    unsigned int clus;     /* 先頭クラスタ */
+    unsigned int size;     /* バイト数 */
+    unsigned int next_lba; /* 消費した終端マーカーの次のセクタ */
+    unsigned int next_off; /* 同セクタ内オフセット */
+} dir_ent;
+
+static int dir_next_entry(unsigned int c, unsigned int s,
+                          unsigned int e, dir_ent *ent)
+{
+    unsigned int nx;
+    int          rc;
+
+    if (e + 32 < SECTOR) {
+        ent->next_lba = ent->lba;
+        ent->next_off = e + 32;
+        return FAT_OK;
+    }
+    ent->next_off = 0;
+    if (s + 1 < fs.sec_per_clus) {
+        ent->next_lba = ent->lba + 1;
+        return FAT_OK;
+    }
+    rc = fat_next(c, &nx);
+    if (rc != FAT_OK) {
+        return rc;
+    }
+    if (nx == 0) {
+        ent->next_lba = 0;
+        return FAT_OK;
+    }
+    ent->next_lba = clus_lba(nx);
+    return FAT_OK;
+}
+
+/* ルートディレクトリを走査する．
+ * name11 が一致すれば found へ入れて FAT_OK．
+ * 見つからなければ最初の空きスロットを free_ent へ入れて FAT_ERR_FOUND． */
+static int dir_scan(const char *name11, dir_ent *found, dir_ent *free_ent)
+{
+    unsigned int c         = fs.root_clus;
+    int          have_free = 0;
+
+    if (free_ent != 0) {
+        free_ent->lba      = 0;
+        free_ent->off      = 0;
+        free_ent->next_lba = 0;
+    }
+    while (c >= 2) {
+        unsigned int s;
+
+        for (s = 0; s < fs.sec_per_clus; s++) {
+            unsigned int lba = clus_lba(c) + s;
+            unsigned int e;
+
+            if (fat_dev_read(lba, sec) != 0) {
+                return FAT_ERR_IO;
+            }
+            for (e = 0; e < SECTOR; e += 32) {
+                const unsigned char *d = sec + e;
+                unsigned char        tag = d[0];
+
+                if (tag == 0x00 || tag == 0xe5) {
+                    if (!have_free && free_ent != 0) {
+                        int rc;
+
+                        free_ent->lba      = lba;
+                        free_ent->off      = e;
+                        free_ent->next_lba = 0;
+                        free_ent->next_off = 0;
+                        if (tag == 0x00) {
+                            rc = dir_next_entry(c, s, e, free_ent);
+                            if (rc != FAT_OK) {
+                                return rc;
+                            }
+                        }
+                        have_free = 1;
+                    }
+                    if (tag == 0x00) {
+                        return FAT_ERR_FOUND; /* 以降は未使用 */
+                    }
+                    continue;
+                }
+                if ((d[11] & 0x08) != 0 || (d[11] & 0x10) != 0) {
+                    continue; /* ボリュームラベル (LFN 含む) とディレクトリ */
+                }
+                {
+                    int i, hit = 1;
+
+                    for (i = 0; i < 11; i++) {
+                        if ((char) d[i] != name11[i]) {
+                            hit = 0;
+                            break;
+                        }
+                    }
+                    if (hit && found != 0) {
+                        found->lba  = lba;
+                        found->off  = e;
+                        found->clus = ((unsigned int) rd16(d + 20) << 16)
+                                    | rd16(d + 26);
+                        found->size = rd32(d + 28);
+                        found->next_lba = 0;
+                        found->next_off = 0;
+                        return FAT_OK;
+                    }
+                }
+            }
+        }
+        {
+            int rc = fat_next(c, &c);
+
+            if (rc != FAT_OK) {
+                return rc;
+            }
+        }
+    }
+    return FAT_ERR_FOUND;
+}
+
+/* FAT エントリを書く．mirroring 有効時は全コピーを更新する */
+static int fat_write_entry(unsigned int copy, unsigned int c,
+                           unsigned int val)
+{
+    unsigned int off = c * 4;
+    unsigned int s   = off / SECTOR;
+    unsigned int lba = fs.fat_start + copy * fs.fat_size + s;
+    unsigned int cur;
+
+    if (fat_dev_read(lba, sec) != 0) {
+        return FAT_ERR_IO;
+    }
+    cur = rd32(sec + (off % SECTOR));
+    wr32(sec + (off % SECTOR), (cur & 0xf0000000u) | (val & 0x0fffffffu));
+    if (fat_dev_write(lba, sec) != 0) {
+        return FAT_ERR_IO;
+    }
+    return FAT_OK;
+}
+
+static int fat_set(unsigned int c, unsigned int val)
+{
+    unsigned int old;
+    unsigned int first;
+    unsigned int end;
+    unsigned int i;
+    int          rc;
+
+    rc = fat_get(c, &old);
+    if (rc != FAT_OK) {
+        return rc;
+    }
+    first = fs.mirror_fats ? 0 : fs.active_fat;
+    end   = fs.mirror_fats ? fs.num_fats : first + 1;
+    for (i = first; i < end; i++) {
+        unsigned int j;
+
+        rc = fat_write_entry(i, c, val);
+        if (rc != FAT_OK) {
+            /* The failed write may have reached the medium. Restore every
+             * copy touched so far, including the failing copy. */
+            for (j = first; j <= i; j++) {
+                (void) fat_write_entry(j, c, old);
+            }
+            return FAT_ERR_IO;
+        }
+    }
+    return FAT_OK;
+}
+
+/* 空きクラスタを 1 つ確保して終端にする．prev >= 2 ならそこへ繋ぐ */
+static int fat_alloc(unsigned int prev, unsigned int *out)
+{
+    unsigned int c;
+
+    for (c = 2; c <= fs.max_clus; c++) {
+        unsigned int off = c * 4;
+        unsigned int v;
+        int          rc;
+
+        /* FAT セクタは境界をまたぐときだけ読み直す */
+        if (c == 2 || off % SECTOR == 0) {
+            if (fat_dev_read(fs.fat_start + fs.active_fat * fs.fat_size
+                             + off / SECTOR, sec) != 0) {
+                return FAT_ERR_IO;
+            }
+        }
+        v = rd32(sec + (off % SECTOR)) & 0x0fffffffu;
+        if (v != 0) {
+            continue;
+        }
+        rc = fat_set(c, 0x0ffffff8u); /* 終端 */
+        if (rc != FAT_OK) {
+            return rc;
+        }
+        if (prev >= 2) {
+            rc = fat_set(prev, c);
+            if (rc != FAT_OK) {
+                (void) fat_set(c, 0);
+                return rc;
+            }
+        }
+        *out = c;
+        return FAT_OK;
+    }
+    return FAT_ERR_FULL;
+}
+
+/* c から先のチェーンをすべて解放する */
+static int fat_free_chain(unsigned int c)
+{
+    int first_error = FAT_OK;
+
+    while (c >= 2 && c < 0x0ffffff8u) {
+        unsigned int nx;
+        int          rc = fat_get(c, &nx);
+
+        if (rc != FAT_OK) {
+            rc = fat_get(c, &nx);
+            if (rc != FAT_OK) {
+                return first_error != FAT_OK ? first_error : rc;
+            }
+        }
+        rc = fat_set(c, 0);
+        if (rc != FAT_OK) {
+            rc = fat_set(c, 0);
+            if (rc != FAT_OK && first_error == FAT_OK) {
+                first_error = rc;
+            }
+        }
+        c = nx;
+    }
+    return first_error;
+}
+
+static int fat_check_chain(unsigned int c)
+{
+    unsigned int n = 0;
+
+    if (c == 0) {
+        return FAT_OK;
+    }
+    while (c >= 2 && c <= fs.max_clus) {
+        unsigned int nx;
+        int          rc;
+
+        if (n >= fs.max_clus - 1) {
+            return FAT_ERR_CHAIN;
+        }
+        n++;
+        rc = fat_get(c, &nx);
+        if (rc != FAT_OK) {
+            return rc;
+        }
+        if (nx >= 0x0ffffff8u) {
+            return FAT_OK;
+        }
+        if (nx < 2 || nx > fs.max_clus) {
+            return FAT_ERR_CHAIN;
+        }
+        c = nx;
+    }
+    return FAT_ERR_CHAIN;
+}
+
+static int fat_have_free(unsigned int need)
+{
+    unsigned int c;
+
+    if (need == 0) {
+        return FAT_OK;
+    }
+    for (c = 2; c <= fs.max_clus; c++) {
+        unsigned int off = c * 4;
+        unsigned int v;
+
+        if (c == 2 || off % SECTOR == 0) {
+            if (fat_dev_read(fs.fat_start + fs.active_fat * fs.fat_size
+                             + off / SECTOR, sec) != 0) {
+                return FAT_ERR_IO;
+            }
+        }
+        v = rd32(sec + (off % SECTOR)) & 0x0fffffffu;
+        if (v == 0 && --need == 0) {
+            return FAT_OK;
+        }
+    }
+    return FAT_ERR_FULL;
+}
+
+static int dir_commit(const char *name11, const dir_ent *ent, int existed,
+                      unsigned int first, unsigned int len)
+{
+    unsigned int i;
+
+    if (!existed && ent->next_lba != 0 && ent->next_lba != ent->lba) {
+        if (fat_dev_read(ent->next_lba, sec) != 0) {
+            return FAT_ERR_IO;
+        }
+        sec[ent->next_off] = 0;
+        if (fat_dev_write(ent->next_lba, sec) != 0) {
+            return FAT_ERR_IO;
+        }
+    }
+    if (fat_dev_read(ent->lba, sec) != 0) {
+        return FAT_ERR_IO;
+    }
+    {
+        unsigned char *d = sec + ent->off;
+
+        if (!existed) {
+            for (i = 0; i < 32; i++) {
+                d[i] = 0;
+            }
+            for (i = 0; i < 11; i++) {
+                d[i] = (unsigned char) name11[i];
+            }
+            d[11] = 0x20; /* archive */
+            if (ent->next_lba == ent->lba) {
+                sec[ent->next_off] = 0;
+            }
+        }
+        wr16(d + 20, first >> 16);
+        wr16(d + 26, first & 0xffffu);
+        wr32(d + 28, len);
+    }
+    if (fat_dev_write(ent->lba, sec) != 0) {
+        unsigned char *d;
+        unsigned int   actual;
+        unsigned int   actual_size;
+
+        if (fat_dev_read(ent->lba, sec) != 0) {
+            return DIR_COMMIT_UNKNOWN;
+        }
+        d           = sec + ent->off;
+        actual      = ((unsigned int) rd16(d + 20) << 16) | rd16(d + 26);
+        actual_size = rd32(d + 28);
+        if (actual == first && actual_size == len) {
+            if (existed) {
+                return FAT_OK;
+            }
+            for (i = 0; i < 11; i++) {
+                if (d[i] != (unsigned char) name11[i]) {
+                    break;
+                }
+            }
+            if (i == 11 && d[11] == 0x20
+                && (ent->next_lba != ent->lba
+                    || sec[ent->next_off] == 0)) {
+                return FAT_OK;
+            }
+        }
+        if ((existed && actual == ent->clus && actual_size == ent->size)
+            || (!existed && (d[0] == 0x00 || d[0] == 0xe5))) {
+            return FAT_ERR_IO;
+        }
+        return DIR_COMMIT_UNKNOWN;
+    }
+    return FAT_OK;
+}
+
+/* 有効な FSInfo は FAT 変更前に conservative な unknown 値へする． */
+static int fsinfo_invalidate(void)
+{
+    if (fs.fsinfo_lba == 0xffffffffu) {
+        return FAT_OK;
+    }
+    if (fat_dev_read(fs.fsinfo_lba, sec) != 0) {
+        return FAT_ERR_IO;
+    }
+    if (rd32(sec) != 0x41615252u
+        || rd32(sec + 484) != 0x61417272u
+        || rd32(sec + 508) != 0xaa550000u) {
+        return FAT_OK;
+    }
+    if (rd32(sec + 488) == 0xffffffffu
+        && rd32(sec + 492) == 0xffffffffu) {
+        return FAT_OK;
+    }
+    wr32(sec + 488, 0xffffffffu);
+    wr32(sec + 492, 0xffffffffu);
+    return fat_dev_write(fs.fsinfo_lba, sec) == 0 ? FAT_OK : FAT_ERR_IO;
+}
+
+int fat_write_file(const char *name11, const void *src, unsigned int len)
+{
+    const unsigned char *p = (const unsigned char *) src;
+    dir_ent              ent;
+    dir_ent              slot;
+    unsigned int         cpb; /* クラスタあたりバイト数 */
+    unsigned int         need;
+    unsigned int         first;
+    unsigned int         c, prev;
+    unsigned int         old_first;
+    unsigned int         done = 0;
+    unsigned int         i;
+    int                  rc;
+    int                  rollback_rc;
+    int                  existed;
+
+    if (fs.sec_per_clus == 0) {
+        return FAT_ERR_NO_FS;
+    }
+    cpb  = fs.sec_per_clus * SECTOR;
+    need = len == 0 ? 0 : 1 + (len - 1) / cpb;
+
+    rc      = dir_scan(name11, &ent, &slot);
+    existed = (rc == FAT_OK);
+    if (!existed && rc != FAT_ERR_FOUND) {
+        return rc;
+    }
+    if (!existed) {
+        if (slot.lba == 0) {
+            return FAT_ERR_DIR; /* ルートディレクトリに空きがない */
+        }
+        ent      = slot;
+        ent.clus = 0;
+        ent.size = 0;
+    }
+
+    old_first = ent.clus;
+    rc = fat_check_chain(old_first);
+    if (rc != FAT_OK) {
+        return rc;
+    }
+    rc = fat_have_free(need);
+    if (rc != FAT_OK) {
+        return rc;
+    }
+    if (need != 0 || old_first >= 2) {
+        rc = fsinfo_invalidate();
+        if (rc != FAT_OK) {
+            return rc;
+        }
+    }
+
+    /* 完成するまで既存ファイルと分離した新規チェーンへ書く */
+    first = 0;
+    prev  = 0;
+    for (i = 0; i < need; i++) {
+        unsigned int nc;
+
+        rc = fat_alloc(prev, &nc);
+        if (rc != FAT_OK) {
+            goto rollback;
+        }
+        if (first == 0) {
+            first = nc;
+        }
+        prev = nc;
+    }
+
+    /* データを書く */
+    c = first;
+    while (done < len) {
+        unsigned int s;
+
+        if (c < 2 || c >= 0x0ffffff8u) {
+            rc = FAT_ERR_CHAIN;
+            goto rollback;
+        }
+        for (s = 0; s < fs.sec_per_clus && done < len; s++) {
+            unsigned int n = len - done;
+            unsigned int k;
+
+            if (n > SECTOR) {
+                n = SECTOR;
+            }
+            for (k = 0; k < SECTOR; k++) {
+                sec[k] = k < n ? p[done + k] : 0;
+            }
+            if (fat_dev_write(clus_lba(c) + s, sec) != 0) {
+                rc = FAT_ERR_IO;
+                goto rollback;
+            }
+            done += n;
+        }
+        if (done < len) {
+            rc = fat_get(c, &c);
+            if (rc != FAT_OK) {
+                goto rollback;
+            }
+        }
+    }
+
+    rc = dir_commit(name11, &ent, existed, first, len);
+    if (rc != FAT_OK) {
+        if (rc == DIR_COMMIT_UNKNOWN) {
+            return FAT_ERR_IO;
+        }
+        goto rollback;
+    }
+
+    /* 新しいエントリが永続化された後で旧チェーンを解放する */
+    if (old_first >= 2) {
+        /* 更新は既に可視なので，cleanup の一時障害を更新失敗としない */
+        (void) fat_free_chain(old_first);
+    }
+    return FAT_OK;
+
+rollback:
+    rollback_rc = first >= 2 ? fat_free_chain(first) : FAT_OK;
+    return rollback_rc != FAT_OK ? rollback_rc : rc;
 }

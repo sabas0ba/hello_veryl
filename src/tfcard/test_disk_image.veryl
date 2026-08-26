@@ -71,6 +71,25 @@ package TfTestImg {
             default: 8'h00,
         };
     }
+    function ByteS0009 (
+        off: input logic<9>,
+    ) -> logic<8> {
+        return case off {
+            9'd0   : 8'h52,
+            9'd1   : 8'h52,
+            9'd2   : 8'h61,
+            9'd3   : 8'h41,
+            9'd484 : 8'h72,
+            9'd485 : 8'h72,
+            9'd486 : 8'h41,
+            9'd487 : 8'h61,
+            9'd488 : 8'h34,
+            9'd492 : 8'h09,
+            9'd510 : 8'h55,
+            9'd511 : 8'haa,
+            default: 8'h00,
+        };
+    }
     function ByteS000c (
         off: input logic<9>,
     ) -> logic<8> {
@@ -2976,6 +2995,7 @@ package TfTestImg {
         return case lba {
             32'd0  : ByteS0000(off),
             32'd8  : ByteS0008(off),
+            32'd9  : ByteS0009(off),
             32'd12 : ByteS000c(off),
             32'd14 : ByteS000e(off),
             32'd16 : ByteS0010(off),
@@ -3042,6 +3062,25 @@ package TfTestImg {
             9'd87  : 8'h20,
             9'd88  : 8'h20,
             9'd89  : 8'h20,
+            9'd510 : 8'h55,
+            9'd511 : 8'haa,
+            default: 8'h00,
+        };
+    }
+    function SfByteS0001 (
+        off: input logic<9>,
+    ) -> logic<8> {
+        return case off {
+            9'd0   : 8'h52,
+            9'd1   : 8'h52,
+            9'd2   : 8'h61,
+            9'd3   : 8'h41,
+            9'd484 : 8'h72,
+            9'd485 : 8'h72,
+            9'd486 : 8'h41,
+            9'd487 : 8'h61,
+            9'd488 : 8'h34,
+            9'd492 : 8'h09,
             9'd510 : 8'h55,
             9'd511 : 8'haa,
             default: 8'h00,
@@ -5951,6 +5990,7 @@ package TfTestImg {
     ) -> logic<8> {
         return case lba {
             32'd0  : SfByteS0000(off),
+            32'd1  : SfByteS0001(off),
             32'd4  : SfByteS0004(off),
             32'd6  : SfByteS0006(off),
             32'd8  : SfByteS0008(off),
