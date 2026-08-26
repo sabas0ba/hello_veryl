@@ -60,3 +60,5 @@ RvTfIo 1 と
 L2 の riscv-tests ランナー 1（rv32ui/um/mi 60 件を内包），[riscv.md](riscv.md)）．実行方法は
 [environment.md](environment.md)，CI 規約は
 [CONTRIBUTING.md](../CONTRIBUTING.md) を参照．
+RISC-Vソフトウェアのホスト検証では，FAT32の正常・障害・破損BPBケース，
+XMODEM 12ケース，`tfwrite`の実行領域と受信領域が重なる配置の拒否も確認する．

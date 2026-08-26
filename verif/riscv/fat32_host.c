@@ -490,6 +490,42 @@ static void check_active_fat(const test_layout *layout,
     }
 }
 
+static void check_bpb_metadata_bounds(const test_layout *layout)
+{
+    static unsigned char saved[IMAGE_BYTES];
+    static unsigned char bpb[SECTOR];
+    unsigned int         metadata_sectors;
+    int                  rc;
+    int                  prepared;
+
+    rc = snapshot_image(saved);
+    check(rc == 0, "snapshot before malformed BPB test");
+    if (rc != 0) {
+        return;
+    }
+
+    metadata_sectors = layout->data_start - layout->base;
+    prepared = metadata_sectors > 0
+            && fat_dev_read(layout->base, bpb) == 0;
+    if (prepared) {
+        host_wr32(bpb + 32, metadata_sectors - 1);
+        prepared = fat_dev_write(layout->base, bpb) == 0;
+    }
+    check(prepared, "prepare BPB with metadata beyond total sectors");
+    if (prepared) {
+        rc = fat_mount();
+        check(rc == FAT_ERR_NO_FS,
+              "reject BPB whose metadata exceeds total sectors");
+    }
+
+    rc = restore_image(saved);
+    check(rc == 0, "restore image after malformed BPB test");
+    if (rc == 0) {
+        rc = fat_mount();
+        check(rc == FAT_OK, "remount image after malformed BPB test");
+    }
+}
+
 static void run(const char *path)
 {
     static unsigned char readme[2348];
@@ -533,6 +569,7 @@ static void run(const char *path)
     rc = load_layout(&layout);
     check(rc == 0, "load FAT layout");
     if (rc == 0) {
+        check_bpb_metadata_bounds(&layout);
         check_fsinfo(&layout, 0, "read generated FSInfo");
         check_active_fat(&layout, readme, sizeof readme);
     }

@@ -31,6 +31,10 @@ case "$PLACE" in
     psram) CRT=software/crt0.S     ; LD=software/link_psram.ld ;;
     *)     echo "ERROR: 未知の配置 '$PLACE' (ram|psram)" >&2; exit 1 ;;
 esac
+if [ "$PROG" = tfwrite ] && [ "$PLACE" != ram ]; then
+    echo "ERROR: tfwrite must use ram; psram overlaps its receive buffer" >&2
+    exit 1
+fi
 
 EXTRA=""
 if [ -f "software/$PROG.srcs" ]; then

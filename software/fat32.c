@@ -51,7 +51,8 @@ static unsigned int clus_lba(unsigned int c)
 /* BPB を検証してレイアウトを決める．sec に BPB が入っている前提 */
 static int take_bpb(unsigned int base)
 {
-    unsigned int rsvd, nfat, fatsz, ext_flags, fsinfo;
+    unsigned int rsvd, nfat, fatsz, ext_flags, fsinfo, tot;
+    unsigned int fat_sectors, metadata_sectors;
 
     if (rd16(sec + 11) != SECTOR) {
         return FAT_ERR_NO_FS;
@@ -66,14 +67,24 @@ static int take_bpb(unsigned int base)
     ext_flags       = rd16(sec + 40);
     fs.root_clus    = rd32(sec + 44);
     fsinfo          = rd16(sec + 48);
+    tot             = rd32(sec + 32);
     if (fs.sec_per_clus == 0 || rsvd == 0 || nfat == 0 || fatsz == 0
-        || fs.root_clus < 2) {
+        || fs.root_clus < 2 || tot == 0) {
+        return FAT_ERR_NO_FS;
+    }
+    if (rsvd >= tot || nfat > (tot - rsvd) / fatsz) {
+        return FAT_ERR_NO_FS;
+    }
+    fat_sectors      = nfat * fatsz;
+    metadata_sectors = rsvd + fat_sectors;
+    if (metadata_sectors >= tot
+        || base > 0xffffffffu - (tot - 1)) {
         return FAT_ERR_NO_FS;
     }
     fs.num_fats   = nfat;
     fs.fat_size   = fatsz;
     fs.fat_start  = base + rsvd;
-    fs.data_start = fs.fat_start + nfat * fatsz;
+    fs.data_start = base + metadata_sectors;
     fs.mirror_fats = (ext_flags & 0x0080u) == 0;
     fs.active_fat  = fs.mirror_fats ? 0 : ext_flags & 0x000fu;
     if (fs.active_fat >= nfat) {
@@ -84,13 +95,9 @@ static int take_bpb(unsigned int base)
 
     /* 使用できる最大クラスタ番号．総セクタ数とデータ領域の起点から求める */
     {
-        unsigned int tot = rd32(sec + 32);
         unsigned int data_sec;
 
-        if (tot == 0) {
-            return FAT_ERR_NO_FS;
-        }
-        data_sec     = tot - (fs.data_start - base);
+        data_sec     = tot - metadata_sectors;
         fs.max_clus  = data_sec / fs.sec_per_clus + 1;
         /* FAT に収まる範囲も超えないようにする */
         if (fs.max_clus > fatsz * (SECTOR / 4) - 1) {
