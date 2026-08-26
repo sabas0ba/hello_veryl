@@ -14,16 +14,22 @@
 #define IMAGE_BYTES (128u * SECTOR)
 #define BOUNDARY_CLUSTER 50u
 #define FAT_SCAN_POISON_CLUSTER 120u
+#define NO_FAIL_LBA 0xffffffffu
 
 static FILE *img;
 static int   fail_writes_after = -1;
 static int   report_error_after_write = -1;
+static unsigned int fail_read_lba = NO_FAIL_LBA;
 static unsigned char image_before[IMAGE_BYTES];
 static unsigned char image_after[IMAGE_BYTES];
 static unsigned char sentinel_before[SECTOR];
 
 int fat_dev_read(unsigned int lba, unsigned char *buf)
 {
+    if (lba == fail_read_lba) {
+        fail_read_lba = NO_FAIL_LBA;
+        return 1;
+    }
     if (fseek(img, (long) lba * SECTOR, SEEK_SET) != 0) {
         return 1;
     }
@@ -526,6 +532,111 @@ static void check_bpb_metadata_bounds(const test_layout *layout)
     }
 }
 
+static void check_bpb_root_bounds(const test_layout *layout)
+{
+    static unsigned char saved[IMAGE_BYTES];
+    static unsigned char bpb[SECTOR];
+    int                  rc;
+    int                  prepared;
+
+    rc = snapshot_image(saved);
+    check(rc == 0, "snapshot before out-of-range root cluster test");
+    if (rc != 0) {
+        return;
+    }
+
+    prepared = fat_dev_read(layout->base, bpb) == 0;
+    if (prepared) {
+        host_wr32(bpb + 44, 0x0fffffefu);
+        prepared = fat_dev_write(layout->base, bpb) == 0;
+    }
+    check(prepared, "prepare BPB with out-of-range root cluster");
+    if (prepared) {
+        rc = fat_mount();
+        check(rc == FAT_ERR_NO_FS,
+              "reject BPB whose root cluster exceeds data range");
+    }
+
+    rc = restore_image(saved);
+    check(rc == 0, "restore image after out-of-range root cluster test");
+    if (rc == 0) {
+        rc = fat_mount();
+        check(rc == FAT_OK, "remount image after root cluster test");
+    }
+}
+
+static int seed_late_directory_entry(const test_layout *layout)
+{
+    static unsigned char buf[SECTOR];
+    unsigned int         root_lba = test_clus_lba(layout, layout->root_clus);
+    unsigned int         s;
+
+    for (s = 0; s < layout->sec_per_clus; s++) {
+        unsigned int e;
+
+        for (e = 0; e < SECTOR; e += 32) {
+            make_dir_entry(buf + e, "FILLER     ", 0x08);
+        }
+        if (s == 0) {
+            buf[0] = 0xe5;
+        }
+        if (fat_dev_write(root_lba + s, buf) != 0) {
+            return 1;
+        }
+    }
+    if (set_fat_entry(layout, layout->root_clus, BOUNDARY_CLUSTER) != 0
+        || set_fat_entry(layout, BOUNDARY_CLUSTER, 0x0ffffff8u) != 0) {
+        return 1;
+    }
+    memset(buf, 0, sizeof buf);
+    make_dir_entry(buf, "LATE    BIN", 0x20);
+    return fat_dev_write(test_clus_lba(layout, BOUNDARY_CLUSTER), buf);
+}
+
+static void check_directory_link_read_error(const test_layout *layout)
+{
+    static unsigned char saved[IMAGE_BYTES];
+    fat_file             f;
+    int                  rc;
+    int                  prepared;
+
+    rc = snapshot_image(saved);
+    check(rc == 0, "snapshot before directory FAT read error test");
+    if (rc != 0) {
+        return;
+    }
+    prepared = seed_late_directory_entry(layout) == 0;
+    check(prepared, "seed file in later root directory cluster");
+    if (prepared) {
+        prepared = snapshot_image(image_before) == 0;
+        check(prepared, "snapshot seeded multi-cluster root directory");
+    }
+    if (prepared) {
+        fail_read_lba = layout->fat_start
+                      + layout->root_clus * 4 / SECTOR;
+        rc = fat_write_file("LATE    BIN", image_before, 0);
+        check(rc == FAT_ERR_IO,
+              "directory FAT read failure returns FAT_ERR_IO");
+        check(fail_read_lba == NO_FAIL_LBA,
+              "directory FAT read failure was injected");
+        if (fail_read_lba != NO_FAIL_LBA) {
+            fail_read_lba = NO_FAIL_LBA;
+        }
+        check_image_unchanged(
+            "directory FAT read failure leaves image unchanged");
+        rc = fat_open("LATE    BIN", &f);
+        check(rc == FAT_OK && f.size == 0,
+              "later directory entry remains unique and visible");
+    }
+
+    rc = restore_image(saved);
+    check(rc == 0, "restore image after directory FAT read error test");
+    if (rc == 0) {
+        rc = fat_mount();
+        check(rc == FAT_OK, "remount image after directory FAT read test");
+    }
+}
+
 static void run(const char *path)
 {
     static unsigned char readme[2348];
@@ -550,6 +661,7 @@ static void run(const char *path)
     printf("---- %s ----\n", path);
     fail_writes_after         = -1;
     report_error_after_write = -1;
+    fail_read_lba            = NO_FAIL_LBA;
 
     rc = fat_mount();
     check(rc == FAT_OK, "fat_mount");
@@ -570,6 +682,8 @@ static void run(const char *path)
     check(rc == 0, "load FAT layout");
     if (rc == 0) {
         check_bpb_metadata_bounds(&layout);
+        check_bpb_root_bounds(&layout);
+        check_directory_link_read_error(&layout);
         check_fsinfo(&layout, 0, "read generated FSInfo");
         check_active_fat(&layout, readme, sizeof readme);
     }

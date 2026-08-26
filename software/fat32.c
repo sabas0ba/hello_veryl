@@ -106,6 +106,9 @@ static int take_bpb(unsigned int base)
         if (fs.max_clus > 0x0fffffefu) {
             fs.max_clus = 0x0fffffefu;
         }
+        if (fs.root_clus > fs.max_clus) {
+            return FAT_ERR_NO_FS;
+        }
     }
     return FAT_OK;
 }
@@ -146,21 +149,37 @@ int fat_mount(void)
     return take_bpb(part);
 }
 
-/* クラスタチェーンの次を引く．終端・不正なら 0 を返す */
-static unsigned int next_clus(unsigned int c)
+/* FAT エントリを読む */
+static int fat_get(unsigned int c, unsigned int *val)
 {
     unsigned int off = c * 4;
-    unsigned int v;
 
     if (fat_dev_read(fs.fat_start + fs.active_fat * fs.fat_size
                      + off / SECTOR, sec) != 0) {
-        return 0;
+        return FAT_ERR_IO;
     }
-    v = rd32(sec + (off % SECTOR)) & 0x0fffffffu;
-    if (v < 2 || v >= 0x0ffffff8u) {
-        return 0;
+    *val = rd32(sec + (off % SECTOR)) & 0x0fffffffu;
+    return FAT_OK;
+}
+
+/* クラスタチェーンの次を引き，終端なら 0 を返す． */
+static int fat_next(unsigned int c, unsigned int *next)
+{
+    unsigned int v;
+    int          rc = fat_get(c, &v);
+
+    if (rc != FAT_OK) {
+        return rc;
     }
-    return v;
+    if (v >= 0x0ffffff8u) {
+        *next = 0;
+        return FAT_OK;
+    }
+    if (v < 2 || v > fs.max_clus || v == c) {
+        return FAT_ERR_CHAIN;
+    }
+    *next = v;
+    return FAT_OK;
 }
 
 int fat_open(const char *name11, fat_file *f)
@@ -204,7 +223,13 @@ int fat_open(const char *name11, fat_file *f)
                 }
             }
         }
-        c = next_clus(c);
+        {
+            int rc = fat_next(c, &c);
+
+            if (rc != FAT_OK) {
+                return rc;
+            }
+        }
     }
     return FAT_ERR_FOUND;
 }
@@ -220,13 +245,13 @@ int fat_read(const fat_file *f, void *dst, unsigned int max_len,
     if (left > max_len) {
         left = max_len;
     }
-    if (left != 0 && c < 2) {
+    if (left != 0 && (c < 2 || c > fs.max_clus)) {
         return FAT_ERR_CHAIN;
     }
     while (left != 0) {
         unsigned int s;
 
-        if (c < 2) {
+        if (c < 2 || c > fs.max_clus) {
             return FAT_ERR_CHAIN;
         }
         for (s = 0; s < fs.sec_per_clus && left != 0; s++) {
@@ -243,7 +268,14 @@ int fat_read(const fat_file *f, void *dst, unsigned int max_len,
             left -= n;
         }
         if (left != 0) {
-            c = next_clus(c);
+            int rc = fat_next(c, &c);
+
+            if (rc != FAT_OK) {
+                return rc;
+            }
+            if (c == 0) {
+                return FAT_ERR_CHAIN;
+            }
         }
     }
     if (out_len != 0) {
@@ -263,8 +295,6 @@ typedef struct {
     unsigned int next_off; /* 同セクタ内オフセット */
 } dir_ent;
 
-static int fat_get(unsigned int c, unsigned int *val);
-
 static int dir_next_entry(unsigned int c, unsigned int s,
                           unsigned int e, dir_ent *ent)
 {
@@ -281,16 +311,13 @@ static int dir_next_entry(unsigned int c, unsigned int s,
         ent->next_lba = ent->lba + 1;
         return FAT_OK;
     }
-    rc = fat_get(c, &nx);
+    rc = fat_next(c, &nx);
     if (rc != FAT_OK) {
         return rc;
     }
-    if (nx >= 0x0ffffff8u) {
+    if (nx == 0) {
         ent->next_lba = 0;
         return FAT_OK;
-    }
-    if (nx < 2 || nx > fs.max_clus || nx == c) {
-        return FAT_ERR_CHAIN;
     }
     ent->next_lba = clus_lba(nx);
     return FAT_OK;
@@ -369,22 +396,15 @@ static int dir_scan(const char *name11, dir_ent *found, dir_ent *free_ent)
                 }
             }
         }
-        c = next_clus(c);
+        {
+            int rc = fat_next(c, &c);
+
+            if (rc != FAT_OK) {
+                return rc;
+            }
+        }
     }
     return FAT_ERR_FOUND;
-}
-
-/* FAT エントリを読む */
-static int fat_get(unsigned int c, unsigned int *val)
-{
-    unsigned int off = c * 4;
-
-    if (fat_dev_read(fs.fat_start + fs.active_fat * fs.fat_size
-                     + off / SECTOR, sec) != 0) {
-        return FAT_ERR_IO;
-    }
-    *val = rd32(sec + (off % SECTOR)) & 0x0fffffffu;
-    return FAT_OK;
 }
 
 /* FAT エントリを書く．mirroring 有効時は全コピーを更新する */
