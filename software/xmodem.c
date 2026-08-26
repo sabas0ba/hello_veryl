@@ -117,6 +117,11 @@ int xmodem_receive(void *dst, unsigned int max_len, unsigned int *out_len)
             continue;
         }
         if (ch != SOH) {
+            if (started) {
+                while (get_byte(BYTE_TIMEOUT, &ch) == 0) {
+                }
+                put_char(NAK);
+            }
             if (++retries >= MAX_RETRIES) {
                 return XMODEM_PROTOCOL;
             }

@@ -452,20 +452,28 @@ static int fat_alloc(unsigned int prev, unsigned int *out)
 /* c から先のチェーンをすべて解放する */
 static int fat_free_chain(unsigned int c)
 {
+    int first_error = FAT_OK;
+
     while (c >= 2 && c < 0x0ffffff8u) {
         unsigned int nx;
         int          rc = fat_get(c, &nx);
 
         if (rc != FAT_OK) {
-            return rc;
+            rc = fat_get(c, &nx);
+            if (rc != FAT_OK) {
+                return first_error != FAT_OK ? first_error : rc;
+            }
         }
         rc = fat_set(c, 0);
         if (rc != FAT_OK) {
-            return rc;
+            rc = fat_set(c, 0);
+            if (rc != FAT_OK && first_error == FAT_OK) {
+                first_error = rc;
+            }
         }
         c = nx;
     }
-    return FAT_OK;
+    return first_error;
 }
 
 static int fat_check_chain(unsigned int c)
@@ -698,10 +706,8 @@ int fat_write_file(const char *name11, const void *src, unsigned int len)
 
     /* 新しいエントリが永続化された後で旧チェーンを解放する */
     if (old_first >= 2) {
-        rc = fat_free_chain(old_first);
-        if (rc != FAT_OK) {
-            return rc;
-        }
+        /* 更新は既に可視なので，cleanup の一時障害を更新失敗としない */
+        (void) fat_free_chain(old_first);
     }
     return FAT_OK;
 

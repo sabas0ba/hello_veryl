@@ -596,6 +596,9 @@ LFN は解釈せず 8.3 名だけを見る．ボリュームラベル・ディ�
   拾わないこと
 - 既存ファイルの拡張・縮小と新規作成後に内容を再読出しできること
 - 複数FATコピーが一致し，クラスタの二重所有と解放漏れがないこと
+- ペイロード・ディレクトリ・FAT各コピーへの書き込み障害を注入しても，
+  更新確定前は旧ファイルを保持し，更新確定後は旧チェーンの解放を再試行して
+  FATコピー間の整合を保つこと
 
 `verif/riscv/check.sh` から呼ばれ，CI の verif ジョブで実行される．
 
@@ -631,19 +634,30 @@ OK
 先頭4 byteに実ファイル長をリトルエンディアンで付け，XMODEM の128-byte境界の
 パディングと区別する．ホスト側は `scripts/rv-xmodem.ps1` を使う．
 
+`verif/riscv/xmodem_check.sh` は `software/xmodem.c` を表駆動のホスト側 UART
+モデルと組み合わせ，通常転送，重複ブロック，CRCエラー，部分ブロックの
+タイムアウト，`SOH` 欠落，順序違反，開始前ノイズ，送信側キャンセル，受信領域
+オーバーフロー，mtime wrap，`out_len == NULL`，再試行上限の12ケースを検証する．
+`verif/riscv/check.sh` から呼ばれ，CI の verif ジョブで実行される．
+
 ```powershell
 .\scripts\rv-xmodem.ps1 `
     -Receiver build\software\tfwrite.bin `
-    -Bin build\software\tfdump.bin -Port COM4
+    -Bin build\software\tfdump.bin -Port COM4 `
+    -DropSohOnceAtBlock 2
 ```
 
-2026-08-26 の実機試験では13ブロックを受信し，1,648-byteのファイルを
-カードへ書いて対象側の再オープンとサイズ照合まで成功した．
+`DropSohOnceAtBlock` は指定ブロックの初回送信から `SOH` だけを除き，受信側の
+`NAK` を必須とした後に完全なブロックを再送する障害注入である（0で無効）．
+2026-08-26 の実機試験ではブロック2へ注入して `NAK` と再送を確認し，13ブロック，
+1,648-byteのファイルをカードへ書いて対象側の再オープンとサイズ照合まで成功した．
 
 ```
 TFWRITE
 XMODEM
 sending 1648 byte as 13 XMODEM blocks
+injecting lost SOH at block 2
+  block 2: NAK received, retransmitting
 WRITE 1648 byte
 WROTE BOOT.BIN
 R00000000

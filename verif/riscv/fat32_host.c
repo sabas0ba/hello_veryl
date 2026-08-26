@@ -507,6 +507,49 @@ static void run(const char *path)
     check(rc == FAT_OK, "restore BOOT after directory error test");
     check_file("BOOT    BIN", 1700, boot, "BOOT restored after error test");
 
+    /* Cleanup starts after five successful writes: two mirrored FAT writes
+     * for the staged cluster, two payload sectors, and the directory sector.
+     * Failing after seven writes targets FAT0 of the second old cluster,
+     * after the old head has already been released. */
+    fail_writes_after = 7;
+    rc = fat_write_file("BOOT    BIN", replacement, sizeof replacement);
+    check(rc == FAT_OK, "old-chain FAT0 cleanup failure is recovered");
+    check(fail_writes_after == -1,
+          "old-chain FAT0 cleanup failure was injected");
+    fail_writes_after = -1;
+    check_file("BOOT    BIN", sizeof replacement, replacement,
+               "BOOT after FAT0 cleanup retry");
+    rc = fat_write_file("BOOT    BIN", boot, 1700);
+    check(rc == FAT_OK, "restore BOOT after FAT0 cleanup retry");
+
+    /* The following write is FAT1 for the same tail cluster. The successful
+     * FAT0 update must be rolled back and both mirrors must converge on retry. */
+    fail_writes_after = 8;
+    rc = fat_write_file("BOOT    BIN", replacement, sizeof replacement);
+    check(rc == FAT_OK, "old-chain FAT1 cleanup failure is recovered");
+    check(fail_writes_after == -1,
+          "old-chain FAT1 cleanup failure was injected");
+    fail_writes_after = -1;
+    check_file("BOOT    BIN", sizeof replacement, replacement,
+               "BOOT after FAT1 cleanup retry");
+    rc = fat_write_file("BOOT    BIN", boot, 1700);
+    check(rc == FAT_OK, "restore BOOT after FAT1 cleanup retry");
+
+    /* FAT1 may reach the medium and still report an error. fat_set rolls the
+     * touched mirrors back, then the cleanup retry releases the cluster. */
+    report_error_after_write = 8;
+    rc = fat_write_file("BOOT    BIN", replacement, sizeof replacement);
+    check(rc == FAT_OK, "committed FAT1 cleanup error is recovered");
+    check(report_error_after_write == -1,
+          "committed FAT1 cleanup error was injected");
+    report_error_after_write = -1;
+    check_file("BOOT    BIN", sizeof replacement, replacement,
+               "BOOT after committed FAT1 cleanup error");
+    rc = fat_write_file("BOOT    BIN", boot, 1700);
+    check(rc == FAT_OK, "restore BOOT after committed FAT1 cleanup error");
+    check_file("BOOT    BIN", 1700, boot,
+               "BOOT restored after cleanup recovery tests");
+
     /* Consuming an end marker must create a new one in the following slot. */
     rc = seed_stale_after_end(0);
     check(rc == 0, "seed stale same-sector directory entry");

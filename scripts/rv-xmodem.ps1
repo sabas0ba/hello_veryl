@@ -9,6 +9,8 @@ param(
     [string]$Port = 'COM4',
     [int]$BaudRate = 115200,
     [int]$ResultTimeoutSeconds = 60,
+    # Drop SOH only on the first attempt for this block, then require NAK.
+    [int]$DropSohOnceAtBlock = 0,
     [switch]$SkipReceiver
 )
 Set-StrictMode -Version Latest
@@ -98,7 +100,8 @@ function Send-MonitorImage(
 function Send-XmodemBlock(
     [System.IO.Ports.SerialPort]$Serial,
     [int]$Number,
-    [byte[]]$Data
+    [byte[]]$Data,
+    [switch]$DropSohOnce
 ) {
     [byte[]]$packet = New-Object byte[] (3 + $BlockSize + 2)
     $packet[0] = $SOH
@@ -110,8 +113,21 @@ function Send-XmodemBlock(
     $packet[4 + $BlockSize] = [byte]($crc -band 0xff)
 
     foreach ($attempt in 1..$MaxRetries) {
-        $Serial.Write($packet, 0, $packet.Length)
+        $injected = $DropSohOnce -and $attempt -eq 1
+        if ($injected) {
+            Write-Output "injecting lost SOH at block $Number"
+            $Serial.Write($packet, 1, $packet.Length - 1)
+        } else {
+            $Serial.Write($packet, 0, $packet.Length)
+        }
         $response = Wait-Byte $Serial @($ACK, $NAK, $CAN) 3 $null
+        if ($injected) {
+            if ($response -ne $NAK) {
+                throw "lost-SOH injection at block $Number did not receive NAK"
+            }
+            Write-Output "  block ${Number}: NAK received, retransmitting"
+            continue
+        }
         if ($response -eq $ACK) {
             return
         }
@@ -131,6 +147,9 @@ if ($file.Length -eq 0 -or $file.Length + 4 -gt $MaxPayload) {
 [Array]::Copy($lengthBytes, 0, $payload, 0, 4)
 [Array]::Copy($file, 0, $payload, 4, $file.Length)
 $blockCount = [int][Math]::Ceiling($payload.Length / [double]$BlockSize)
+if ($DropSohOnceAtBlock -lt 0 -or $DropSohOnceAtBlock -gt $blockCount) {
+    throw "DropSohOnceAtBlock must be between 0 and $blockCount"
+}
 
 $serial = New-Object System.IO.Ports.SerialPort $Port, $BaudRate, 'None', 8, 'One'
 $serial.ReadTimeout = 100
@@ -171,7 +190,8 @@ try {
         $offset = $blockIndex * $BlockSize
         $count = [Math]::Min($BlockSize, $payload.Length - $offset)
         [Array]::Copy($payload, $offset, $block, 0, $count)
-        Send-XmodemBlock $serial ($blockIndex + 1) $block
+        $dropSoh = $blockIndex + 1 -eq $DropSohOnceAtBlock
+        Send-XmodemBlock $serial ($blockIndex + 1) $block -DropSohOnce:$dropSoh
         if ((($blockIndex + 1) % 32) -eq 0 -or $blockIndex + 1 -eq $blockCount) {
             Write-Output ("  blocks {0}/{1}" -f ($blockIndex + 1), $blockCount)
         }

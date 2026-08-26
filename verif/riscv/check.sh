@@ -11,3 +11,6 @@ bash verif/riscv/render_check.sh 3
 
 echo "-- FAT32 リーダ"
 bash verif/riscv/fat32_check.sh
+
+echo "-- XMODEM receiver"
+bash verif/riscv/xmodem_check.sh
