@@ -733,6 +733,8 @@ PSRAM INIT=1 MEMTEST=PASS ERR=0000 K=00000 RD=00000000
 IMG OK
 ```
 
+LCD上でも生成画像が正常に表示されることを確認した．
+
 ### 第一段ローダ `software/tfboot.c`
 
 `BOOT.BIN` を PSRAM の 0x1000_0000 へ読み込んでそこへ分岐する．
