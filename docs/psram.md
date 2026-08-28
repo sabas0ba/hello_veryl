@@ -479,6 +479,19 @@ i_clk（27 MHz）から clk_mem（rPLL 54 MHz）駆動へ変更し **CK 13.5 MHz
 1.8 µs < tCSM）．STA は clk_mem Fmax 106 MHz > 54 MHz（nextpnr --freq 27 の
 一律評価だが実測 Fmax で確認）
 
+**`Top` の共通サブシステム化後の回帰確認（2026-08-29）**:
+`build/top.fs` を Tang Nano 9K（IDCODE `0x100481b`）の SRAM へ書き込み，
+COM4（115200 bps）で次を確認した．
+
+```
+PSRAM INIT=1 MEMTEST=PASS ERR=0000 K=00000 RD=00000000
+IMG OK
+```
+
+初期化・IR0 照合・1024 語 memtest・TF カードから PSRAM への画像ロードは
+共通化前と同じく成功し，UART エコーも正常だった．LCD の表示内容と
+周波数確認 LED の周期・PLL lock 表示は目視確認項目として残す．
+
 #### apicula ODDR 実挙動の調査（実験 w 系，2026-07-30）
 
 DDR phy 復帰に向け，IOLOGIC の bitstream 実挙動を fuse 解析と
