@@ -55,6 +55,15 @@ flowchart LR
     PLL --> PHY
 ```
 
+`src/psram/subsystem.veryl` は rPLL・CDC ブリッジ・コントローラ・SDR phy・
+内蔵パッド配線を `PsramSubsystem` としてまとめる．`Top` と `TopRv` はいずれも
+このモジュールをインスタンス化する．機能インターフェースは AXI4-Lite と
+初期化状態に限定し，内部クロックは診断用途にだけ公開する．
+`Top` 固有の 3 マスタアービタと起動時 memtest はサブシステム外に置くため，
+memtest > 画像ローダ > スキャンアウトの優先順位は利用側で決定する．
+内部 `clk_mem` の出力は `Top` の周波数確認 LED 専用であり，メモリアクセスには
+使用しない．
+
 ### クロック
 
 | クロック | 周波数 | 生成 | 用途 |
@@ -73,24 +82,26 @@ flowchart LR
   動作確認後の引き上げは性能改善として別パッチで行う
 - 位相シフト量は初期値 90° とし，実機で調整する（L4 残余⑤）
 
-### クロック別タイミング制約（2026-08-23）
+### クロック別タイミング制約（2026-08-23，2026-08-28 更新）
 
 nextpnr の `--freq` は設計中の全クロックに一律の目標周波数を与えるため，
 rPLL 出力 clk_mem（54 MHz）が基準クロック（27 MHz）想定で評価されていた．
 `nextpnr-himbaechel --sdc` で個別に制約できることを実測で確認し，
 `constraints/tangnano9k.sdc` を追加した（`--freq 27` は基準クロック側の
-既定値として残す）．
+既定値として残す）．2026-08-28 に `Top` を `PsramSubsystem` 利用へ統一したため，
+合成後ネット名は `ps_clk_mem` となる．`TopRv` は診断用クロック出力を未使用とし，
+サブシステム内部の階層ネット `psram.clk_mem` を制約する．
 
 ```
-create_clock -name clk_mem -period 18.518 [get_nets clk_mem]
+create_clock -name clk_mem -period 18.518 [get_nets ps_clk_mem]
 ```
 
 適用後のログ（`build/nextpnr.log`）:
 
 ```
-Info: constraining clock net 'clk_mem' to 54.00 MHz
-Info: Max frequency for clock           'clk_mem': 106.06 MHz (PASS at 54.00 MHz)
-Info: Max frequency for clock 'blink_alive.i_clk':  45.63 MHz (PASS at 27.00 MHz)
+Info: constraining clock net 'ps_clk_mem' to 54.00 MHz
+Info: Max frequency for clock        'ps_clk_mem': 99.27 MHz (PASS at 54.00 MHz)
+Info: Max frequency for clock 'blink_alive.i_clk': 43.73 MHz (PASS at 27.00 MHz)
 ```
 
 実測で判明した注意点:

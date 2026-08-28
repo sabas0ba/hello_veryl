@@ -102,6 +102,7 @@ pub module TopRv #(
         i_clk                         ,
         i_rst                         ,
         s_axi          : ps_axi       ,
+        o_clk_mem      : _            ,
         o_init_done    : _ps_init_done,
         o_init_ok      : _ps_init_ok  ,
         o_pll_lock     : _ps_pll_lock ,

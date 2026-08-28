@@ -18,7 +18,7 @@ nextpnr-himbaechel \
 
 # マッチしない create_clock は nextpnr が警告なく無視するため，SDC が
 # clk_mem ネットに実際にマッチしたことをログで確認する (制約の空振り検出)
-if ! grep -qF "constraining clock net 'clk_mem' to 54.00 MHz" build/nextpnr.log; then
+if ! grep -qF "constraining clock net 'ps_clk_mem' to 54.00 MHz" build/nextpnr.log; then
     echo "ERROR: clk_mem の 54 MHz 制約が適用されていない (SDC のネット名を確認)" >&2
     exit 1
 fi
