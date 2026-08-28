@@ -19,9 +19,10 @@ pub module PsramSubsystem (
 
     s_axi: modport $std::axi4_lite_if::<$std::axi4_lite_pkg::<22, 4, 1>>::slave, /// AXI4-Lite スレーブ
 
-    o_init_done: output logic, /// 初期化完了 (mem 域の値をそのまま出す)
-    o_init_ok  : output logic, /// IR0 照合結果
-    o_pll_lock : output logic, /// rPLL lock
+    o_clk_mem  : output 'mem clock, /// clk_mem (54 MHz，診断回路用)
+    o_init_done: output      logic, /// 初期化完了 (mem 域の値をそのまま出す)
+    o_init_ok  : output      logic, /// IR0 照合結果
+    o_pll_lock : output      logic, /// rPLL lock
 
     // 内蔵 PSRAM のマジックポート (Top からそのまま繋ぐ)
     O_psram_ck     : output logic    <2> , /// PSRAM CK (ch1:ch0)
@@ -40,6 +41,10 @@ pub module PsramSubsystem (
         o_clk_mem_p: _clk_mem_p,
         o_lock     : o_pll_lock,
     );
+
+    // 機能上は AXI 端子だけで完結するが，Top の周波数確認 LED を維持するため
+    // 生成クロックを診断用途に限って公開する
+    assign o_clk_mem = clk_mem;
 
     var ps_pad_ck     : 'mem logic              ;
     var ps_pad_ck_n   : 'mem logic              ;

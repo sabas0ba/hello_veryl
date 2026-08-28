@@ -424,8 +424,13 @@ PSRAM サブシステムを含まない段階 6 時点では LUT4 2729（31%）�
 （レジスタファイルのメモリマクロ化による．「レジスタファイルの実装」節）。
 
 `TopRv` も `clk_mem` を持つため，`Top` と同じく `--sdc` でクロック別制約を与える
-（`constraints/tangnano9k_rv.sdc`）．ネット名は `PsramSubsystem` の
-インスタンス名を含む `psram.clk_mem` になる．
+（`constraints/tangnano9k_rv.sdc`）．診断用クロック出力は未使用のため，
+`PsramSubsystem` 内部の `psram.clk_mem` が合成後のネット名になる．
+
+2026-08-29 の共通サブシステム化後の回帰ビルドでは，フォント ROM の BSRAM
+差し替えを含む通常構成で LUT4 6566 / 8640（75%），DFF 2184 / 6480（33%），
+BSRAM 7 / 26 となった．最大周波数は `psram.clk_mem` 83.96 MHz（54 MHz 制約），
+`console.i_clk` 35.61 MHz（27 MHz 制約）で，`build/top_rv.fs` を生成できた．
 
 ## LCD デモ
 
@@ -637,14 +642,17 @@ OK
 18054 = 54（ヘッダ）+ 300（100 px x 3 byte，4 byte 境界）x 60．
 複数クラスタにまたがる読み出しと PSRAM へのバイト書き込みが通っている．
 
-### XMODEM-CRC による `BOOT.BIN` 書き込み
+### XMODEM-CRC による TF カード書き込み
 
-`software/tfwrite.c` は XMODEM-CRC 受信器から PSRAM へペイロードを受け取り，
-`fat_write_file()` でルートディレクトリの `BOOT.BIN` を作成または上書きする．
+`software/tfwrite_impl.inc` は XMODEM-CRC 受信器から PSRAM へペイロードを受け取り，
+`fat_write_file()` でルートディレクトリのファイルを作成または上書きする．
+`software/tfwrite.c` は `BOOT.BIN`，`software/tfimage.c` は `IMAGE.BMP` を出力先として
+コンパイル時に特殊化する．XMODEM 自体でファイル名を送る方式ではない．
 先頭4 byteに実ファイル長をリトルエンディアンで付け，XMODEM の128-byte境界の
 パディングと区別する．ホスト側は `scripts/rv-xmodem.ps1` を使う．
-受信先のPSRAMと実行領域が重ならないよう，`tfwrite` は `ram` 配置だけを許可し，
-`software/build_demo.sh tfwrite psram` はエラーにする．このガードもCIで検証する．
+受信先のPSRAMと実行領域が重ならないよう，両プログラムは `ram` 配置だけを許可する．
+`software/build_demo.sh tfwrite psram` と `software/build_demo.sh tfimage psram` は
+エラーにする．このガードもCIで検証する．
 
 `verif/riscv/xmodem_check.sh` は `software/xmodem.c` を表駆動のホスト側 UART
 モデルと組み合わせ，通常転送，重複ブロック，CRCエラー，部分ブロックの
@@ -674,6 +682,58 @@ WRITE 1648 byte
 WROTE BOOT.BIN
 R00000000
 ```
+
+#### `IMAGE.BMP` 差し替え実機試験（2026-08-29）
+
+色領域を識別しやすい変換元PNGを `assets/lcd-validation-spacecraft.png` に保存し，
+既存の変換器で100 x 60，24 bppのBMPを生成した．
+
+```powershell
+.\scripts\fpga-run.ps1 `
+    /opt/oss-cad-suite/py3bin/python3 scripts/gen_demo_bmp.py `
+    --from assets/lcd-validation-spacecraft.png -o build/IMAGE.BMP
+.\scripts\fpga-run.ps1 bash software/build_demo.sh tfimage ram
+.\scripts\rv-xmodem.ps1 `
+    -Receiver build\software\tfimage.bin `
+    -Bin build\IMAGE.BMP -Port COM4 `
+    -DropSohOnceAtBlock 2
+```
+
+18,054-byteのBMPを142ブロックで転送した．ブロック2の初回送信で `SOH` を落とし，
+受信側の `NAK` と再送を確認した後，`IMAGE.BMP` の再オープンとサイズ照合まで成功した．
+
+```
+TFIMAGE
+XMODEM
+sending 18054 byte as 142 XMODEM blocks
+injecting lost SOH at block 2
+  block 2: NAK received, retransmitting
+  blocks 142/142
+WRITE 18054 byte
+WROTE IMAGE.BMP
+R00000000
+```
+
+別プログラムの `software/tfcat.c` でTFカードを再マウントし，ディレクトリエントリの
+サイズとBMPヘッダを読み戻した．クラスタ番号はカードの割当て状態に依存する．
+
+```
+TFCAT
+MOUNT OK
+FOUND clus=00000014 size=18054
+HEAD: 42 4d 86 46 00 00 00 00 00 00 36 00 00 00 28 00 00 00 64 00 00 00 3c 00 ...
+R00000000
+```
+
+最後に通常の `Top` へ戻し，PSRAM初期化・memtestとTFカードからの画像ロード成功を
+UARTで確認した．
+
+```
+PSRAM INIT=1 MEMTEST=PASS ERR=0000 K=00000 RD=00000000
+IMG OK
+```
+
+LCD上でも生成画像が正常に表示されることを確認した．
 
 ### 第一段ローダ `software/tfboot.c`
 
@@ -726,7 +786,7 @@ R00000000
 | 項目 | 内容 | 対応 |
 | --- | --- | --- |
 | LUT 予算 | 既存 Top が77%，TopRv が通常75%・モニタ83%．単純合算では同居できない（実測値は「TF カードからのブート」節） | FAT32 はソフトウェアで処理し，フォント ROM を合成時に BSRAM 化する |
-| PSRAM サブシステムの重複 | `PsramSubsystem` へ切り出したが，既存 `Top` はまだインライン実装のまま | `Top` 側も `PsramSubsystem` へ寄せる（挙動不変のリファクタ．実機再確認が要る） |
+| PSRAM サブシステムの重複 | `PsramSubsystem` へ切り出したが，既存 `Top` はインライン実装だった | **解決（2026-08-29）**: `Top` / `TopRv` とも `PsramSubsystem` を使用．`Top` で初期化・memtest・画像ロード・UART エコーを実機再確認済み |
 | PSRAM 帯域 | 2.25 MB/s．PSRAM 上のコード実行は 0.5 MIPS 相当 | ホットパスは BSRAM 常駐とする．線形バースト実装と BSRAM 命令キャッシュは段階 7 以降で評価 |
 | Zifencei（`fence.i`） | 対象外のため rv32ui の `fence_i` を除外している | 自己書き換えコードを扱う段階になったら再検討 |
 | 非整列アクセス | 仕様が許す 2 つの挙動のうち例外送出を選んだ（`ma_data` を除外，`*-misaligned` がオラクル） | 対応済み（段階 9） |

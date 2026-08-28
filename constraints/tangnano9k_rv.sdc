@@ -4,8 +4,8 @@
 # (54 MHz) が基準クロック (27 MHz) 想定で評価されてしまう．
 # ここでは clk_mem のみを個別に制約する (docs/psram.md「クロック別タイミング制約」)．
 #
-# 注意: マッチ対象は合成後ネットリストのネット名．TopRv では PSRAM 一式を
-# PsramSubsystem インスタンス psram に閉じ込めているため階層名になる．
+# 注意: マッチ対象は合成後ネットリストのネット名．TopRv では clk_mem が
+# PsramSubsystem の内部ネットなので階層名になる．
 # マッチしない create_clock は警告なく無視されるため，
 # 適用されたことは scripts/synth_pnr_rv.sh のログ検査で担保する．
 

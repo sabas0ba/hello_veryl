@@ -55,6 +55,15 @@ flowchart LR
     PLL --> PHY
 ```
 
+`src/psram/subsystem.veryl` は rPLL・CDC ブリッジ・コントローラ・SDR phy・
+内蔵パッド配線を `PsramSubsystem` としてまとめる．`Top` と `TopRv` はいずれも
+このモジュールをインスタンス化する．機能インターフェースは AXI4-Lite と
+初期化状態に限定し，内部クロックは診断用途にだけ公開する．
+`Top` 固有の 3 マスタアービタと起動時 memtest はサブシステム外に置くため，
+memtest > 画像ローダ > スキャンアウトの優先順位は利用側で決定する．
+内部 `clk_mem` の出力は `Top` の周波数確認 LED 専用であり，メモリアクセスには
+使用しない．
+
 ### クロック
 
 | クロック | 周波数 | 生成 | 用途 |
@@ -73,24 +82,26 @@ flowchart LR
   動作確認後の引き上げは性能改善として別パッチで行う
 - 位相シフト量は初期値 90° とし，実機で調整する（L4 残余⑤）
 
-### クロック別タイミング制約（2026-08-23）
+### クロック別タイミング制約（2026-08-23，2026-08-28 更新）
 
 nextpnr の `--freq` は設計中の全クロックに一律の目標周波数を与えるため，
 rPLL 出力 clk_mem（54 MHz）が基準クロック（27 MHz）想定で評価されていた．
 `nextpnr-himbaechel --sdc` で個別に制約できることを実測で確認し，
 `constraints/tangnano9k.sdc` を追加した（`--freq 27` は基準クロック側の
-既定値として残す）．
+既定値として残す）．2026-08-28 に `Top` を `PsramSubsystem` 利用へ統一したため，
+合成後ネット名は `ps_clk_mem` となる．`TopRv` は診断用クロック出力を未使用とし，
+サブシステム内部の階層ネット `psram.clk_mem` を制約する．
 
 ```
-create_clock -name clk_mem -period 18.518 [get_nets clk_mem]
+create_clock -name clk_mem -period 18.518 [get_nets ps_clk_mem]
 ```
 
 適用後のログ（`build/nextpnr.log`）:
 
 ```
-Info: constraining clock net 'clk_mem' to 54.00 MHz
-Info: Max frequency for clock           'clk_mem': 106.06 MHz (PASS at 54.00 MHz)
-Info: Max frequency for clock 'blink_alive.i_clk':  45.63 MHz (PASS at 27.00 MHz)
+Info: constraining clock net 'ps_clk_mem' to 54.00 MHz
+Info: Max frequency for clock        'ps_clk_mem': 99.27 MHz (PASS at 54.00 MHz)
+Info: Max frequency for clock 'blink_alive.i_clk': 43.73 MHz (PASS at 27.00 MHz)
 ```
 
 実測で判明した注意点:
@@ -467,6 +478,20 @@ i_clk（27 MHz）から clk_mem（rPLL 54 MHz）駆動へ変更し **CK 13.5 MHz
 交差（27↔54 MHz）もこの構成で実機検証された．`TimeoutCyc=24`（74 ns/CK で
 1.8 µs < tCSM）．STA は clk_mem Fmax 106 MHz > 54 MHz（nextpnr --freq 27 の
 一律評価だが実測 Fmax で確認）
+
+**`Top` の共通サブシステム化後の回帰確認（2026-08-29）**:
+`build/top.fs` を Tang Nano 9K（IDCODE `0x100481b`）の SRAM へ書き込み，
+COM4（115200 bps）で次を確認した．
+
+```
+PSRAM INIT=1 MEMTEST=PASS ERR=0000 K=00000 RD=00000000
+IMG OK
+```
+
+初期化・IR0 照合・1024 語 memtest・TF カードから PSRAM への画像ロードは
+共通化前と同じく成功し，UART エコーも正常だった．2026-08-29にはXMODEMで
+差し替えた画像がLCDへ正常表示されることも確認した．周波数確認 LED の周期と
+PLL lock 表示は目視確認項目として残す．
 
 #### apicula ODDR 実挙動の調査（実験 w 系，2026-07-30）
 

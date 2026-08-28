@@ -64,7 +64,7 @@ LED 割当（すべて active-low）:
 | PsramAxiArb2 | src/psram/axi_arb2.veryl | AXI4-Lite 2 マスタ固定優先度アービタ（2 段で 3 マスタを合成） |
 | AxiLiteMemModel | src/psram/axi_mem_model.veryl | L1 用 AXI4-Lite メモリモデル（合成対象外） |
 | RvSoc / RvCore / RvDecoder / RvAlu / RvRegFile / RvMem / RvRom / RvMmio / RvAxiMaster | src/riscv/ | RV32I ソフトコアと SoC（[riscv.md](riscv.md)） |
-| PsramSubsystem | src/psram/subsystem.veryl | PSRAM 一式（rPLL / SDR phy / ctrl / AXI ブリッジ / 内蔵パッド）をまとめたもの |
+| PsramSubsystem | src/psram/subsystem.veryl | PSRAM 一式（rPLL / SDR phy / ctrl / AXI ブリッジ / 内蔵パッド）をまとめ，Top / TopRv で共有するもの |
 | TopRv | src/top_rv.veryl | ソフトコア単体のブリングアップ用トップ（別ビットストリーム，[riscv.md](riscv.md)） |
 | stream_if | src/common/stream.veryl | valid/ready ハンドシェイクの汎用 stream interface |
 | Uart | src/uart/uart.veryl | 115200bps 8N1．RX は 2FF 同期 + 中央サンプリング，ノンブロッキング供給 |
