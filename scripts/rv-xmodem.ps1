@@ -1,7 +1,7 @@
-# Start tfwrite from the UART boot monitor and write BOOT.BIN via XMODEM-CRC.
+# Start a TF writer from the UART boot monitor and send a file via XMODEM-CRC.
 #
 # The first four payload bytes contain the little-endian file size. This
-# tfwrite-specific framing distinguishes the file tail from XMODEM padding.
+# application framing distinguishes the file tail from XMODEM padding.
 #Requires -Version 5.1
 param(
     [string]$Bin = 'build\software\tfdump.bin',
@@ -37,7 +37,7 @@ if (-not (Test-Path -LiteralPath $Bin)) {
     throw "$Bin does not exist"
 }
 if (-not $SkipReceiver -and -not (Test-Path -LiteralPath $Receiver)) {
-    throw "$Receiver does not exist (build it with software/build_demo.sh tfwrite ram)"
+    throw "$Receiver does not exist (build a TF writer with software/build_demo.sh <name> ram)"
 }
 
 function Get-Crc16([byte[]]$Data) {
@@ -220,12 +220,12 @@ try {
         Write-Output $result.Trim()
     }
     if ($prompt -ne [int][char]'>') {
-        throw 'boot monitor prompt not received after tfwrite'
+        throw 'boot monitor prompt not received after TF writer'
     }
     if ($result -notmatch 'R([0-9A-Fa-f]{8})' -or $Matches[1] -ne '00000000') {
-        throw "tfwrite failed: $result"
+        throw "TF writer failed: $result"
     }
-    Write-Output 'BOOT.BIN write completed'
+    Write-Output 'XMODEM file write completed'
 }
 catch {
     if ($transferStarted -and $serial.IsOpen) {
